@@ -832,8 +832,14 @@ fn asks_the_running_owner_to_confirm() {
     let read = env.human(&["read", reference], "");
     assert_eq!(read.stdout, format!("{VALUE}\n"), "{}", read.stderr);
     let reason = reasons.lock().unwrap().last().cloned().unwrap();
+    // VaultOS's own programs are undumpable on Linux, so their path cannot be read there.
+    let to = if cfg!(target_os = "linux") {
+        "to a program (pid "
+    } else {
+        "to /"
+    };
     assert!(
-        reason.starts_with("give 1 secret from Example App to /"),
+        reason.starts_with(&format!("give 1 secret from Example App {to}")),
         "{reason}"
     );
     assert!(reason.ends_with("for “read”"), "{reason}");
