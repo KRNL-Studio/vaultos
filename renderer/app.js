@@ -1456,7 +1456,7 @@ async function renderAgents() {
     const allScopes = await window.vault.allScopes();
     if (revision !== renderVersion) return;
     for (const a of list) {
-        const card = el(`<div class="secret card">\n      <div class="head"><span class="key">${esc(a.name)}</span><span class="pname">${a.revoked ? "revoked" : "active"}</span></div>\n      <div class="badges">${a.scopes.map(x => `<span class="badge ${x === "reveal" ? "exp-amber" : "perm"}">${esc(x)}</span>`).join("")}${a.allProjects ? `<span class="badge allaccess">all projects</span>` : ""}${a.anyRoot ? `<span class="badge allaccess">any folder</span>` : ""}</div>\n      <div class="note"><span class="mono">${esc(a.ref)}</span> · enrolled ${esc((a.enrolledAt || "").slice(0, 10))}${a.lastSeenAt ? ` · last seen ${esc(a.lastSeenAt.slice(0, 16).replace("T", " "))}` : " · never used"}</div>\n      <div class="val" data-tok style="display:none"></div>\n      <div class="actions"></div></div>`);
+        const card = el(`<div class="secret card">\n      <div class="head"><span class="key">${esc(a.name)}</span><span class="pname">${a.revoked ? "revoked" : "active"}</span></div>\n      <div class="badges">${a.scopes.map(x => `<span class="badge ${x === "reveal" ? "exp-amber" : "perm"}">${esc(x)}</span>`).join("")}${a.allProjects ? `<span class="badge allaccess">all projects</span>` : ""}${a.anyRoot ? `<span class="badge allaccess">any folder</span>` : ""}</div>\n      ${(a.runCommands || []).length ? `<div class="note">Runs with secrets: ${a.runCommands.map(c => `<span class="mono">${esc(c)}</span>`).join(", ")}</div>` : ""}<div class="note"><span class="mono">${esc(a.ref)}</span> · enrolled ${esc((a.enrolledAt || "").slice(0, 10))}${a.lastSeenAt ? ` · last seen ${esc(a.lastSeenAt.slice(0, 16).replace("T", " "))}` : " · never used"}</div>\n      <div class="val" data-tok style="display:none"></div>\n      <div class="actions"></div></div>`);
         const actions = card.querySelector(".actions");
         const tok = card.querySelector("[data-tok]");
         const revealScope = el(`<button class="iconbtn">${a.scopes.includes("reveal") ? "Revoke reveal" : "Grant reveal"}</button>`);
@@ -1503,7 +1503,22 @@ async function renderAgents() {
             };
             if (revision !== renderVersion) return;
         };
-        [ accessBtn, revealScope, reissue, revoke ].forEach(b => actions.appendChild(b));
+        const runBtn = el('<button class="iconbtn" title="Commands it may run with a project\'s values (run scope)">Commands…</button>');
+        runBtn.onclick = () => {
+            runBtn.disabled = true;
+            const box = fieldBlock("Commands it may run with a project's values, one per line: a program and optionally its first arguments");
+            const list = el(`<textarea rows="4" class="mono" placeholder="npm test&#10;cargo test"></textarea>`);
+            list.value = (a.runCommands || []).join("\n");
+            box.appendChild(list);
+            const saveRun = el('<button class="btn ghost sm">Save commands</button>');
+            card.appendChild(box);
+            card.appendChild(saveRun);
+            saveRun.onclick = async () => {
+                await human("setAgentRunCommands", a.id, list.value.split("\n").map(c => c.trim()).filter(Boolean));
+                render();
+            };
+        };
+        [ accessBtn, runBtn, revealScope, reissue, revoke ].forEach(b => actions.appendChild(b));
         scroll.appendChild(card);
     }
     if (!list.length) scroll.appendChild(el(`<div class="empty"><div class="big">No agents</div><p>Nothing can write to this vault yet.</p></div>`));
@@ -1523,7 +1538,7 @@ async function renderAgents() {
         scopeWrap.appendChild(b);
     }
     enrol.appendChild(scopeWrap);
-    enrol.appendChild(el(`<div class="note" style="margin:-4px 2px 12px">reveal is off by default. An agent without it can still write a working .env with inject, it just never sees a value.</div>`));
+    enrol.appendChild(el(`<div class="note" style="margin:-4px 2px 12px">reveal is off by default. An agent without it can still write a working .env with inject, or start a command you allow with run, without seeing a value.</div>`));
     const access = await accessPicker(enrol);
     if (revision !== renderVersion) return;
     const out = el(`<div class="val" style="display:none"></div>`);

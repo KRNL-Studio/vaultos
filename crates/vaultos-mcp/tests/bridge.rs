@@ -137,7 +137,7 @@ fn the_bridge_speaks_for_the_enrolled_agent() {
             "human",
         )
         .unwrap();
-    let scopes = vec!["read".to_owned(), "inject".to_owned()];
+    let scopes = ["read", "inject", "run"].map(str::to_owned);
     let issued = store
         .enrol_agent(
             "Bridge Agent",
@@ -146,6 +146,9 @@ fn the_bridge_speaks_for_the_enrolled_agent() {
             &[work.to_string_lossy().into_owned()],
             Wildcards::default(),
         )
+        .unwrap();
+    store
+        .set_agent_run_commands(&issued.id, &["/bin/sh  -c".to_owned()])
         .unwrap();
     store.lock();
     drop(store);
@@ -211,7 +214,33 @@ fn the_bridge_speaks_for_the_enrolled_agent() {
         "HUMAN_KEY='synthetic-human-value'\n"
     );
 
+    // An allowed command gets the values; the agent sees them masked.
+    let ran = mcp.ok(
+        "run_with_secrets",
+        json!({
+            "project": "Example App",
+            "command": ["/bin/sh", "-c", r#"printf '%s|%s' "$HUMAN_KEY" "${#HUMAN_KEY}"; exit 4"#],
+            "cwd": work,
+        }),
+    );
+    assert_eq!(ran["stdout"], "<concealed by VaultOS>|21", "{ran}");
+    assert_eq!(
+        (&ran["exitCode"], &ran["timedOut"]),
+        (&json!(4), &json!(false))
+    );
+    assert!(!ran.to_string().contains("synthetic-human-value"));
+
     let refusals = [
+        (
+            "run_with_secrets",
+            json!({ "project": "Example App", "command": ["/bin/echo", "x"], "cwd": work }),
+            "Error: This command is not one the human allowed this agent to run with secrets",
+        ),
+        (
+            "run_with_secrets",
+            json!({ "project": "Example App", "command": ["/bin/sh", "-c", "true"], "cwd": "/" }),
+            "Error: This path is outside the folders approved for this agent",
+        ),
         (
             "list_secrets",
             json!({ "project": "Hidden Project" }),

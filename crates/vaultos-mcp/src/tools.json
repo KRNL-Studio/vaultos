@@ -181,6 +181,47 @@
     }
   },
   {
+    "name": "run_with_secrets",
+    "description": "Run a command with an approved project's values in its environment, without writing a file or seeing a value. Requires run scope, and the command must start with one the human allowed for this agent (see whoami runCommands). Runs in cwd, inside an approved folder, with no stdin; the values are masked in the returned stdout and stderr. Keys awaiting approval are left out and listed in heldForApproval. Do not try to print values to get around masking.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The program and its arguments, e.g. [\"npm\", \"test\"]. Not run through a shell."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Absolute folder to run in, inside an approved folder."
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional subset of key names to give the command. Omit to give all approved keys."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600,
+          "description": "Stop the command after this long (default 120)."
+        }
+      },
+      "required": [
+        "project",
+        "command",
+        "cwd"
+      ]
+    }
+  },
+  {
     "name": "reveal_secret",
     "description": "Return one raw secret value to the client/model from an approved project. Requires reveal scope, off by default. Prefer inject_secrets when the application needs a working file. Request human reveal access only when the user's task requires the raw value; do not escalate merely because injection was denied.",
     "inputSchema": {

@@ -478,6 +478,12 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
             store(app, move |s| s.set_agent_access(&id, &projects, &roots, w)).await?;
             Ok(json!({ "ok": true }))
         }
+        "setAgentRunCommands" => {
+            app.gate("change the commands an agent may run").await?;
+            let (id, commands) = (a.str(0, "agent")?, a.strings(1, "commands")?);
+            store(app, move |s| s.set_agent_run_commands(&id, &commands)).await?;
+            Ok(json!({ "ok": true }))
+        }
         "chooseFolder" => ui::choose_folder(handle).await,
         "allScopes" => Ok(json!(ALL_SCOPES)),
         "delegate" => {

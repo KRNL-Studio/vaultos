@@ -173,6 +173,20 @@ fn admin_commands_work_on_a_vault_this_process_owns() {
         .json();
     assert_eq!(granted["scopes"], json!(["read"]));
     assert_eq!(granted["roots"], json!([work]), "unmentioned grants stay");
+    let commands = env
+        .admin(&[
+            "agents",
+            "grant",
+            "cli agent",
+            "--run-command",
+            "npm  test",
+            "--run-command",
+            "cargo test",
+        ])
+        .json();
+    assert_eq!(commands["runCommands"], json!(["npm test", "cargo test"]));
+    let cleared = env.admin(&["agents", "grant", "cli agent", "--no-run-commands"]);
+    assert_eq!(cleared.json()["runCommands"], json!([]));
     let reissued = env
         .admin(&["agents", "enroll", "CLI Agent", "--token-file", &token_file])
         .json();
@@ -290,8 +304,8 @@ fn the_daemon_serves_the_agent_cli() {
     let issued = {
         let mut store = Store::new(&env.data).unwrap();
         store.unlock(&SecretString::new(PW), None).unwrap();
-        let scopes = ["read", "inject", "add"].map(str::to_owned);
-        store
+        let scopes = ["read", "inject", "add", "run"].map(str::to_owned);
+        let issued = store
             .enrol_agent(
                 "Shell Agent",
                 Some(&scopes),
@@ -299,7 +313,11 @@ fn the_daemon_serves_the_agent_cli() {
                 &[env.work.to_string_lossy().into_owned()],
                 Wildcards::default(),
             )
-            .unwrap()
+            .unwrap();
+        store
+            .set_agent_run_commands(&issued.id, &["/bin/sh -c".to_owned()])
+            .unwrap();
+        issued
     };
     let token = issued.token.expose().to_owned();
     let cfg = Config {
@@ -396,6 +414,34 @@ fn the_daemon_serves_the_agent_cli() {
     assert_eq!(
         env.agent(&["pending"], "", &token).json()[0]["key"],
         "AGENT_KEY"
+    );
+    let ran = env.agent(
+        &[
+            "run",
+            "Example App",
+            "--",
+            "/bin/sh",
+            "-c",
+            r#"printf %s "$HUMAN_KEY"; exit 5"#,
+        ],
+        "",
+        &token,
+    );
+    assert_eq!(
+        (ran.code, ran.stdout.as_str()),
+        (5, "<concealed by VaultOS>")
+    );
+    assert!(
+        ran.stderr.contains("AGENT_KEY"),
+        "held keys are named: {}",
+        ran.stderr
+    );
+    let refused = env.agent(&["run", "Example App", "--", "/bin/echo", "x"], "", &token);
+    assert_eq!(refused.code, 1);
+    assert!(
+        refused.stderr.contains("not one the human allowed"),
+        "{}",
+        refused.stderr
     );
     let found = env.agent(&["search", "human"], "", &token).json();
     assert_eq!(found.as_array().unwrap().len(), 1);

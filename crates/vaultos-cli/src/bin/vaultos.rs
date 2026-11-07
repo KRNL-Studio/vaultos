@@ -259,6 +259,13 @@ enum AgentsCommand {
         /// Remove every folder grant
         #[arg(long)]
         no_roots: bool,
+        /// With the run scope: a command it may run with secrets, a program and optionally
+        /// its first arguments ("npm test"). Repeat it; the list replaces the current one
+        #[arg(long = "run-command", value_name = "COMMAND")]
+        run_commands: Vec<String>,
+        /// Remove every allowed command
+        #[arg(long, conflicts_with = "run_commands")]
+        no_run_commands: bool,
     },
     Revoke {
         name: String,
@@ -954,14 +961,17 @@ fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
             access,
             no_projects,
             no_roots,
+            run_commands,
+            no_run_commands,
         } => {
             let a = agent(store, &name)?;
             let scopes = scopes.map(|s| list(&[s]));
             let (changed, projects, roots, wildcards) =
                 access_change(&access, no_projects, no_roots, Some(&a))?;
-            if !changed && scopes.is_none() {
+            let commands = (no_run_commands || !run_commands.is_empty()).then_some(run_commands);
+            if !changed && scopes.is_none() && commands.is_none() {
                 return Err(Fail::usage(
-                    "Specify --scopes, --projects/--all-projects/--no-projects or --roots/--any-root/--no-roots",
+                    "Specify --scopes, --projects/--all-projects/--no-projects, --roots/--any-root/--no-roots or --run-command/--no-run-commands",
                 ));
             }
             store.batch(|s| {
@@ -970,6 +980,9 @@ fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
                 }
                 if let Some(scopes) = &scopes {
                     s.set_agent_scopes(&a.id, scopes)?;
+                }
+                if let Some(commands) = &commands {
+                    s.set_agent_run_commands(&a.id, commands)?;
                 }
                 Ok(())
             })?;

@@ -1,5 +1,6 @@
 //! `vaultos-agent`: VaultOS for enrolled agents. Every command
-//! is one request to `vaultosd` with this agent's token; values are never printed.
+//! is one request to `vaultosd` with this agent's token; values are never printed. `run`
+//! gives an allowed command a project's values and masks them in its output.
 
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -84,6 +85,17 @@ enum Command {
     Sync,
     /// Agent-created keys awaiting human approval
     Pending,
+    /// Run an allowed command here with a project's values in its environment, masked in
+    /// its output (run scope)
+    Run {
+        project: String,
+        /// Only these keys (comma-separated)
+        #[arg(long, value_name = "A,B")]
+        keys: Option<String>,
+        /// The command and its arguments, after --
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
 }
 
 /// `path.resolve`: relative to the working directory, with `.` and `..` resolved.
@@ -201,6 +213,57 @@ fn run(command: Command, client: &Client) -> Result<()> {
             }
             emit(&client.request("POST", "/import", Some(&body))?)
         }
+        Command::Run {
+            project,
+            keys,
+            command,
+        } => {
+            use vaultos_client::run::{stream, Program};
+            let keys = keys.map(|k| {
+                k.split(',')
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            });
+            let body = json!({
+                "project": project,
+                "command": command,
+                "cwd": absolute(std::path::Path::new("."))?,
+                "keys": keys,
+            });
+            let r = client.request("POST", "/run/env", Some(&body))?;
+            if let Some(held) = r["heldForApproval"].as_array().filter(|h| !h.is_empty()) {
+                let names: Vec<&str> = held.iter().filter_map(Value::as_str).collect();
+                eprintln!("vaultos-agent: left out keys awaiting approval: {}", names.join(", "));
+            }
+            let env = r["values"]
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .map(|p| {
+                            let value = p["value"].as_str().unwrap_or_default().to_owned();
+                            (
+                                p["key"].as_str().unwrap_or_default().to_owned(),
+                                zeroize::Zeroizing::new(value),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let program = Program {
+                argv: command.into_iter().map(Into::into).collect(),
+                cwd: r["cwd"].as_str().map(Into::into),
+                env,
+                plain: Vec::new(),
+            };
+            match stream(&program, true)
+                .map_err(|e| Fail::new(format!("cannot run the command: {e}")))?
+            {
+                0 => Ok(()),
+                c => Err(Fail::quiet(u8::try_from(c).unwrap_or(1))),
+            }
+        }
         Command::Sync => match client.request("POST", "/sync", None) {
             Ok(r) => emit(&r),
             Err(e) if e.status == Some(404) => Err(Fail::new(
@@ -242,7 +305,9 @@ fn main() -> ExitCode {
     match run(cli.command, &Client::from_env(data_dir)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(f) => {
-            eprintln!("vaultos-agent: {}", f.message);
+            if !f.message.is_empty() {
+                eprintln!("vaultos-agent: {}", f.message);
+            }
             ExitCode::from(f.code)
         }
     }

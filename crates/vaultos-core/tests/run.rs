@@ -196,3 +196,37 @@ fn environment_holds_unapproved_and_archived_keys() {
     let last = entries.iter().rev().find(|e| e.action == "run").unwrap();
     assert_eq!(last.detail, "Example App (1 keys): npm");
 }
+
+#[test]
+fn allowed_commands_match_word_for_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = store(dir.path());
+    let scopes = ["read".to_owned(), "run".to_owned()];
+    let issued = st
+        .enrol_agent(
+            "Runner",
+            Some(&scopes),
+            &[],
+            &[],
+            vaultos_core::agents::Wildcards::default(),
+        )
+        .unwrap();
+    let given = ["npm test", "  cargo   test ", "npm test"].map(str::to_owned);
+    st.set_agent_run_commands(&issued.id, &given).unwrap();
+    let a = st.find_agent("Runner").unwrap().unwrap();
+    assert_eq!(a.run_commands, ["npm test", "cargo test"]);
+    let argv = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(a.run_entry(&argv("npm test --watch")), Some("npm test"));
+    assert_eq!(a.run_entry(&argv("cargo test")), Some("cargo test"));
+    for refused in ["npm install", "npm", "/usr/bin/npm test", "cargo testx"] {
+        assert_eq!(a.run_entry(&argv(refused)), None, "{refused}");
+    }
+    assert!(st
+        .set_agent_run_commands(&issued.id, &["a\nb".to_owned()])
+        .is_err());
+    assert!(st
+        .set_agent_run_commands(&issued.id, &[" ".to_owned()])
+        .is_err());
+    let many: Vec<String> = (0..51).map(|i| format!("tool{i}")).collect();
+    assert!(st.set_agent_run_commands(&issued.id, &many).is_err());
+}

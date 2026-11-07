@@ -356,6 +356,7 @@ fn route(
                 "roots": agent.roots,
                 "allProjects": agent.all_projects,
                 "anyRoot": agent.any_root,
+                "runCommands": agent.run_commands,
             }))
         }
         ("GET", "/projects") => {
@@ -420,6 +421,7 @@ fn route(
             return to_json(&mine);
         }
         ("POST", "/inject") => return inject(store, &cx, body),
+        ("POST", "/run/env") => return run_env(store, &cx, body),
         ("POST", "/import") => return import(store, &cx, body),
         _ => {}
     }
@@ -453,19 +455,54 @@ fn route(
     Err(Error::NotFound("Not found".into()))
 }
 
-fn inject(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
-    cx.scope("inject")?;
-    let (id, _) = cx.project(store, body.get("project").and_then(Value::as_str))?;
-    let keys: Option<Vec<String>> = match body.get("keys") {
-        None | Some(Value::Null) => None,
-        Some(Value::Array(a)) => Some(
+fn key_list(body: &Map<String, Value>) -> Result<Option<Vec<String>>> {
+    match body.get("keys") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(a)) => Ok(Some(
             a.iter()
                 .map(|k| k.as_str().map(str::to_owned))
                 .collect::<Option<_>>()
                 .ok_or_else(|| invalid("keys must be a list of names"))?,
-        ),
-        Some(_) => return Err(invalid("keys must be a list of names")),
-    };
+        )),
+        Some(_) => Err(invalid("keys must be a list of names")),
+    }
+}
+
+/// The run scope: a project's values for one of the agent's allowed commands, which the
+/// caller (the MCP bridge or `vaultos-agent run`) starts in the given folder with its
+/// output masked. Recorded with the matching allowed command, not the full arguments.
+fn run_env(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
+    cx.scope("run")?;
+    let (id, _) = cx.project(store, body.get("project").and_then(Value::as_str))?;
+    let argv: Vec<String> = body
+        .get("command")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().map(|x| x.as_str().map(str::to_owned)).collect())
+        .filter(|a: &Vec<String>| !a.is_empty() && a.len() <= 256)
+        .ok_or_else(|| invalid("command must be a list: the program, then its arguments"))?;
+    let entry = cx.agent.run_entry(&argv).ok_or_else(|| {
+        deny("This command is not one the human allowed this agent to run with secrets")
+    })?;
+    let dir = body
+        .get("cwd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("cwd must be an absolute folder path"))?;
+    let cwd = cx.agent.work_dir(dir, store.data_dir())?;
+    let keys = key_list(body)?;
+    let purpose = format!("{entry} in {}", cwd.display());
+    let env = store.env_values(&id, keys.as_deref(), &purpose, &cx.actor)?;
+    Ok(json!({
+        "project": env.project,
+        "cwd": cwd,
+        "values": env.pairs.iter().map(|(k, v)| json!({ "key": k, "value": v.as_str() })).collect::<Vec<_>>(),
+        "heldForApproval": env.held_for_approval,
+    }))
+}
+
+fn inject(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
+    cx.scope("inject")?;
+    let (id, _) = cx.project(store, body.get("project").and_then(Value::as_str))?;
+    let keys = key_list(body)?;
     let merge = match body.get("merge") {
         None => true,
         Some(Value::Bool(b)) => *b,

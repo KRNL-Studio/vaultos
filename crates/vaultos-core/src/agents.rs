@@ -11,15 +11,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
-pub const ALL_SCOPES: [&str; 7] = [
+pub const ALL_SCOPES: [&str; 8] = [
     "read",
     "add",
     "edit:own",
     "edit:delegated",
     "delete:own",
     "inject",
+    "run",
     "reveal",
 ];
+
+/// Most commands one agent may run with secrets, and the longest one.
+pub const MAX_RUN_COMMANDS: usize = 50;
+const MAX_RUN_COMMAND_LEN: usize = 200;
 pub const DEFAULT_SCOPES: [&str; 2] = ["read", "inject"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -44,11 +49,28 @@ pub struct Agent {
     pub last_seen_at: Option<String>,
     #[serde(default)]
     pub revoked_at: Option<String>,
+    /// With the run scope: the commands it may run with a project's values, each a program
+    /// and optionally its first arguments ("npm test").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_commands: Vec<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
 impl Agent {
+    /// The allowed command `argv` starts with, word for word, if any.
+    pub fn run_entry(&self, argv: &[String]) -> Option<&str> {
+        self.run_commands
+            .iter()
+            .find(|entry| {
+                let words: Vec<&str> = entry.split_whitespace().collect();
+                !words.is_empty()
+                    && argv.len() >= words.len()
+                    && words.iter().zip(argv).all(|(w, a)| *w == a)
+            })
+            .map(String::as_str)
+    }
+
     pub fn reference(&self) -> String {
         agent_ref(&self.id)
     }
@@ -79,6 +101,7 @@ pub struct Summary {
     pub roots: Vec<String>,
     pub all_projects: bool,
     pub any_root: bool,
+    pub run_commands: Vec<String>,
 }
 
 /// A new or reissued token. It is shown once, to be written to a private file.
@@ -125,6 +148,28 @@ fn check_scopes(scopes: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+fn check_commands(commands: &[String]) -> Result<Vec<String>> {
+    if commands.len() > MAX_RUN_COMMANDS {
+        return Err(Error::invalid(format!(
+            "At most {MAX_RUN_COMMANDS} commands"
+        )));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for c in commands {
+        let words = c.split_whitespace().collect::<Vec<_>>().join(" ");
+        if words.is_empty() || words.len() > MAX_RUN_COMMAND_LEN || c.chars().any(char::is_control)
+        {
+            return Err(Error::invalid(
+                "Each command is a program and optionally its first arguments, on one line",
+            ));
+        }
+        if !out.contains(&words) {
+            out.push(words);
+        }
+    }
+    Ok(out)
+}
+
 fn not_found() -> Error {
     Error::not_found("Agent not found")
 }
@@ -165,6 +210,7 @@ impl Store {
                 roots: a.roots,
                 all_projects: a.all_projects,
                 any_root: a.any_root,
+                run_commands: a.run_commands,
             })
             .collect())
     }
@@ -256,6 +302,7 @@ impl Store {
             enrolled_at: now_iso(),
             last_seen_at: None,
             revoked_at: None,
+            run_commands: Vec::new(),
             extra: Map::new(),
         };
         let issued = Issued {
@@ -296,6 +343,12 @@ impl Store {
     pub fn set_agent_scopes(&mut self, id: &str, scopes: &[String]) -> Result<()> {
         let scopes = check_scopes(scopes)?;
         self.change_agent(id, |a| a.scopes = scopes)
+    }
+
+    /// The commands an agent with the run scope may run with secrets.
+    pub fn set_agent_run_commands(&mut self, id: &str, commands: &[String]) -> Result<()> {
+        let commands = check_commands(commands)?;
+        self.change_agent(id, |a| a.run_commands = commands)
     }
 
     /// A new token for an agent; the old one stops working, and a revoked agent is restored.
@@ -447,6 +500,26 @@ impl Agent {
             if resolved.starts_with(dir) {
                 return Err(Error::forbidden("Vault files are not export destinations"));
             }
+        }
+        Ok(resolved)
+    }
+
+    /// Where this agent may run a command: one of its folders, a folder inside one, or any
+    /// folder when it is allowed any; never inside the vault's data.
+    pub fn work_dir(&self, dir: &str, data_dir: &Path) -> Result<PathBuf> {
+        let full = absolute(dir)?;
+        let resolved = if !self.any_root && self.roots.iter().any(|r| Path::new(r) == full) {
+            if std::fs::canonicalize(&full).ok().as_deref() != Some(full.as_path()) {
+                return Err(Error::invalid("Approved folder changed; approve it again"));
+            }
+            full
+        } else {
+            self.file_target(dir, data_dir)?
+        };
+        if !resolved.is_dir() {
+            return Err(Error::invalid(
+                "The working folder must be an existing folder",
+            ));
         }
         Ok(resolved)
     }
