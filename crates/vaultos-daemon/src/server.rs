@@ -6,6 +6,7 @@
 
 use crate::api::{self, Reply, Request, MAX_BODY};
 use crate::autosync::AutoSync;
+use crate::human;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
@@ -42,6 +43,22 @@ pub struct Config {
     /// The sync checkout; by default `VAULTOS_SYNC_REPO`, else `sync-repository` in the
     /// data folder.
     pub sync_repo: Option<PathBuf>,
+    /// How the app confirms a request for the human's values (`/human/values`) without the
+    /// password: Touch ID. `None`, or a callback that answers `None`, asks for the password.
+    pub confirm: Option<Confirm>,
+}
+
+/// Shows the system confirmation for `reason` ("VaultOS is trying to …") and blocks until
+/// it is answered: `Some(true)` confirmed, `Some(false)` declined, `None` unavailable.
+pub type ConfirmFn = dyn Fn(&str) -> Option<bool> + Send + Sync;
+
+#[derive(Clone)]
+pub struct Confirm(pub Arc<ConfirmFn>);
+
+impl std::fmt::Debug for Confirm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Confirm")
+    }
 }
 
 pub(crate) struct Shared {
@@ -53,6 +70,9 @@ pub(crate) struct Shared {
     last_used: Mutex<Instant>,
     shutdown: Notify,
     pub(crate) autosync: AutoSync,
+    confirm: Option<Confirm>,
+    /// One confirmation sheet at a time; others are refused rather than queued.
+    confirming: AtomicBool,
 }
 
 /// Never prints the session token.
@@ -203,6 +223,8 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
         last_used: Mutex::new(Instant::now()),
         shutdown: Notify::new(),
         autosync: AutoSync::new(sync_repo),
+        confirm: cfg.confirm.clone(),
+        confirming: AtomicBool::new(false),
     });
 
     let guard = tokio::spawn(guard_loop(shared.clone(), cfg.idle_lock));
@@ -252,14 +274,18 @@ async fn accept_loop(
                 Err(_) => continue,
             },
         };
-        if stream.peer_cred().map(|c| c.uid()).ok() != Some(uid) {
+        let Ok(cred) = stream.peer_cred() else {
+            continue;
+        };
+        if cred.uid() != uid {
             continue;
         }
+        let pid = cred.pid();
         let shared = shared.clone();
         tokio::spawn(async move {
             let service = service_fn(move |req| {
                 let shared = shared.clone();
-                async move { Ok::<_, Infallible>(respond(shared, req).await) }
+                async move { Ok::<_, Infallible>(respond(shared, req, pid).await) }
             });
             let conn = http1::Builder::new()
                 .timer(TokioTimer::new())
@@ -290,8 +316,9 @@ fn header(req: &hyper::Request<Incoming>, name: &str) -> Option<String> {
 async fn respond(
     shared: Arc<Shared>,
     req: hyper::Request<Incoming>,
+    pid: Option<i32>,
 ) -> hyper::Response<Full<Bytes>> {
-    let reply = route(shared, req).await;
+    let reply = route(shared, req, pid).await;
     let body = serde_json::to_vec(&reply.body).unwrap_or_default();
     let mut res = hyper::Response::new(Full::new(Bytes::from(body)));
     *res.status_mut() = hyper::StatusCode::from_u16(reply.status)
@@ -306,7 +333,7 @@ async fn respond(
     res
 }
 
-async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>) -> Reply {
+async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i32>) -> Reply {
     if req.headers().contains_key(ORIGIN) || req.headers().contains_key("sec-fetch-site") {
         return Reply::error(403, "Browser requests are not allowed");
     }
@@ -364,22 +391,16 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>) -> Reply {
     }
     let content_type = header(&req, CONTENT_TYPE.as_str());
     let approver = header(&req, "x-vault-approver");
-    let collected = tokio::time::timeout(
-        REQUEST_TIMEOUT,
-        Limited::new(req.into_body(), MAX_BODY).collect(),
-    )
-    .await;
-    let body = match collected {
-        Err(_) => return Reply::error(408, "Request timed out"),
-        Ok(Err(e))
-            if e.downcast_ref::<http_body_util::LengthLimitError>()
-                .is_some() =>
-        {
-            return Reply::error(413, "Request too large")
-        }
-        Ok(Err(_)) => return Reply::error(400, "Incomplete request"),
-        Ok(Ok(c)) => c.to_bytes().to_vec(),
+    let body = match read_body(req).await {
+        Ok(b) => b,
+        Err(r) => return r,
     };
+    if method == "POST" && target == "/human/values" {
+        if agent_token.is_some() {
+            return Reply::error(403, "Agents cannot use the human's own route");
+        }
+        return human_values(shared, body, pid).await;
+    }
     let method_changes = method != "GET";
     let request = Request {
         method,
@@ -407,6 +428,102 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>) -> Reply {
         if method_changes {
             shared.autosync.poke();
         }
+    }
+    reply
+}
+
+async fn read_body(req: hyper::Request<Incoming>) -> Result<Vec<u8>, Reply> {
+    let collected = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        Limited::new(req.into_body(), MAX_BODY).collect(),
+    )
+    .await;
+    match collected {
+        Err(_) => Err(Reply::error(408, "Request timed out")),
+        Ok(Err(e))
+            if e.downcast_ref::<http_body_util::LengthLimitError>()
+                .is_some() =>
+        {
+            Err(Reply::error(413, "Request too large"))
+        }
+        Ok(Err(_)) => Err(Reply::error(400, "Incomplete request")),
+        Ok(Ok(c)) => Ok(c.to_bytes().to_vec()),
+    }
+}
+
+/// Clears the one-confirmation-at-a-time flag however the confirmation ends.
+struct Confirming<'a>(&'a AtomicBool);
+
+impl Drop for Confirming<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// `POST /human/values`: confirmed with the password, else by the app (Touch ID); see
+/// `human.rs`. The store is not held while the sheet is up.
+async fn human_values(shared: Arc<Shared>, body: Vec<u8>, pid: Option<i32>) -> Reply {
+    let mut ask = match human::Ask::parse(&body) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    drop(body);
+    if !shared.unlocked.load(Ordering::SeqCst) {
+        return Reply::error(423, "Vault is locked. Unlock the app.");
+    }
+    let who = human::Peer::of(pid);
+    if let Some(password) = ask.password.take() {
+        let secret_key = ask.secret_key.take();
+        let s = shared.clone();
+        let checked = tokio::task::spawn_blocking(move || {
+            s.with_store(|store| {
+                let r = store.verify_password(&password, secret_key.as_ref());
+                if matches!(r, Err(Error::Unlock | Error::SecretKeyRequired)) {
+                    std::thread::sleep(FAILED_UNLOCK_DELAY);
+                }
+                r
+            })
+        })
+        .await;
+        match checked {
+            Ok(Ok(())) => {}
+            Ok(Err(Error::Locked)) => return Reply::error(423, "Vault is locked. Unlock the app."),
+            Ok(Err(e)) => return Reply::error(401, e.to_string()),
+            Err(_) => return Reply::error(500, "Internal error"),
+        }
+    } else {
+        let need_password = || Reply {
+            status: 401,
+            body: serde_json::json!({
+                "error": "Confirm with the master password",
+                "needPassword": true,
+            }),
+        };
+        let Some(confirm) = shared.confirm.clone() else {
+            return need_password();
+        };
+        if shared.confirming.swap(true, Ordering::SeqCst) {
+            return Reply::error(429, "Another request is waiting for confirmation");
+        }
+        let _one = Confirming(&shared.confirming);
+        let reason = ask.reason(&who);
+        let answer = tokio::task::spawn_blocking(move || (confirm.0)(&reason))
+            .await
+            .ok()
+            .flatten();
+        match answer {
+            None => return need_password(),
+            Some(false) => return Reply::error(403, "The request was not confirmed"),
+            Some(true) => {}
+        }
+    }
+    let s = shared.clone();
+    let reply =
+        tokio::task::spawn_blocking(move || s.with_store(|store| human::values(store, &ask, &who)))
+            .await
+            .unwrap_or_else(|_| Reply::error(500, "Internal error"));
+    if reply.status == 200 {
+        shared.touch();
     }
     reply
 }

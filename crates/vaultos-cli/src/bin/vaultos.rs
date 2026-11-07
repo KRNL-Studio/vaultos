@@ -1,7 +1,8 @@
 //! `vaultos`: the human's command line. It creates and
 //! upgrades vaults, drives `vaultosd` (start, unlock, lock, stop), and runs recovery and
-//! admin commands directly on the vault file while it holds the vault's owner lock. It never
-//! prints secret values; tokens and Secret Keys go to private files.
+//! admin commands directly on the vault file while it holds the vault's owner lock. Values
+//! are printed only when asked for (`read`, `render`, `otp`, `generate`) and given to a
+//! command by `run`; tokens and Secret Keys go to private files.
 
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -15,8 +16,10 @@ use vaultos_client::Client;
 use vaultos_core::agents::Wildcards;
 use vaultos_core::fs_safe::{self, LockFile};
 use vaultos_core::model::HUMAN;
+use vaultos_core::refs::{self, SecretRef};
 use vaultos_core::store::VAULT_FILE;
 use vaultos_core::{Error, Fields, KdfParams, SecretKey, SecretString, Store};
+use zeroize::Zeroizing;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -31,7 +34,7 @@ const MAX_VALUE: usize = 65536;
 #[command(
     name = "vaultos",
     version,
-    about = "VaultOS for the human: create, unlock and manage the vault. Secret values are never printed.",
+    about = "VaultOS for the human: create, unlock and manage the vault, and give secrets to your own commands.",
     after_help = "Set VAULTOS_DATA_DIR to use a non-default data directory. Commands that read or \
 change the vault directly need it to themselves: quit the desktop app, or pass --stop-backend \
 to stop vaultosd first."
@@ -107,6 +110,42 @@ enum Command {
     ImportItems { project: String, file: PathBuf },
     /// Print an item's current one-time code
     Otp { project: String, key: String },
+    /// Print the value a reference names: vault://Project/Item, or vault://Project/Item/field
+    /// (password, username, email, url, note, otp, or a custom field's label). While the app
+    /// owns the vault it asks you to confirm with Touch ID
+    Read {
+        reference: String,
+        /// No newline after the value
+        #[arg(short = 'n', long)]
+        no_newline: bool,
+    },
+    /// Fill a template's {{ vault://… }} references, writing it to a new file (mode 0600)
+    /// or to stdout
+    Render {
+        template: PathBuf,
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Run a command with secrets in its environment: a project's values, env files whose
+    /// values are vault:// references, and variables set to references. Their values are
+    /// masked in its output
+    Run {
+        /// Give the command this project's values (keys awaiting approval are left out)
+        #[arg(long)]
+        project: Option<String>,
+        /// Only these keys of --project (comma-separated or repeated)
+        #[arg(long, requires = "project", value_name = "KEYS")]
+        keys: Vec<String>,
+        /// A dotenv file whose values may be vault:// references (repeatable)
+        #[arg(long, value_name = "PATH")]
+        env_file: Vec<PathBuf>,
+        /// Pass the command's output through unmasked
+        #[arg(long)]
+        no_masking: bool,
+        /// The command and its arguments, after --
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<std::ffi::OsString>,
+    },
     /// Print a new random password, passphrase or PIN. Nothing is stored or opened
     Generate {
         /// Characters in a random password (8-128), or digits in a PIN (4-32)
@@ -1241,6 +1280,38 @@ fn run(cli: Cli) -> Result<()> {
             let otp = open.store.otp(&project, &key, HUMAN)?;
             say(otp.code.expose())
         }
+        Command::Read {
+            reference,
+            no_newline,
+        } => {
+            let got = ctx.values(&[SecretRef::parse(&reference)?], None, "read")?;
+            let mut out = std::io::stdout().lock();
+            let value = got.refs.first().map_or("", |v| v.as_str());
+            out.write_all(value.as_bytes())
+                .and_then(|()| {
+                    if no_newline {
+                        Ok(())
+                    } else {
+                        out.write_all(b"\n")
+                    }
+                })
+                .and_then(|()| out.flush())
+                .map_err(|_| Fail::new("cannot write to stdout"))
+        }
+        Command::Render { template, output } => ctx.render(&template, output.as_deref()),
+        Command::Run {
+            project,
+            keys,
+            env_file,
+            no_masking,
+            command,
+        } => ctx.run_command(
+            project.as_deref(),
+            &list(&keys),
+            &env_file,
+            no_masking,
+            command,
+        ),
         Command::Generate {
             length,
             words,
@@ -1272,6 +1343,218 @@ fn run(cli: Cli) -> Result<()> {
         Command::Approver(c) => approver(&ctx, c),
         Command::SecretKey(c) => secret_key(&ctx, c),
         Command::Sync(c) => sync(&ctx, c),
+    }
+}
+
+/// What [`Ctx::values`] returns: the references' values in order, and a project's values.
+struct Got {
+    refs: Vec<Zeroizing<String>>,
+    env: Vec<(String, Zeroizing<String>)>,
+    held: Vec<String>,
+}
+
+const MAX_TEMPLATE: u64 = 1024 * 1024;
+
+impl Ctx {
+    /// Values for the human's own commands. While the app or vaultosd owns the vault, it is
+    /// asked (it confirms with Touch ID, or this asks for the master password); otherwise the
+    /// vault is opened here for the moment it takes.
+    fn values(
+        &self,
+        refs: &[SecretRef],
+        env: Option<(&str, Option<&[String]>)>,
+        purpose: &str,
+    ) -> Result<Got> {
+        let client = self.owner_client();
+        if client.live(Duration::from_millis(1500)).is_none() {
+            let mut open = self.open()?;
+            let values = if refs.is_empty() {
+                Vec::new()
+            } else {
+                open.store.resolve_refs(refs, purpose, HUMAN)?
+            };
+            let (env, held) = match env {
+                Some((project, keys)) => {
+                    let e = open.store.env_values(project, keys, purpose, HUMAN)?;
+                    (e.pairs, e.held_for_approval)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
+            return Ok(Got {
+                refs: values,
+                env,
+                held,
+            });
+        }
+        let mut body = json!({
+            "refs": refs.iter().map(SecretRef::to_uri).collect::<Vec<_>>(),
+            "purpose": purpose,
+        });
+        if let Some((project, keys)) = env {
+            body["env"] = json!({ "project": project });
+            if let Some(k) = keys {
+                body["env"]["keys"] = json!(k);
+            }
+        }
+        let mut with_password = self.password_stdin;
+        let reply = loop {
+            if with_password {
+                let store = self.store()?;
+                let password = self.passwords(1, false)?.remove(0);
+                body["password"] = json!(password.expose());
+                if let Some(k) = self.secret_key(&store)? {
+                    body["secretKey"] = json!(k.display().expose());
+                }
+            }
+            let reply = client.owner("POST", "/human/values", Some(&body));
+            for field in ["password", "secretKey"] {
+                if let Some(Value::String(s)) = body.get_mut(field) {
+                    zeroize::Zeroize::zeroize(s);
+                }
+            }
+            match reply {
+                Err(e) if e.status == Some(401) && !with_password => with_password = true,
+                other => break other?,
+            }
+        };
+        let text = |v: &Value| Zeroizing::new(v.as_str().unwrap_or_default().to_owned());
+        let values = reply["values"]
+            .as_array()
+            .map(|a| a.iter().map(text).collect())
+            .unwrap_or_default();
+        let pairs = reply["env"]["values"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|p| {
+                        (
+                            p["key"].as_str().unwrap_or_default().to_owned(),
+                            text(&p["value"]),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let held = reply["env"]["heldForApproval"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Got {
+            refs: values,
+            env: pairs,
+            held,
+        })
+    }
+
+    fn render(&self, template: &Path, output: Option<&Path>) -> Result<()> {
+        let template =
+            std::path::absolute(template).map_err(|_| Fail::usage("Invalid template path"))?;
+        let bytes = Zeroizing::new(fs_safe::read_regular(&template, MAX_TEMPLATE)?);
+        let text =
+            std::str::from_utf8(&bytes).map_err(|_| Fail::new("The template is not UTF-8 text"))?;
+        let found = refs::placeholders(text)?;
+        let wanted: Vec<SecretRef> = found.iter().map(|p| p.reference.clone()).collect();
+        let values = if wanted.is_empty() {
+            Vec::new()
+        } else {
+            let name = template
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.values(&wanted, None, &format!("render {name}"))?.refs
+        };
+        let rendered = Zeroizing::new(refs::render(text, &found, &values));
+        let Some(output) = output else {
+            let mut out = std::io::stdout().lock();
+            return out
+                .write_all(rendered.as_bytes())
+                .and_then(|()| out.flush())
+                .map_err(|_| Fail::new("cannot write to stdout"));
+        };
+        let output = std::path::absolute(output).map_err(|_| Fail::usage("Invalid output path"))?;
+        if vaultos_core::agents::resolve_lexically(&output).starts_with(&self.data_dir) {
+            return Err(Fail::usage("Cannot write over vault data"));
+        }
+        if !output.parent().is_some_and(Path::is_dir) {
+            return Err(Fail::usage("The output file's folder does not exist"));
+        }
+        fs_safe::atomic_write(&output, rendered.as_bytes())?;
+        emit(&json!({ "output": output, "references": found.len() }))
+    }
+
+    /// `vaultos run`: references in env files and in this environment, and a project's
+    /// values, given to the command; its exit code becomes this process's.
+    fn run_command(
+        &self,
+        project: Option<&str>,
+        keys: &[String],
+        env_files: &[PathBuf],
+        no_masking: bool,
+        command: Vec<std::ffi::OsString>,
+    ) -> Result<()> {
+        let mut plain = Vec::new();
+        let mut named: Vec<(String, SecretRef)> = Vec::new();
+        for file in env_files {
+            let file =
+                std::path::absolute(file).map_err(|_| Fail::usage("Invalid env file path"))?;
+            for (k, v) in vaultos_core::env::read_env_file(&file)? {
+                if refs::is_ref(&v) {
+                    named.push((k, SecretRef::parse(&v)?));
+                } else {
+                    plain.push((k, v.as_str().to_owned()));
+                }
+            }
+        }
+        for (k, v) in std::env::vars_os() {
+            let (Some(k), Some(v)) = (k.to_str(), v.to_str()) else {
+                continue;
+            };
+            let set = |n: &String| n == k;
+            if refs::is_ref(v)
+                && !named.iter().any(|(n, _)| set(n))
+                && !plain.iter().any(|(n, _)| set(n))
+            {
+                named.push((k.to_owned(), SecretRef::parse(v)?));
+            }
+        }
+        if named.is_empty() && project.is_none() {
+            return Err(Fail::usage(
+                "Nothing to give the command: pass --project or --env-file, or set variables to vault:// references",
+            ));
+        }
+        let program = command
+            .first()
+            .and_then(|c| Path::new(c).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let refs: Vec<SecretRef> = named.iter().map(|(_, r)| r.clone()).collect();
+        let keys = (!keys.is_empty()).then_some(keys);
+        let got = self.values(&refs, project.map(|p| (p, keys)), &format!("run {program}"))?;
+        if !got.held.is_empty() {
+            eprintln!(
+                "vaultos: left out keys awaiting your approval: {}",
+                got.held.join(", ")
+            );
+        }
+        let mut env = got.env;
+        env.extend(named.into_iter().map(|(k, _)| k).zip(got.refs));
+        let program = vaultos_client::run::Program {
+            argv: command,
+            cwd: None,
+            env,
+            plain,
+        };
+        let code = vaultos_client::run::stream(&program, !no_masking)
+            .map_err(|e| Fail::new(format!("cannot run the command: {e}")))?;
+        match code {
+            0 => Ok(()),
+            c => Err(Fail::quiet(u8::try_from(c).unwrap_or(1))),
+        }
     }
 }
 

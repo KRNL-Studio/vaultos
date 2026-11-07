@@ -67,6 +67,7 @@ fn setup(scopes: &[&str]) -> Fixture {
         idle_lock: None,
         wait_for_owner: false,
         sync_repo: None,
+        confirm: None,
     };
     let daemon = std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()
@@ -155,6 +156,7 @@ fn starts_locked_and_unlocks_only_with_the_password() {
             idle_lock: None,
             wait_for_owner: false,
             sync_repo: None,
+            confirm: None,
         }));
     assert!(second.is_err());
 

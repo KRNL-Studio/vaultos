@@ -155,6 +155,7 @@ fn the_bridge_speaks_for_the_enrolled_agent() {
         idle_lock: None,
         wait_for_owner: false,
         sync_repo: None,
+        confirm: None,
     };
     let daemon = std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()

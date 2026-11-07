@@ -4,6 +4,7 @@
 //! MCP bridge and the human CLI.
 
 pub mod http;
+pub mod run;
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde_json::{json, Map, Value};

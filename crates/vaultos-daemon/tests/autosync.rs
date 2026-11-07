@@ -130,6 +130,7 @@ fn syncs_after_unlock_and_on_request_and_halts_on_a_refusal() {
         idle_lock: None,
         wait_for_owner: false,
         sync_repo: Some(repo_a.clone()),
+        confirm: None,
     };
     let daemon = std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()

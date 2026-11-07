@@ -307,6 +307,7 @@ fn the_daemon_serves_the_agent_cli() {
         idle_lock: None,
         wait_for_owner: false,
         sync_repo: None,
+        confirm: None,
     };
     let daemon = std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()
@@ -649,4 +650,188 @@ fn sync_commands_enrol_report_and_refuse_without_printing_values() {
     assert!(entries
         .iter()
         .any(|e| e.action == "sync_init" && e.detail == "Laptop"));
+}
+
+#[test]
+fn reads_renders_and_runs_with_the_vault_opened_here() {
+    let env = Env::with_vault();
+    let reference = "vault://Example App/HUMAN_KEY";
+    let read = env.admin(&["read", reference]);
+    assert_eq!(read.code, 0, "{}", read.stderr);
+    assert_eq!(read.stdout, format!("{VALUE}\n"));
+    assert_eq!(env.admin(&["read", "-n", reference]).stdout, VALUE);
+    let missing = env.admin(&["read", "vault://Example App/NOPE"]);
+    assert_eq!(missing.code, 1);
+    assert!(
+        missing.stderr.contains("was not found"),
+        "{}",
+        missing.stderr
+    );
+
+    std::fs::write(
+        env.work.join("app.env.tpl"),
+        "KEY={{ vault://Example%20App/HUMAN_KEY }}\nNAME={{ name }}\n",
+    )
+    .unwrap();
+    let rendered = env
+        .admin(&["render", "app.env.tpl", "-o", "app.env"])
+        .json();
+    assert_eq!(rendered["references"], 1);
+    let out = env.work.join("app.env");
+    assert_eq!(
+        env.admin(&["render", "app.env.tpl", "-o", "missing/app.env"])
+            .code,
+        2
+    );
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        format!("KEY={VALUE}\nNAME={{{{ name }}}}\n")
+    );
+    assert_eq!(mode(&out), 0o600);
+    assert!(env.admin(&["render", "app.env.tpl"]).stdout.contains(VALUE));
+
+    // The command gets the value; its output shows it masked.
+    let script = r#"printf '%s|%s' "$HUMAN_KEY" "${#HUMAN_KEY}""#;
+    let ran = env.admin(&[
+        "run",
+        "--project",
+        "Example App",
+        "--",
+        "/bin/sh",
+        "-c",
+        script,
+    ]);
+    assert_eq!(ran.code, 0, "{}", ran.stderr);
+    assert_eq!(
+        ran.stdout,
+        format!("<concealed by VaultOS>|{}", VALUE.len())
+    );
+    let by_ref = env.run(
+        env!("CARGO_BIN_EXE_vaultos"),
+        &[
+            "--password-stdin",
+            "run",
+            "--no-masking",
+            "--",
+            "/bin/sh",
+            "-c",
+            r#"printf %s "$DB""#,
+        ],
+        &format!("{PW}\n"),
+        &[("DB", reference)],
+    );
+    assert_eq!(by_ref.stdout, VALUE, "{}", by_ref.stderr);
+    std::fs::write(
+        env.work.join(".env"),
+        format!("DB={reference}\nMODE=development\n"),
+    )
+    .unwrap();
+    let from_file = env.admin(&[
+        "run",
+        "--env-file",
+        ".env",
+        "--",
+        "/bin/sh",
+        "-c",
+        r#"printf '%s %s' "$DB" "$MODE"; exit 7"#,
+    ]);
+    assert_eq!(from_file.code, 7, "{}", from_file.stderr);
+    assert_eq!(from_file.stdout, "<concealed by VaultOS> development");
+    assert_eq!(env.admin(&["run", "--", "/bin/true"]).code, 2);
+}
+
+#[test]
+fn asks_the_running_owner_to_confirm() {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Arc, Mutex};
+    use vaultos_daemon::server::Confirm;
+
+    let env = Env::with_vault();
+    // 0 confirms, 1 declines, 2 has no way to confirm (no Touch ID).
+    let answer = Arc::new(AtomicU8::new(0));
+    let reasons = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (a, r) = (answer.clone(), reasons.clone());
+    let cfg = Config {
+        data_dir: env.data.clone(),
+        idle_lock: None,
+        wait_for_owner: false,
+        sync_repo: None,
+        confirm: Some(Confirm(Arc::new(move |reason: &str| {
+            r.lock().unwrap().push(reason.to_owned());
+            match a.load(Ordering::SeqCst) {
+                0 => Some(true),
+                1 => Some(false),
+                _ => None,
+            }
+        }))),
+    };
+    let daemon = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run(cfg))
+    });
+    let owner = Client::with_token(env.data.clone(), None);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while owner.live(Duration::from_millis(500)).is_none() {
+        assert!(Instant::now() < deadline, "the daemon did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let reference = "vault://Example App/HUMAN_KEY";
+    assert_eq!(env.human(&["read", reference], "").code, 4, "locked");
+    assert_eq!(env.admin(&["unlock"]).json()["locked"], false);
+
+    let read = env.human(&["read", reference], "");
+    assert_eq!(read.stdout, format!("{VALUE}\n"), "{}", read.stderr);
+    let reason = reasons.lock().unwrap().last().cloned().unwrap();
+    assert!(
+        reason.starts_with("give 1 secret from Example App to /"),
+        "{reason}"
+    );
+    assert!(reason.ends_with("for “read”"), "{reason}");
+    let ran = env.human(
+        &[
+            "run",
+            "--project",
+            "Example App",
+            "--",
+            "/bin/sh",
+            "-c",
+            r#"printf %s "$HUMAN_KEY""#,
+        ],
+        "",
+    );
+    assert_eq!(ran.stdout, "<concealed by VaultOS>", "{}", ran.stderr);
+
+    answer.store(1, Ordering::SeqCst);
+    let declined = env.human(&["read", reference], "");
+    assert_eq!(declined.code, 1);
+    assert!(
+        declined.stderr.contains("not confirmed"),
+        "{}",
+        declined.stderr
+    );
+    assert!(declined.stdout.is_empty());
+
+    // Without Touch ID the password confirms; a wrong one is refused.
+    answer.store(2, Ordering::SeqCst);
+    assert_eq!(env.admin(&["read", "-n", reference]).stdout, VALUE);
+    let wrong = env.human(
+        &["--password-stdin", "read", reference],
+        "synthetic-wrong\n",
+    );
+    assert_eq!(wrong.code, 1);
+    assert!(wrong.stdout.is_empty());
+    let before = reasons.lock().unwrap().len();
+    assert_eq!(env.admin(&["read", reference]).code, 0);
+    assert_eq!(
+        reasons.lock().unwrap().len(),
+        before,
+        "a password needs no sheet"
+    );
+
+    assert_eq!(env.human(&["stop"], "").code, 0);
+    daemon.join().unwrap().unwrap();
 }

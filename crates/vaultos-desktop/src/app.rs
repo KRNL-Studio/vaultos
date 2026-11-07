@@ -23,7 +23,7 @@ use tauri::{AppHandle, Emitter};
 use vaultos_core::fs_safe::{atomic_write, claim};
 use vaultos_core::store::VAULT_FILE;
 use vaultos_core::{Error, KdfParams, SecretKey, SecretString, Store};
-use vaultos_daemon::server::{run_embedded, Config, Handle};
+use vaultos_daemon::server::{run_embedded, Config, Confirm, Handle};
 
 /// Proof of presence (Touch ID, a typed password or an unlock) lasts this long.
 const GRACE: Duration = Duration::from_secs(30);
@@ -372,6 +372,10 @@ impl App {
             idle_lock: None,
             wait_for_owner: false,
             sync_repo: None,
+            // `vaultos read`, `render` and `run` while the app owns the vault: Touch ID each time.
+            confirm: Some(Confirm(Arc::new(|reason: &str| {
+                platform::touch_id_available().then(|| platform::touch_id_prompt(reason))
+            }))),
         };
         let me = self.clone();
         self.running.fetch_add(1, Ordering::SeqCst);

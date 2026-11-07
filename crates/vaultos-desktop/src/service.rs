@@ -181,6 +181,7 @@ async fn serve_once(
         idle_lock: None,
         wait_for_owner: false,
         sync_repo: None,
+        confirm: None,
     };
     let (unlocked_tx, unlocked_rx) = tokio::sync::oneshot::channel();
     let (handle_tx, handle_rx) = tokio::sync::oneshot::channel();

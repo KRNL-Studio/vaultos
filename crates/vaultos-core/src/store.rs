@@ -33,11 +33,13 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 mod items;
+mod run;
 mod sync;
 pub use items::{
     Finding, ImportResult, ItemVersion, Otp, TrashedItem, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES,
     TRASH_DAYS,
 };
+pub use run::EnvValues;
 pub use sync::{check_record, SyncChanges, SyncRecord};
 
 pub const VAULT_FILE: &str = "vault.enc";
