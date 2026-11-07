@@ -716,8 +716,9 @@ impl Store {
         self.disk_id = None;
     }
 
-    /// A problem found in the audit log at unlock. The log is set aside and a new chain starts
-    /// at the next entry, so the problem stays visible and nothing is lost.
+    /// A problem found in the audit log at unlock. Before the next save or entry the log is
+    /// checked again; unless it is sound by then, it is set aside and a new chain starts that
+    /// names the problem, so the problem stays visible and nothing is lost.
     pub fn audit_problem(&self) -> Option<&str> {
         self.open.as_ref().and_then(|o| o.audit_problem.as_deref())
     }
@@ -913,9 +914,10 @@ impl Store {
         self.save_keys(rewrapped, action)
     }
 
-    /// If unlock found the audit log damaged, sets it aside and starts a new chain whose first
-    /// entry records the problem (see [`audit::reset`]). The problem is cleared only once
-    /// that is done.
+    /// If unlock found the audit log damaged, checks it again under its lock and continues
+    /// it, follows another process's reset, or sets it aside and starts a new chain whose
+    /// first entry records the problem (see [`audit::reset`]). The problem is cleared only
+    /// once that is done.
     fn reset_audit_if_needed(&mut self) -> Result<()> {
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         let Some(problem) = open.audit_problem.clone() else {
