@@ -11,7 +11,8 @@ use vaultos_core::{Fields, KdfParams, SecretString, Store};
 
 const PW: &str = "synthetic-items-password";
 const AGENT: &str = "agent:0123456789abcdef";
-const OTP: &str = "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Example";
+const OTP: &str =
+    "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Example";
 
 fn s(v: &str) -> Option<SecretString> {
     Some(SecretString::new(v))
