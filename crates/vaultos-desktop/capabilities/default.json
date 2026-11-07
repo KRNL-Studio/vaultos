@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "windows",
+  "description": "What the app's own pages may use beyond its two commands: listening for lock and navigation events, and dragging the window by its title bar.",
+  "windows": ["main", "quick"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging"
+  ]
+}

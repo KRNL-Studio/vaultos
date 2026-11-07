@@ -231,28 +231,58 @@ function renderSetup() {
 async function renderUnlock() {
     const revision = renderVersion;
     // Touch ID can come and go (lid closed, lockout, a manual Lock), so ask each time.
-    TOUCH_ID = (await window.vault.state()).touchId || TOUCH_ID;
+    const st = await window.vault.state();
+    TOUCH_ID = st.touchId || TOUCH_ID;
     if (revision !== renderVersion) return;
     const wrap = el(`<div class="center"></div>`);
     wrap.appendChild(el(`<h1>VaultOS is locked</h1>`));
     wrap.appendChild(el(`<p>Unlock to let approved agents use your keys. Locks after 15 minutes of inactivity, when the Mac locks, or when you press Lock.</p>`));
     const pw = el(`<input type="password" placeholder="Master password" />`);
+    // A vault with a Secret Key needs it once on each device; the app then keeps it in the
+    // keychain. The earlier app's vaults are upgraded only when the human chooses to.
+    const key = el(`<input type="password" placeholder="Secret Key (VK1-…)" autocomplete="off" spellcheck="false" />`);
+    key.style.display = st.needsSecretKey ? "" : "none";
     const err = el(`<div class="err"></div>`);
     const btn = el(`<button class="btn primary">Unlock</button>`);
-    btn.onclick = async () => {
-        const r = await window.vault.unlock(pw.value);
-        if (!r.ok) {
-            err.textContent = r.error;
-            pw.value = "";
-            pw.focus();
+    const upgrade = el(`<button class="btn ghost">Upgrade this vault</button>`);
+    upgrade.style.display = st.needsUpgrade ? "" : "none";
+    const upgradeNote = el(`<p class="note">This vault was made by an earlier VaultOS. Upgrading converts it to the new format with the same password and keeps the earlier file as a backup. The earlier app cannot open the upgraded vault.</p>`);
+    upgradeNote.style.display = st.needsUpgrade ? "" : "none";
+    const refused = r => {
+        err.textContent = r.error;
+        if (r.needsSecretKey) {
+            key.style.display = "";
+            key.focus();
             return;
         }
+        if (r.needsUpgrade) upgrade.style.display = upgradeNote.style.display = "";
+        pw.value = "";
+        pw.focus();
+    };
+    btn.onclick = async () => {
+        const r = await window.vault.unlock(pw.value, key.value || undefined);
+        if (!r.ok) return refused(r);
+        key.value = "";
         afterUnlockRoute();
     };
-    pw.addEventListener("keydown", e => {
+    upgrade.onclick = async () => {
+        if (!window.vault.upgrade) return;
+        upgrade.disabled = true;
+        err.textContent = "Upgrading…";
+        try {
+            const r = await window.vault.upgrade(pw.value);
+            if (!r.ok) return refused(r);
+            afterUnlockRoute();
+        } catch (e) {
+            err.textContent = cleanError(e);
+        } finally {
+            upgrade.disabled = false;
+        }
+    };
+    for (const n of [ pw, key ]) n.addEventListener("keydown", e => {
         if (e.key === "Enter") btn.click();
     });
-    [ pw, err, btn ].forEach(n => wrap.appendChild(n));
+    [ pw, key, err, btn, upgrade, upgradeNote ].forEach(n => wrap.appendChild(n));
     if (TOUCH_ID.ready) {
         const touch = el(`<button class="btn ghost">Unlock with Touch ID</button>`);
         touch.onclick = async () => {

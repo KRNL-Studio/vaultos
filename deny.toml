@@ -2,17 +2,31 @@
 # CI runs `cargo deny check`; see CONTRIBUTING.md.
 
 [advisories]
-# Unmaintained, with no known vulnerability: compile-time macros behind age's localized
-# error messages (age -> i18n-embed-fl). They run only while building. Revisit when age
-# updates or drops them.
+# Unmaintained, with no known vulnerability. Revisit when the crates that pull them in update.
 ignore = [
+    # Compile-time macros behind age's localized error messages (age -> i18n-embed-fl).
     { id = "RUSTSEC-2026-0374", reason = "basic-toml: build-time only, via age's i18n macros" },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2: build-time only, via age's i18n macros" },
+    # Linux only, through Tauri: GTK's macros, and D-Bus (zbus) for notifications and the
+    # single-instance check.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: build-time only, via glib-macros (Linux GTK)" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: Linux D-Bus via zbus in Tauri's notification and single-instance plugins" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: Linux D-Bus via zbus in Tauri's notification and single-instance plugins" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: Linux D-Bus via zbus in Tauri's notification and single-instance plugins" },
 ]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "ISC", "Zlib"]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "BSL-1.0", "Unicode-3.0", "ISC", "Zlib"]
 confidence-threshold = 0.9
+# MPL-2.0 is file-level copyleft; these are used unmodified. Servo's CSS parser reaches Tauri
+# through tauri-utils, option-ext through dirs.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "cssparser" },
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
+    { allow = ["MPL-2.0"], crate = "selectors" },
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
 
 [bans]
 multiple-versions = "warn"

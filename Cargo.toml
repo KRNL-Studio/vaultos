@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/vaultos-core", "crates/vaultos-daemon", "crates/vaultos-client", "crates/vaultos-mcp", "crates/vaultos-cli", "crates/vaultos-sync"]
+members = ["crates/vaultos-core", "crates/vaultos-daemon", "crates/vaultos-client", "crates/vaultos-mcp", "crates/vaultos-cli", "crates/vaultos-sync", "crates/vaultos-desktop"]
 exclude = ["fuzz"]
 
 [workspace.package]

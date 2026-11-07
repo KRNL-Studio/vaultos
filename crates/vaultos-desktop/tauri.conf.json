@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VaultOS",
+  "version": "0.3.0-preview.1",
+  "identifier": "org.vaultos.preview",
+  "build": {
+    "frontendDist": "../../renderer"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'none'",
+        "connect-src": "ipc: http://ipc.localhost",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "frame-ancestors": "'none'"
+      },
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "category": "DeveloperTool",
+    "copyright": "MIT licence. Unsigned preview.",
+    "icon": ["../../build/icon_1024.png", "../../build/AppIcon.icns"],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": "../../build/entitlements.plist"
+    }
+  }
+}

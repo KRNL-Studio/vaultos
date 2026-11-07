@@ -25,6 +25,7 @@
     "backend": "node backend.cjs",
     "test": "node --test test/*.test.js",
     "test:ui": "node scripts/test-ui.mjs",
+    "test:desktop": "node scripts/test-desktop-ui.mjs",
     "check": "node scripts/check.mjs && npm test",
     "build:native": "node scripts/build-native.mjs",
     "dist:mac": "node scripts/package-mac.mjs",

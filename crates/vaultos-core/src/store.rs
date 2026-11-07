@@ -150,6 +150,14 @@ pub struct Revealed {
     pub url: String,
 }
 
+/// One item with its values, for [`Store::export_project`].
+#[derive(Debug)]
+pub struct Exported {
+    pub meta: ItemSummary,
+    pub value: SecretString,
+    pub password: SecretString,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Pending {
@@ -835,6 +843,16 @@ impl Store {
         let (keys, state) = decode(&file, open.keys.auk.clone())?;
         self.install(keys, state, &bytes, id);
         Ok(true)
+    }
+
+    /// Checks the master password (and Secret Key) against the open vault without changing
+    /// anything: the desktop's confirmation before a sensitive action.
+    pub fn verify_password(
+        &self,
+        password: &SecretString,
+        secret_key: Option<&SecretKey>,
+    ) -> Result<()> {
+        self.verify_current(password, secret_key)
     }
 
     fn verify_current(
@@ -1602,6 +1620,33 @@ impl Store {
         };
         self.audit("reveal", &detail, actor)?;
         Ok(revealed)
+    }
+
+    /// Every item of one project with its values, for the human's encrypted export. The
+    /// export is one audit entry, not a reveal per item.
+    pub fn export_project(
+        &mut self,
+        project: &str,
+        actor: &str,
+    ) -> Result<(String, Vec<Exported>)> {
+        forbidden_unless_human(actor, "exporting values")?;
+        let (name, items) = {
+            let st = self.state()?;
+            let keys = &self.open()?.keys;
+            let p = &st.projects[st.project(project)?];
+            let mut items = Vec::with_capacity(p.items.len());
+            for i in &p.items {
+                let secret = keys.open_secret(p, i)?;
+                items.push(Exported {
+                    meta: summary(i),
+                    value: SecretString::new(secret.value.clone()),
+                    password: SecretString::new(secret.password.clone()),
+                });
+            }
+            (p.meta.name.clone(), items)
+        };
+        self.audit("export", &name, actor)?;
+        Ok((name, items))
     }
 
     // ── History ─────────────────────────────────────────────────────────────────────────

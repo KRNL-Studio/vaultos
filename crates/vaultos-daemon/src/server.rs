@@ -126,9 +126,55 @@ fn my_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// The embedding process's way in (the desktop app). It reaches the same store the API serves
+/// without the session token, so it can act as the human in-process; it is never handed to
+/// anything an agent controls.
+#[derive(Clone, Debug)]
+pub struct Handle(Arc<Shared>);
+
+impl Handle {
+    pub fn with_store<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R {
+        self.0.with_store(f)
+    }
+
+    pub fn is_unlocked(&self) -> bool {
+        self.0.unlocked.load(Ordering::SeqCst)
+    }
+
+    /// After a change the embedder made: autosync delivers it a few seconds later.
+    pub fn changed(&self) {
+        self.0.autosync.poke();
+    }
+
+    /// Asks the server to stop. `run_embedded` then locks the vault and releases it.
+    pub fn shutdown(&self) {
+        self.0.shutdown.notify_one();
+    }
+
+    pub fn sync_status(&self) -> Value {
+        self.0.autosync.status()
+    }
+
+    /// Runs one sync round now, as `POST /sync` does. Blocks; call it off the UI thread.
+    pub fn sync_round(&self) -> Result<Value, vaultos_sync::SyncError> {
+        self.0.autosync.round(&self.0, true)
+    }
+}
+
 /// Runs until `/shutdown`, SIGTERM or SIGINT. Returns once the socket and session file are
 /// removed and the vault is released.
 pub async fn run(cfg: Config) -> Result<(), Error> {
+    serve(cfg, true, |_| {}).await
+}
+
+/// For an app that owns the vault: serves agents like `run`, and hands `ready` a [`Handle`]
+/// once the vault is claimed and the socket is listening. Signals are left to the app; the
+/// server stops at `/shutdown` or [`Handle::shutdown`].
+pub async fn run_embedded(cfg: Config, ready: impl FnOnce(Handle) + Send) -> Result<(), Error> {
+    serve(cfg, false, ready).await
+}
+
+async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) -> Result<(), Error> {
     vaultos_core::fs_safe::private_dir(&cfg.data_dir)?;
     let sync_repo = match cfg.sync_repo.clone() {
         Some(r) => r,
@@ -161,7 +207,8 @@ pub async fn run(cfg: Config) -> Result<(), Error> {
 
     let guard = tokio::spawn(guard_loop(shared.clone(), cfg.idle_lock));
     let autosync = tokio::spawn(AutoSync::run_loop(shared.clone()));
-    let result = accept_loop(&listener, shared.clone()).await;
+    ready(Handle(shared.clone()));
+    let result = accept_loop(&listener, shared.clone(), signals).await;
     guard.abort();
     autosync.abort();
 
@@ -180,16 +227,26 @@ pub async fn run(cfg: Config) -> Result<(), Error> {
     result
 }
 
-async fn accept_loop(listener: &UnixListener, shared: Arc<Shared>) -> Result<(), Error> {
+async fn accept_loop(
+    listener: &UnixListener,
+    shared: Arc<Shared>,
+    signals: bool,
+) -> Result<(), Error> {
     use tokio::signal::unix::{signal, SignalKind};
-    let mut term = signal(SignalKind::terminate()).map_err(Error::io("cannot handle signals"))?;
-    let mut int = signal(SignalKind::interrupt()).map_err(Error::io("cannot handle signals"))?;
+    let (mut term, mut int) = if signals {
+        (
+            Some(signal(SignalKind::terminate()).map_err(Error::io("cannot handle signals"))?),
+            Some(signal(SignalKind::interrupt()).map_err(Error::io("cannot handle signals"))?),
+        )
+    } else {
+        (None, None)
+    };
     let uid = my_uid();
     loop {
         let stream = tokio::select! {
             _ = shared.shutdown.notified() => return Ok(()),
-            _ = term.recv() => return Ok(()),
-            _ = int.recv() => return Ok(()),
+            Some(()) = recv(&mut term) => return Ok(()),
+            Some(()) = recv(&mut int) => return Ok(()),
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => stream,
                 Err(_) => continue,
@@ -212,6 +269,14 @@ async fn accept_loop(listener: &UnixListener, shared: Arc<Shared>) -> Result<(),
             // Sync rounds may take up to two minutes; nothing else comes close.
             let _ = tokio::time::timeout(ROUND_LIMIT, conn).await;
         });
+    }
+}
+
+/// A signal stream that may be absent (embedded); then it never fires.
+async fn recv(s: &mut Option<tokio::signal::unix::Signal>) -> Option<()> {
+    match s {
+        Some(s) => s.recv().await,
+        None => std::future::pending().await,
     }
 }
 
