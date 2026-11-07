@@ -1,0 +1,223 @@
+//! The MCP bridge binary over stdio against a real daemon: the tool list matches
+//! `tools.json`, calls reach the daemon as the enrolled agent, and refusals come back as
+//! tool errors. Synthetic vault, password and values only.
+
+#![allow(clippy::unwrap_used, reason = "test")]
+
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
+use vaultos_client::Client;
+use vaultos_core::agents::Wildcards;
+use vaultos_core::{Fields, KdfParams, SecretString, Store};
+use vaultos_daemon::server::{run, Config};
+
+const PW: &str = "synthetic-bridge-password";
+
+struct Mcp {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next: u64,
+}
+
+impl Mcp {
+    fn start(data: &PathBuf, token: &str) -> Mcp {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_vaultos-mcp"))
+            .env("VAULTOS_DATA_DIR", data)
+            .env("VAULTOS_AGENT_TOKEN", token)
+            .env_remove("VAULTOS_AGENT_TOKEN_FILE")
+            .env_remove("VAULTOS_AGENT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut m = Mcp {
+            child,
+            stdin,
+            stdout,
+            next: 1,
+        };
+        let init = m.rpc(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "bridge-test", "version": "0" },
+            }),
+        );
+        assert_eq!(init["serverInfo"]["name"], "vault-os");
+        m.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        m
+    }
+
+    fn send(&mut self, v: &Value) {
+        let mut line = serde_json::to_vec(v).unwrap();
+        line.push(b'\n');
+        self.stdin.write_all(&line).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn rpc(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        loop {
+            let mut line = String::new();
+            assert!(
+                self.stdout.read_line(&mut line).unwrap() > 0,
+                "the bridge exited"
+            );
+            let msg: Value = serde_json::from_str(&line).unwrap();
+            if msg["id"] == json!(id) {
+                assert!(msg.get("error").is_none(), "{msg}");
+                return msg["result"].clone();
+            }
+        }
+    }
+
+    /// Calls a tool; returns whether it was an error and its text.
+    fn tool(&mut self, name: &str, args: Value) -> (bool, String) {
+        let r = self.rpc("tools/call", json!({ "name": name, "arguments": args }));
+        let text = r["content"][0]["text"].as_str().unwrap().to_owned();
+        (r["isError"] == json!(true), text)
+    }
+
+    fn ok(&mut self, name: &str, args: Value) -> Value {
+        let (err, text) = self.tool(name, args);
+        assert!(!err, "{name}: {text}");
+        serde_json::from_str(&text).unwrap()
+    }
+}
+
+#[test]
+fn the_bridge_speaks_for_the_enrolled_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let work = std::fs::canonicalize(&work).unwrap();
+    let mut store = Store::new(&data).unwrap();
+    store
+        .create(&SecretString::new(PW), None, KdfParams::FLOOR)
+        .unwrap();
+    store.create_project("Example App", "human").unwrap();
+    store.create_project("Hidden Project", "human").unwrap();
+    store
+        .set_item(
+            "Example App",
+            &Fields {
+                key: "HUMAN_KEY".into(),
+                value: Some(SecretString::new("synthetic-human-value")),
+                ..Default::default()
+            },
+            "human",
+        )
+        .unwrap();
+    let scopes = vec!["read".to_owned(), "inject".to_owned()];
+    let issued = store
+        .enrol_agent(
+            "Bridge Agent",
+            Some(&scopes),
+            &["Example App".to_owned()],
+            &[work.to_string_lossy().into_owned()],
+            Wildcards::default(),
+        )
+        .unwrap();
+    store.lock();
+    drop(store);
+
+    let cfg = Config {
+        data_dir: data.clone(),
+        idle_lock: None,
+        wait_for_owner: false,
+    };
+    let daemon = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(run(cfg))
+    });
+    let owner = Client::with_token(data.clone(), None).with_busy_wait(Duration::from_secs(5));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while owner.live(Duration::from_millis(500)).is_none() {
+        assert!(Instant::now() < deadline, "the daemon did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut mcp = Mcp::start(&data, issued.token.expose());
+
+    // The same tools, descriptions and schemas as the Node bridge.
+    let listed = mcp.rpc("tools/list", json!({}));
+    let expected: Value = serde_json::from_str(include_str!("../src/tools.json")).unwrap();
+    assert_eq!(listed["tools"], expected);
+
+    let status = mcp.ok("vault_status", json!({}));
+    assert_eq!(status["running"], true);
+    assert_eq!(status["unlocked"], false);
+    assert_eq!(status["bridge"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(status["bridge"]["sha256"].as_str().unwrap().len(), 64);
+    let (err, text) = mcp.tool("whoami", json!({}));
+    assert!(err);
+    assert!(text.starts_with("Error: "), "{text}");
+
+    owner
+        .owner("POST", "/unlock", Some(&json!({ "password": PW })))
+        .unwrap();
+    assert_eq!(mcp.ok("whoami", json!({}))["name"], "Bridge Agent");
+    let secrets = mcp.ok("list_secrets", json!({ "project": "Example App" }));
+    assert_eq!(secrets[0]["key"], "HUMAN_KEY");
+    assert!(
+        !secrets.to_string().contains("synthetic-human-value"),
+        "listings carry no values"
+    );
+
+    let target = work.join(".env");
+    let injected = mcp.ok(
+        "inject_secrets",
+        json!({ "project": "Example App", "target_path": target }),
+    );
+    assert_eq!(injected["count"], 1);
+    assert!(!injected.to_string().contains("synthetic-human-value"));
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "HUMAN_KEY='synthetic-human-value'\n"
+    );
+
+    let refusals = [
+        (
+            "list_secrets",
+            json!({ "project": "Hidden Project" }),
+            "Error: Project is not approved for this agent",
+        ),
+        (
+            "reveal_secret",
+            json!({ "project": "Example App", "key": "HUMAN_KEY" }),
+            "Error: This agent does not have the reveal scope",
+        ),
+        ("list_secrets", json!({}), "Error: project is required"),
+        (
+            "search",
+            json!({ "query": 7 }),
+            "Error: query must be a string",
+        ),
+        ("nope", json!({}), "Error: unknown tool: nope"),
+    ];
+    for (name, args, message) in refusals {
+        assert_eq!(mcp.tool(name, args), (true, message.to_owned()), "{name}");
+    }
+
+    // Closing stdin ends the bridge.
+    drop(mcp.stdin);
+    assert!(mcp.child.wait().unwrap().success());
+
+    let _ = owner.owner("POST", "/shutdown", None);
+    daemon.join().unwrap().unwrap();
+}

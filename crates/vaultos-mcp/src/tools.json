@@ -1,0 +1,246 @@
+[
+  {
+    "name": "vault_status",
+    "description": "Check backend availability (distinguishing locked from not running), and report vault format, backend deployment version, sync health (autosync state, last sync time, error, stalled peers), and the bridge version and file hash. This does not authenticate the enrolled agent; use whoami to verify identity and grants.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_projects",
+    "description": "List projects approved for this agent, with key counts and providers. Requires read scope. Returns metadata, never secret values.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_secrets",
+    "description": "List the key names + metadata for a project: provider, note, permission level, and expiry (expiresAt, expiryStatus = active|expiring|expired, daysLeft). Returns NO values. Use this to see what is available before injecting, and to warn about tokens that are expired or about to expire.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string",
+          "description": "Project name or id"
+        }
+      },
+      "required": [
+        "project"
+      ]
+    }
+  },
+  {
+    "name": "create_project",
+    "description": "Create a new project in the vault. Requires add scope; the new project is approved for the creating agent.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "set_secret",
+    "description": "Add or update a secret in an approved project. New keys require add scope; updates require edit:own or edit:delegated plus record delegation as applicable. Agent-created keys await human approval before injection. Provider is auto-detected if omitted. Values supplied here enter tool arguments; prefer human desktop entry or authorized import_env for existing real credentials.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string",
+          "description": "Env var name, e.g. SUPABASE_SERVICE_ROLE_KEY"
+        },
+        "value": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider id (vercel, supabase, anthropic, password, custom, ...). Optional; auto-detected from the key name."
+        },
+        "note": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string",
+          "description": "Account login username (optional)."
+        },
+        "email": {
+          "type": "string",
+          "description": "Account login email (optional)."
+        },
+        "password": {
+          "type": "string",
+          "description": "Account password stored alongside the key (optional)."
+        },
+        "url": {
+          "type": "string",
+          "description": "Account/site URL (optional)."
+        },
+        "permission": {
+          "type": "string",
+          "description": "Permission/scope level of the token (optional), e.g. read-only, service_role."
+        },
+        "expires_at": {
+          "type": "string",
+          "description": "ISO date when the token expires (optional). list_secrets reports expiryStatus/daysLeft so you can warn before expiry."
+        }
+      },
+      "required": [
+        "project",
+        "key",
+        "value"
+      ]
+    }
+  },
+  {
+    "name": "delete_secret",
+    "description": "Delete this agent's own secret from an approved project by key name. Requires delete:own scope; delegation does not allow deleting another owner's record.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "key"
+      ]
+    }
+  },
+  {
+    "name": "inject_secrets",
+    "description": "Preferred way to use secrets: write approved keys from an approved project into an absolute path inside an approved folder. Requires inject scope. The response omits values, but the output file is plaintext and readable by filesystem-capable agents. Select only needed keys. Dotenv/JSON merge defaults to true and preserves unrelated keys; dotenv formatting/comments are rewritten. Shell requires merge:false and replaces the file. Inspect counts and heldForApproval; do not read back values to verify success.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "target_path": {
+          "type": "string",
+          "description": "Absolute path to write, e.g. /absolute/project/.env.local"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "dotenv",
+            "shell",
+            "json"
+          ],
+          "description": "Default dotenv"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional subset of key names to write. Omit to write all."
+        },
+        "merge": {
+          "type": "boolean",
+          "description": "Merge into existing file (default true)"
+        }
+      },
+      "required": [
+        "project",
+        "target_path"
+      ]
+    }
+  },
+  {
+    "name": "reveal_secret",
+    "description": "Return one raw secret value to the client/model from an approved project. Requires reveal scope, off by default. Prefer inject_secrets when the application needs a working file. Request human reveal access only when the user's task requires the raw value; do not escalate merely because injection was denied.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "key"
+      ]
+    }
+  },
+  {
+    "name": "whoami",
+    "description": "Report which identity this bridge is authenticated as and which scopes it holds. Use this when a write is refused, to see whether this agent is enrolled at all.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "compare",
+    "description": "Return hashes for approved projects only. Requires reveal scope because secret-derived hashes can assist guessing attacks; use the desktop sync status for routine checks.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_pending",
+    "description": "List agent-added keys that are waiting for human approval before they will be written into any .env by inject_secrets. A key you added appears here until the user approves it in the Vault OS app.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "search",
+    "description": "Search across projects and key names (and providers). Returns matches without values.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "import_env",
+    "description": "Import KEY=VALUE pairs from an absolute .env path inside an approved folder into an approved project. Requires add scope and applicable edit scopes/record delegation for updates. Set createProject:true to create the project when no project with that name exists (add scope; an existing unapproved project is still refused). The app reads values without returning them in the tool response. Inspect keys and refused for partial success; new records await human injection approval.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string",
+          "description": "Existing approved project name or id."
+        },
+        "env_path": {
+          "type": "string",
+          "description": "Absolute path to the .env file, e.g. /absolute/project/.env.local"
+        },
+        "createProject": {
+          "type": "boolean",
+          "description": "Create the project if no project with this name exists (default false)."
+        }
+      },
+      "required": [
+        "project",
+        "env_path"
+      ]
+    }
+  }
+]
