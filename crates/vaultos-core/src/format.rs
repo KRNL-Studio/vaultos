@@ -123,6 +123,9 @@ pub struct VaultMeta {
     pub tombstones: Vec<Tombstone>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_trust: Option<Value>,
+    /// This machine's sync identity and private keys (`vaultos-sync`), sealed with the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_keys: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_head: Option<AuditHead>,
     pub created_at: String,

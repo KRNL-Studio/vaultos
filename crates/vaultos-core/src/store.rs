@@ -32,6 +32,9 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+mod sync;
+pub use sync::{check_record, SyncChanges, SyncRecord};
+
 pub const VAULT_FILE: &str = "vault.enc";
 
 #[derive(Clone)]
@@ -2003,6 +2006,7 @@ pub(crate) fn from_v3(
             agents: v3.agents.clone(),
             tombstones: v3.tombstones.clone(),
             sync_trust: v3.sync_trust.clone(),
+            sync_keys: None,
             audit_head: None,
             created_at: now_iso(),
             extra: v3.extra.clone(),

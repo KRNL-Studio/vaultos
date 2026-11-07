@@ -34,7 +34,7 @@ pub fn session_path(data_dir: &Path) -> PathBuf {
     data_dir.join(SESSION_FILE)
 }
 
-fn euid() -> u32 {
+pub fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
 }

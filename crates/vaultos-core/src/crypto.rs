@@ -227,6 +227,15 @@ pub fn signing_key(seed: &Key32) -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(seed.expose())
 }
 
+pub fn ed25519_public(seed: &Key32) -> [u8; 32] {
+    signing_key(seed).verifying_key().to_bytes()
+}
+
+pub fn sign_ed25519(seed: &Key32, msg: &[u8]) -> [u8; 64] {
+    use ed25519_dalek::Signer;
+    signing_key(seed).sign(msg).to_bytes()
+}
+
 pub fn verify_ed25519(public: &[u8; 32], msg: &[u8], sig: &[u8]) -> bool {
     let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(public) else {
         return false;
