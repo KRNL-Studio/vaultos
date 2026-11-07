@@ -88,12 +88,11 @@ impl Env {
             .stderr(Stdio::piped());
         cmd.envs(vars.iter().copied());
         let mut child = cmd.spawn().unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
+        // A command that does not read stdin may have exited already; its result tells.
+        let written = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+        if let Err(e) = written {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+        }
         let out = child.wait_with_output().unwrap();
         Out {
             code: out.status.code().unwrap_or(-1),
