@@ -126,7 +126,7 @@ vaultos backup /absolute/new/dated-backup-directory
 vaultos inject PROJECT /absolute/project/.env       # replaces the file
 ```
 
-These behave like the Node admin CLI below, with the same rules for token files. `vaultos inject` uses human authority and replaces its target; agents use `vaultos-agent inject`, which merges. Run `vaultos help COMMAND` for each command's options. Sync commands are in [the sync guide](SYNC.md#sync-format-2-vaultos-and-vaultosd).
+These behave like the Node admin CLI below, with the same rules for token files. `vaultos backup` copies `vault.enc`, the audit log and the sync index, never tokens or other credentials; restoring needs the password and Secret Key. `vaultos inject` uses human authority and replaces its target; agents use `vaultos-agent inject`, which merges. Run `vaultos help COMMAND` for each command's options. Sync commands are in [the sync guide](SYNC.md#sync-format-2-vaultos-and-vaultosd).
 
 ## Shell agents: `vaultos-agent`
 

@@ -111,6 +111,42 @@ impl fmt::Debug for SecretBytes {
     }
 }
 
+/// A JSON value that holds key material, such as a device's sync keys: stored as the value
+/// itself, redacted in `Debug`, and its strings zeroed when dropped.
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SecretValue(serde_json::Value);
+
+impl SecretValue {
+    pub fn new(v: serde_json::Value) -> Self {
+        SecretValue(v)
+    }
+
+    pub fn expose(&self) -> &serde_json::Value {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretValue(<redacted>)")
+    }
+}
+
+impl Drop for SecretValue {
+    fn drop(&mut self) {
+        fn wipe(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::String(s) => s.zeroize(),
+                serde_json::Value::Array(a) => a.iter_mut().for_each(wipe),
+                serde_json::Value::Object(o) => o.values_mut().for_each(wipe),
+                _ => {}
+            }
+        }
+        wipe(&mut self.0);
+    }
+}
+
 /// Best effort: keeps the page holding a key out of swap. Failure (an RLIMIT_MEMLOCK
 /// limit, an unsupported OS) leaves the key usable; it only loses this protection.
 fn lock_memory(ptr: *mut u8, len: usize) {
@@ -133,6 +169,12 @@ mod tests {
         let s = SecretString::new("synthetic-only");
         assert!(!format!("{k:?}").contains('7'));
         assert!(!format!("{s:?}").contains("synthetic"));
+        let v = SecretValue::new(serde_json::json!({ "seed": "synthetic-seed" }));
+        assert!(!format!("{v:?}").contains("synthetic"));
+        assert_eq!(
+            serde_json::to_string(&v).unwrap_or_default(),
+            r#"{"seed":"synthetic-seed"}"#
+        );
     }
 
     #[test]

@@ -58,8 +58,11 @@ impl Store {
 
     pub fn approve_pending(&mut self, project: &str, key: &str, via: &str) -> Result<Decision> {
         let (p, k) = self.pending_item(project, key)?;
-        self.approve_inject(&p, &k, true)?;
-        self.audit("approve_inject", &format!("{p}/{k} via {via}"), HUMAN)?;
+        // One batch: if the audit entry cannot be written, the decision is not saved either.
+        self.batch(|s| {
+            s.approve_inject(&p, &k, true)?;
+            s.audit("approve_inject", &format!("{p}/{k} via {via}"), HUMAN)
+        })?;
         Ok(Decision {
             project: p,
             key: k,
@@ -72,8 +75,10 @@ impl Store {
     /// Denying removes the key: it was never approved for use.
     pub fn deny_pending(&mut self, project: &str, key: &str, via: &str) -> Result<Decision> {
         let (p, k) = self.pending_item(project, key)?;
-        self.delete_item(&p, &k, HUMAN)?;
-        self.audit("deny_inject", &format!("{p}/{k} via {via}"), HUMAN)?;
+        self.batch(|s| {
+            s.delete_item(&p, &k, HUMAN)?;
+            s.audit("deny_inject", &format!("{p}/{k} via {via}"), HUMAN)
+        })?;
         Ok(Decision {
             project: p,
             key: k,

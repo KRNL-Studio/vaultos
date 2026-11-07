@@ -54,6 +54,8 @@ struct State {
     conflicts: usize,
     peer_problems: Vec<String>,
     running: bool,
+    /// The daemon is stopping: no new round starts.
+    stopping: bool,
     rerun: bool,
     halted: bool,
     commit_failures: u32,
@@ -106,6 +108,7 @@ impl AutoSync {
                 conflicts: 0,
                 peer_problems: Vec::new(),
                 running: false,
+                stopping: false,
                 rerun: false,
                 halted: false,
                 commit_failures: 0,
@@ -229,6 +232,20 @@ impl AutoSync {
         }
     }
 
+    /// Lets no new round start and waits up to `limit` for a running one to finish. False if
+    /// one is still running.
+    pub(crate) fn stop(&self, limit: Duration) -> bool {
+        self.st().stopping = true;
+        let deadline = Instant::now() + limit;
+        while self.st().running {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        true
+    }
+
     /// Runs until the daemon stops: waits for the next round, or for a change to look again.
     pub(crate) async fn run_loop(shared: std::sync::Arc<Shared>) {
         loop {
@@ -268,6 +285,17 @@ impl AutoSync {
         });
         {
             let mut s = self.st();
+            if s.stopping {
+                drop(s);
+                return if manual {
+                    Err(SyncError {
+                        status: 503,
+                        ..SyncError::new("VAULT_BUSY", "vaultosd is stopping")
+                    })
+                } else {
+                    Ok(self.status())
+                };
+            }
             if s.running {
                 drop(s);
                 return Ok(self.status());

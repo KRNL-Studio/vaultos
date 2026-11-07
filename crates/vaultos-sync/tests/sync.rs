@@ -275,6 +275,106 @@ fn refuses_recipient_injection_bad_signatures_tampered_files_and_rollback() {
 }
 
 #[test]
+fn a_deletion_stays_deleted_when_a_device_that_missed_it_pushes_the_record_again() {
+    let (root, repo, mut a, mut b) = pair();
+    a.set("Example", "KEY", "synthetic");
+    a.force("Example", "KEY", "synthetic", 1, "2026-01-02T03:04:05.678Z");
+    a.push();
+    b.pull();
+    b.push();
+    a.store.delete_item("Example", "KEY", "human").unwrap();
+    a.push();
+    // B has not pulled the deletion. Its record's file is gone, so B writes it again: a new
+    // push time, the same edit time.
+    assert_eq!(b.push().written, 1);
+    let plan = a.pull();
+    assert!(plan.added.is_empty(), "{plan:?}");
+    assert!(a.keys("Example").is_empty());
+    // A device that never had the record sees the deletion too.
+    let mut c = Dev::new(root.path(), "c", &repo);
+    let ic = c.sync.init(&mut c.store, "Machine C").unwrap();
+    c.trust(&a.identity());
+    c.trust(&b.identity());
+    a.trust(&ic);
+    b.trust(&ic);
+    a.push();
+    assert!(b.push().reencrypted_for_new_recipients);
+    assert!(c.pull().added.is_empty());
+    let plan = b.pull();
+    assert_eq!(plan.deleted.len(), 1, "{plan:?}");
+    assert_eq!(a.fingerprint(), b.fingerprint());
+}
+
+#[test]
+fn refuses_ciphertext_a_later_push_replaced_even_when_a_stale_manifest_signs_it() {
+    let (root, repo, mut a, mut b) = pair();
+    let mut c = Dev::new(root.path(), "c", &repo);
+    let ic = c.sync.init(&mut c.store, "Machine C").unwrap();
+    c.trust(&a.identity());
+    c.trust(&b.identity());
+    a.trust(&ic);
+    b.trust(&ic);
+    a.set("Example", "KEY", "synthetic-old");
+    a.push();
+    b.pull();
+    c.pull();
+    c.push();
+    let id = |d: &Dev| d.identity()["id"].as_str().unwrap().to_owned();
+    let record = std::fs::read_dir(repo.join("records"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let old_record = std::fs::read(&record).unwrap();
+    let manifest_a = repo.join("manifests").join(format!("{}.json", id(&a)));
+    let old_manifest_a = std::fs::read(&manifest_a).unwrap();
+
+    a.set("Example", "KEY", "synthetic-new");
+    a.push();
+    let new_record = std::fs::read(&record).unwrap();
+    // C's manifest still signs the old ciphertext, but A's newer push replaced it.
+    std::fs::write(&record, &old_record).unwrap();
+    let problems = b.sync.verify_manifests(&b.store, false).unwrap();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("ROLLBACK: ciphertext")),
+        "{problems:?}"
+    );
+    assert_eq!(
+        b.sync.pull(&mut b.store, true, false).unwrap_err().code,
+        "SIGNATURE_INVALID"
+    );
+    std::fs::write(&record, &new_record).unwrap();
+
+    // Once C has seen A's newer push, A's older manifest cannot come back with the old
+    // file, even to a device that never saw the newer one.
+    c.pull();
+    c.push();
+    std::fs::write(&manifest_a, &old_manifest_a).unwrap();
+    std::fs::write(&record, &old_record).unwrap();
+    let problems = b.sync.verify_manifests(&b.store, false).unwrap();
+    assert!(
+        problems.contains(&"ROLLBACK or manifest equivocation".to_owned()),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn the_push_counter_continues_after_the_index_is_lost() {
+    let (root, _repo, mut a, mut b) = pair();
+    a.set("Example", "KEY", "synthetic");
+    a.push();
+    a.push();
+    assert_eq!(a.push().counter, 3);
+    b.pull();
+    std::fs::remove_file(root.path().join("a/sync-index.json")).unwrap();
+    assert_eq!(a.push().counter, 4);
+    assert!(b.pull().conflicts.is_empty());
+}
+
+#[test]
 fn refuses_concurrent_edits_until_accepted_and_keeps_a_backup() {
     let (root, _repo, mut a, mut b) = pair();
     a.set("Example", "KEY", "base");
@@ -572,5 +672,61 @@ fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     assert!(
         e.message.contains("Unexpected file in the sync repository"),
         "{e}"
+    );
+}
+
+#[test]
+fn refuses_git_rules_that_change_what_it_commits() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = root.path().join("remote.git");
+    let remote_s = remote.to_str().unwrap();
+    git(&[
+        "init",
+        "--quiet",
+        "--bare",
+        "--initial-branch=main",
+        remote_s,
+    ]);
+    let repo = root.path().join("checkout");
+    let r = repo.to_str().unwrap();
+    git(&["init", "--quiet", "-b", "main", r]);
+    configure(&repo);
+    git(&["-C", r, "remote", "add", "origin", remote_s]);
+    let mut a = Dev::new(root.path(), "a", &repo);
+    a.sync.init(&mut a.store, "Machine A").unwrap();
+    a.set("Example", "K", "synthetic");
+    assert_eq!(
+        a.sync.push_remote(&a.store, None).unwrap()["delivered"],
+        true
+    );
+
+    // A filter set outside the checkout would commit other bytes than the manifest signs.
+    git(&["-C", r, "config", "filter.upper.clean", "tr a-z A-Z"]);
+    let attributes = repo.join(".git/info/attributes");
+    std::fs::write(&attributes, b"*.json filter=upper\n").unwrap();
+    a.set("Example", "K", "synthetic-changed");
+    let out = a.sync.push_remote(&a.store, None).unwrap();
+    assert_eq!(out["transport"], "commit-failed", "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap()
+            .contains("Git would change the bytes"),
+        "{out}"
+    );
+    std::fs::write(&attributes, b"").unwrap();
+    let out = a.sync.push_remote(&a.store, None).unwrap();
+    assert_eq!(out["delivered"], true, "{out}");
+
+    // A control file that arrives in a commit is refused.
+    std::fs::write(repo.join(".gitattributes"), b"*.age -text\n").unwrap();
+    git(&["-C", r, "add", ".gitattributes"]);
+    git(&["-C", r, "commit", "--quiet", "-m", "attributes"]);
+    let problems = a.sync.verify_manifests(&a.store, false).unwrap();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("Git control files") && p.contains(".gitattributes")),
+        "{problems:?}"
     );
 }

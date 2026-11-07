@@ -12,7 +12,7 @@ pub const MAX_BODY: usize = 1024 * 1024;
 const RESERVED: [&str; 3] = ["__proto__", "constructor", "prototype"];
 
 /// What the transport hands over: the parts of a request routing needs.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Request {
     pub method: String,
     /// The path and query, as sent.
@@ -23,10 +23,30 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
-#[derive(Debug, PartialEq)]
+/// Tokens and the body (which can carry a value) are never printed.
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("target", &self.target)
+            .field("body_len", &self.body.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(PartialEq)]
 pub struct Reply {
     pub status: u16,
     pub body: Value,
+}
+
+/// The body can carry a revealed value, so only the status is printed.
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reply")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Reply {

@@ -102,11 +102,11 @@ impl Store {
     }
 
     /// This machine's sync identity and private keys, if it has joined a sync group.
-    pub fn sync_keys(&self) -> Result<Option<Value>> {
+    pub fn sync_keys(&self) -> Result<Option<crate::secret::SecretValue>> {
         Ok(self.state()?.meta.sync_keys.clone())
     }
 
-    pub fn set_sync_keys(&mut self, keys: Value) -> Result<()> {
+    pub fn set_sync_keys(&mut self, keys: crate::secret::SecretValue) -> Result<()> {
         self.mutate(|_, st| {
             st.meta.sync_keys = Some(keys);
             Ok(())

@@ -722,11 +722,22 @@ impl Ctx {
             return Err(Fail::usage("Specify an absolute backup directory"));
         }
         let store = self.store()?;
+        let dir = store.data_dir();
         fs_safe::private_dir(target)?;
-        let bytes =
-            fs_safe::read_regular(&store.data_dir().join(VAULT_FILE), fs_safe::MAX_VAULT_BYTES)?;
+        let bytes = fs_safe::read_regular(&dir.join(VAULT_FILE), fs_safe::MAX_VAULT_BYTES)?;
         fs_safe::atomic_write(&target.join(VAULT_FILE), &bytes)?;
-        say("Encrypted vault backed up. Passwords and machine credentials were not copied.")
+        // The audit log after the vault, under its lock, so it holds every entry the copied
+        // vault records. The sync index keeps a restored device from accepting manifests
+        // older than the ones it had already seen.
+        let _log = vaultos_core::audit::lock(dir)?;
+        for name in [vaultos_core::audit::FILE, vaultos_sync::INDEX_FILE] {
+            let file = dir.join(name);
+            if file.exists() {
+                let bytes = fs_safe::read_regular(&file, fs_safe::MAX_VAULT_BYTES)?;
+                fs_safe::atomic_write(&target.join(name), &bytes)?;
+            }
+        }
+        say("Encrypted vault, audit log and sync index backed up. Restoring needs the password and Secret Key; agent tokens and machine credentials were not copied.")
     }
 
     fn rotate_password(&self) -> Result<()> {
@@ -830,29 +841,36 @@ fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
                 .into_iter()
                 .find(|a| a.name.to_lowercase() == name.trim().to_lowercase());
             let reissued = existing.is_some();
-            let issued = store.batch(|s| {
-                let Some(current) = &existing else {
-                    let (_, projects, roots, wildcards) =
-                        access_change(&access, false, false, None).map_err(to_core)?;
-                    return s.enrol_agent(&name, scopes.as_deref(), &projects, &roots, wildcards);
-                };
-                let (changed, projects, roots, wildcards) =
-                    access_change(&access, false, false, Some(current)).map_err(to_core)?;
-                if changed {
-                    s.set_agent_access(&current.id, &projects, &roots, wildcards)?;
-                }
-                if let Some(scopes) = &scopes {
-                    s.set_agent_scopes(&current.id, scopes)?;
-                }
-                s.reissue_agent(&current.id)
-            })?;
-            write_token(&token_file, &issued.token)?;
             let action = if reissued {
                 "reissue_agent"
             } else {
                 "enrol_agent"
             };
-            store.audit(action, &format!("{} via {VIA}", issued.name), HUMAN)?;
+            // The token file and the audit entry are written inside the batch, before the
+            // save: if either fails, the vault keeps the old token and nothing changes.
+            let issued = store.batch(|s| {
+                let issued = match &existing {
+                    None => {
+                        let (_, projects, roots, wildcards) =
+                            access_change(&access, false, false, None).map_err(to_core)?;
+                        s.enrol_agent(&name, scopes.as_deref(), &projects, &roots, wildcards)?
+                    }
+                    Some(current) => {
+                        let (changed, projects, roots, wildcards) =
+                            access_change(&access, false, false, Some(current)).map_err(to_core)?;
+                        if changed {
+                            s.set_agent_access(&current.id, &projects, &roots, wildcards)?;
+                        }
+                        if let Some(scopes) = &scopes {
+                            s.set_agent_scopes(&current.id, scopes)?;
+                        }
+                        s.reissue_agent(&current.id)?
+                    }
+                };
+                write_token(&token_file, &issued.token).map_err(to_core)?;
+                s.audit(action, &format!("{} via {VIA}", issued.name), HUMAN)?;
+                Ok(issued)
+            })?;
             let mut out = summary(store, &issued.id)?;
             out["tokenFile"] = json!(token_file);
             out["reissued"] = json!(reissued);
@@ -935,8 +953,11 @@ fn approver(ctx: &Ctx, cmd: ApproverCommand) -> Result<()> {
     let store = &mut open.store;
     match cmd {
         ApproverCommand::Set { token_file } => {
-            let token = store.issue_approver_token()?;
-            write_token(&token_file, &token)?;
+            // Written before the save, so a failed write leaves the old relay token working.
+            store.batch(|s| {
+                let token = s.issue_approver_token()?;
+                write_token(&token_file, &token).map_err(to_core)
+            })?;
             emit(&json!({ "approverConfigured": true, "tokenFile": token_file }))
         }
         ApproverCommand::Clear => {
@@ -987,9 +1008,9 @@ fn sync(ctx: &Ctx, cmd: SyncCommand) -> Result<()> {
         emit(&reply)?;
         return exit(reply["ok"] == json!(true));
     }
+    let repo = vaultos_sync::default_repo(&ctx.data_dir)?;
     let mut open = ctx.open()?;
     let store = &mut open.store;
-    let repo = vaultos_sync::default_repo(&ctx.data_dir);
     let engine = vaultos_sync::Sync::new(&ctx.data_dir, &repo);
     match cmd {
         SyncCommand::Init { label } => {

@@ -28,7 +28,7 @@ use vaultos_core::crypto::{
 };
 use vaultos_core::fs_safe::{atomic_write, read_regular, regular_file, MAX_VAULT_BYTES};
 use vaultos_core::model::{now_iso, parse_iso, Record};
-use vaultos_core::secret::Key32;
+use vaultos_core::secret::{Key32, SecretValue};
 use vaultos_core::store::{check_record, SyncChanges, SyncRecord, VAULT_FILE};
 use vaultos_core::{validate, Store};
 use zeroize::Zeroizing;
@@ -43,7 +43,8 @@ const MAX_MANIFEST: u64 = 16 * 1024 * 1024;
 const MAX_SMALL: u64 = 64 * 1024;
 const MANIFEST_CONTEXT: &[u8] = b"vaultos/v4/sync-manifest\0";
 const HEARTBEAT_CONTEXT: &[u8] = b"vaultos/v4/sync-heartbeat\0";
-const INDEX_FILE: &str = "sync-index.json";
+/// The local sync index, in the data folder.
+pub const INDEX_FILE: &str = "sync-index.json";
 
 // A pull that changes the vault first copies vault.enc to backups/<ms>-<id>.enc. The newest
 // BACKUPS_KEPT of those, and any younger than BACKUP_DAYS, are kept; other files there are
@@ -305,14 +306,14 @@ impl Keys {
         })
     }
 
-    fn to_value(&self) -> Value {
-        json!({
+    fn to_value(&self) -> SecretValue {
+        SecretValue::new(json!({
             "format": FORMAT,
             "machineId": self.machine_id,
             "label": self.label,
             "ageIdentity": self.age.to_string().expose_secret(),
             "signingSeed": b64(self.seed.expose()),
-        })
+        }))
     }
 
     fn age_public(&self) -> String {
@@ -368,6 +369,103 @@ struct Seen {
     counter: u64,
     hash: String,
     at: String,
+}
+
+/// One file as a manifest lists it: its digest and the push (device and counter) that wrote
+/// that ciphertext.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Entry {
+    digest: String,
+    by: String,
+    counter: u64,
+}
+
+impl Entry {
+    fn to_json(&self) -> Value {
+        json!({ "digest": self.digest, "by": self.by, "counter": self.counter })
+    }
+}
+
+/// A manifest whose signature verified: its counter, the newest push of every other device
+/// it had accepted when it was made, and its files.
+#[derive(Debug)]
+struct Accepted {
+    id: String,
+    counter: u64,
+    hash: String,
+    pushed_at: String,
+    seen: BTreeMap<String, u64>,
+    files: BTreeMap<String, Entry>,
+}
+
+impl Accepted {
+    fn parse(id: &str, m: &Value) -> std::result::Result<Accepted, &'static str> {
+        let counter = m.get("counter").and_then(Value::as_u64).unwrap_or(0);
+        let (Some(files), Some(seen)) = (
+            m.get("files").and_then(Value::as_object),
+            m.get("seen").and_then(Value::as_object),
+        ) else {
+            return Err("Unsupported manifest");
+        };
+        if counter < 1 || m.get("format").and_then(Value::as_u64) != Some(FORMAT) {
+            return Err("Unsupported manifest");
+        }
+        let push = |by: &str, c: Option<u64>| {
+            c.filter(|c| *c >= 1 && is_hex(by, 16) && (by != id || *c <= counter))
+        };
+        let mut a = Accepted {
+            id: id.to_owned(),
+            counter,
+            hash: sha256_hex(canonical_json(m).as_bytes()),
+            pushed_at: str_of(m, "pushedAt").to_owned(),
+            seen: BTreeMap::new(),
+            files: BTreeMap::new(),
+        };
+        for (device, c) in seen {
+            let c = push(device, c.as_u64()).filter(|_| device != id);
+            a.seen.insert(device.clone(), c.ok_or("Invalid manifest")?);
+        }
+        for (name, e) in files {
+            let sound = name.split_once('/').is_some_and(|(d, f)| {
+                matches!(d, "records" | "tombstones") && named(f, 64, ".age")
+            });
+            let digest = str_of(e, "digest");
+            let by = str_of(e, "by");
+            let c = push(by, e.get("counter").and_then(Value::as_u64));
+            match c {
+                Some(counter) if sound && is_hex(digest, 64) => {
+                    a.files.insert(
+                        name.clone(),
+                        Entry {
+                            digest: digest.to_owned(),
+                            by: by.to_owned(),
+                            counter,
+                        },
+                    );
+                }
+                _ => return Err("Invalid manifest"),
+            }
+        }
+        Ok(a)
+    }
+
+    /// Whether this manifest's device had accepted `device`'s push `counter` when it made it.
+    fn saw(&self, device: &str, counter: u64) -> bool {
+        if self.id == device {
+            self.counter >= counter
+        } else {
+            self.seen.get(device).is_some_and(|c| *c >= counter)
+        }
+    }
+}
+
+/// What verification found: its problems, every file's entries that no later push replaced,
+/// and each device's newest accepted counter.
+#[derive(Debug, Default)]
+struct Checked {
+    problems: Vec<String>,
+    valid: BTreeMap<String, Vec<Entry>>,
+    latest: BTreeMap<String, u64>,
 }
 
 /// What this device last knew the repository held: per record file, the keyed hash of the
@@ -515,10 +613,16 @@ fn repo_lock(repo: &Path) -> &'static Mutex<()> {
 }
 
 /// Where the sync checkout is: `VAULTOS_SYNC_REPO`, or `sync-repository` in the data folder.
-pub fn default_repo(data_dir: &Path) -> PathBuf {
-    std::env::var_os("VAULTOS_SYNC_REPO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("sync-repository"))
+/// A relative path would name a different checkout in each process's working directory, so
+/// it is refused.
+pub fn default_repo(data_dir: &Path) -> Result<PathBuf> {
+    match std::env::var_os("VAULTOS_SYNC_REPO").filter(|v| !v.is_empty()) {
+        Some(v) if Path::new(&v).is_absolute() => Ok(PathBuf::from(v)),
+        Some(_) => Err(SyncError::plain(
+            "VAULTOS_SYNC_REPO must be an absolute path",
+        )),
+        None => Ok(data_dir.join("sync-repository")),
+    }
 }
 
 // ── The engine ──────────────────────────────────────────────────────────────────────────
@@ -573,7 +677,7 @@ impl Sync {
 
     fn keys(&self, store: &Store) -> Result<Keys> {
         match store.sync_keys()? {
-            Some(v) => Keys::from_value(&v),
+            Some(v) => Keys::from_value(v.expose()),
             None => Err(SyncError::new(
                 "NOT_CONFIGURED",
                 "Initialize sync on this device first: vaultos sync init <machine-label>",
@@ -662,7 +766,7 @@ impl Sync {
         }
         self.ensure_dirs()?;
         let mut keys = match store.sync_keys()? {
-            Some(v) => Keys::from_value(&v)?,
+            Some(v) => Keys::from_value(v.expose())?,
             None => Keys::generate(label),
         };
         if store.sync_keys()?.is_none() || keys.label != label {
@@ -821,14 +925,18 @@ impl Sync {
     // ── Verification ────────────────────────────────────────────────────────────────────
 
     /// Checks every manifest's signature and counter, and that every record and tombstone
-    /// file is signed by a trusted device. With `remember`, a clean result records the
-    /// manifests seen, so none can go back later.
+    /// file is one a trusted device wrote and no later push replaced or removed. With
+    /// `remember`, a clean result records the manifests seen, so none can go back later.
     pub fn verify_manifests(&self, store: &Store, remember: bool) -> Result<Vec<String>> {
+        Ok(self.check(store, remember)?.problems)
+    }
+
+    fn check(&self, store: &Store, remember: bool) -> Result<Checked> {
         let keys = self.keys(store)?;
         let mut idx = self.read_index(&keys)?;
         let trusted = store.sync_trust()?;
         let mut problems: Vec<String> = Vec::new();
-        let mut accepted: Vec<(String, Value, String)> = Vec::new();
+        let mut accepted: Vec<Accepted> = Vec::new();
         let mut present = BTreeSet::new();
         // Sync never reads a file under a name it does not write. If only this checkout has
         // one, this account made it and it is ignored. One that arrived in a commit came from
@@ -852,6 +960,22 @@ impl Sync {
                 problems.push(p);
             }
         };
+        // A committed .gitignore or .gitattributes, wherever it is, changes which files a
+        // checkout gets or their bytes, so a peer's or the remote's one is refused too.
+        if self.git.is_repo() {
+            match self.git.tracked_paths(&["."]) {
+                Ok(all) => {
+                    let control: Vec<String> = all.into_iter().filter(|f| git_control(f)).collect();
+                    if !control.is_empty() {
+                        problem(format!(
+                            "Git control files in the sync repository change what it commits; remove them with git rm: {}",
+                            quoted(&control)
+                        ));
+                    }
+                }
+                Err(_) => problem("Cannot list the sync repository's files".into()),
+            }
+        }
         for file in list_dir(&self.dir("manifests")) {
             if !named(&file, 16, ".json") {
                 if refused(&format!("manifests/{file}")) {
@@ -879,47 +1003,71 @@ impl Sync {
                 problem("BAD SIGNATURE".into());
                 continue;
             }
-            let counter = m.get("counter").and_then(Value::as_u64).unwrap_or(0);
-            let Some(files) = m.get("files").and_then(Value::as_object) else {
-                problem("Unsupported manifest".into());
-                continue;
+            let a = match Accepted::parse(&id, &m) {
+                Ok(a) => a,
+                Err(e) => {
+                    problem(e.into());
+                    continue;
+                }
             };
-            if counter < 1 || m.get("format").and_then(Value::as_u64) != Some(FORMAT) {
-                problem("Unsupported manifest".into());
-                continue;
-            }
-            let hash = sha256_hex(canonical_json(&m).as_bytes());
             if let Some(seen) = idx.seen_manifests.get(&id) {
-                if counter < seen.counter || (counter == seen.counter && seen.hash != hash) {
+                if a.counter < seen.counter || (a.counter == seen.counter && seen.hash != a.hash) {
                     problem("ROLLBACK or manifest equivocation".into());
                     continue;
                 }
             }
-            let sound = files.iter().all(|(name, digest)| {
-                name.split_once('/').is_some_and(|(d, f)| {
-                    matches!(d, "records" | "tombstones") && named(f, 64, ".age")
-                }) && digest.as_str().is_some_and(|d| is_hex(d, 64))
-            });
-            if !sound {
-                problem("Invalid manifest".into());
-                continue;
-            }
-            accepted.push((id, m, hash));
+            accepted.push(a);
         }
         for id in idx.seen_manifests.keys() {
             if !present.contains(id) {
                 problem("Previously seen manifest is missing".into());
             }
         }
-        let mut signatures: HashMap<String, BTreeSet<String>> = HashMap::new();
-        for (_, m, _) in &accepted {
-            for (name, digest) in m["files"].as_object().into_iter().flatten() {
-                signatures
-                    .entry(name.clone())
-                    .or_default()
-                    .insert(digest.as_str().unwrap_or("").to_owned());
+        let latest: BTreeMap<String, u64> =
+            accepted.iter().map(|a| (a.id.clone(), a.counter)).collect();
+        // Every push a manifest names must be one this checkout still has: a manifest that
+        // saw a newer push of a device than that device's manifest here, or names a device
+        // whose manifest is gone, means a manifest was rolled back or removed.
+        for a in &accepted {
+            let pushes = a
+                .seen
+                .iter()
+                .map(|(d, c)| (d, *c))
+                .chain(a.files.values().map(|e| (&e.by, e.counter)));
+            for (device, counter) in pushes {
+                match latest.get(device) {
+                    Some(l) if counter <= *l => {}
+                    Some(_) => problem("ROLLBACK or manifest equivocation".into()),
+                    None => problem("A signed manifest is missing".into()),
+                }
             }
         }
+        // A file's entry is current unless a manifest that saw the push which wrote it lists
+        // the file differently or not at all: that later push replaced or removed it. So an
+        // older ciphertext put back from history is refused, even though a manifest made
+        // before the change still signs it.
+        let mut valid: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+        let mut superseded: BTreeMap<String, Vec<Entry>> = BTreeMap::new();
+        for a in &accepted {
+            for (name, e) in &a.files {
+                let replaced = accepted
+                    .iter()
+                    .any(|b| b.saw(&e.by, e.counter) && b.files.get(name) != Some(e));
+                let list = if replaced {
+                    &mut superseded
+                } else {
+                    &mut valid
+                }
+                .entry(name.clone())
+                .or_default();
+                if !list.contains(e) {
+                    list.push(e.clone());
+                }
+            }
+        }
+        let listed = |m: &BTreeMap<String, Vec<Entry>>, rel: &str, h: &str| {
+            m.get(rel).is_some_and(|v| v.iter().any(|e| e.digest == h))
+        };
         for dir in ["records", "tombstones"] {
             for file in list_dir(&self.dir(dir)) {
                 let rel = format!("{dir}/{file}");
@@ -933,13 +1081,16 @@ impl Sync {
                     continue;
                 }
                 match file_digest(&self.rel(&rel)) {
-                    Ok(h) if signatures.get(&rel).is_some_and(|s| s.contains(&h)) => {}
+                    Ok(h) if listed(&valid, &rel, &h) => {}
+                    Ok(h) if listed(&superseded, &rel, &h) => problem(
+                        "ROLLBACK: ciphertext that a later push replaced or removed is back".into(),
+                    ),
                     Ok(_) => problem("Unsigned or modified ciphertext".into()),
                     Err(_) => problem("Invalid sync file".into()),
                 }
             }
         }
-        for name in signatures.keys() {
+        for name in valid.keys() {
             if !self.rel(name).exists() {
                 let tomb = format!("tombstones/{}", name.rsplit('/').next().unwrap_or(""));
                 if !name.starts_with("records/") || !self.rel(&tomb).exists() {
@@ -948,19 +1099,23 @@ impl Sync {
             }
         }
         if problems.is_empty() && remember {
-            for (id, m, hash) in accepted {
+            for a in &accepted {
                 idx.seen_manifests.insert(
-                    id,
+                    a.id.clone(),
                     Seen {
-                        counter: m["counter"].as_u64().unwrap_or(0),
-                        hash,
-                        at: str_of(&m, "pushedAt").to_owned(),
+                        counter: a.counter,
+                        hash: a.hash.clone(),
+                        at: a.pushed_at.clone(),
                     },
                 );
             }
             self.write_index(&keys, &mut idx)?;
         }
-        Ok(problems)
+        Ok(Checked {
+            problems,
+            valid,
+            latest,
+        })
     }
 
     // ── Push ────────────────────────────────────────────────────────────────────────────
@@ -976,12 +1131,24 @@ impl Sync {
     /// files of records deleted here, and signs a new manifest. Local only.
     pub fn push_local(&self, store: &Store) -> Result<Wrote> {
         self.ensure_dirs()?;
-        let problems = self.verify_manifests(store, true)?;
-        if !problems.is_empty() {
-            return Err(SyncError::new("SIGNATURE_INVALID", problems.join("; ")));
+        let checked = self.check(store, true)?;
+        if !checked.problems.is_empty() {
+            return Err(SyncError::new(
+                "SIGNATURE_INVALID",
+                checked.problems.join("; "),
+            ));
         }
         let keys = self.keys(store)?;
         let mut idx = self.read_index(&keys)?;
+        // A counter never goes back, even when the index was restored from an older backup
+        // or lost: the manifest already in the repository says where this device got to.
+        let counter = idx
+            .last_push
+            .as_ref()
+            .map_or(0, |p| p.counter)
+            .max(checked.latest.get(&keys.machine_id).copied().unwrap_or(0))
+            + 1;
+        let mut fresh = BTreeSet::new();
         let local = store.sync_records()?;
         let recipients = self.recipients(store)?;
         let recipients_hash = Some(file_digest(&self.dir("recipients.txt"))?);
@@ -1016,6 +1183,7 @@ impl Sync {
                 "pushedAt": now_iso(),
             });
             atomic_write(&file, &Self::encrypt(&recipients, &payload)?)?;
+            fresh.insert(format!("records/{name}.age"));
             idx.records.insert(name, keyed);
             wrote.written += 1;
         }
@@ -1038,16 +1206,41 @@ impl Sync {
             }
             let payload = json!({ "format": FORMAT, "ref": t.reference, "deletedAt": t.deleted_at, "by": t.by });
             atomic_write(&file, &Self::encrypt(&recipients, &payload)?)?;
+            fresh.insert(format!("tombstones/{name}.age"));
             idx.tombstones.insert(name, t.deleted_at.clone());
         }
-        let counter = idx.last_push.as_ref().map_or(0, |p| p.counter) + 1;
+        // Each file names the push that wrote it: this one, or the earlier push whose
+        // ciphertext it still is.
         let mut files = Map::new();
         for dir in ["records", "tombstones"] {
             for f in self.sync_files(dir) {
                 let rel = format!("{dir}/{f}");
-                files.insert(rel.clone(), json!(file_digest(&self.rel(&rel))?));
+                let digest = file_digest(&self.rel(&rel))?;
+                let entry = if fresh.contains(&rel) {
+                    Entry {
+                        digest,
+                        by: keys.machine_id.clone(),
+                        counter,
+                    }
+                } else {
+                    checked
+                        .valid
+                        .get(&rel)
+                        .and_then(|v| v.iter().find(|e| e.digest == digest))
+                        .cloned()
+                        .ok_or_else(|| {
+                            SyncError::new("SIGNATURE_INVALID", "Unsigned or modified ciphertext")
+                        })?
+                };
+                files.insert(rel, entry.to_json());
             }
         }
+        let seen: Map<String, Value> = checked
+            .latest
+            .iter()
+            .filter(|(d, _)| **d != keys.machine_id)
+            .map(|(d, c)| (d.clone(), json!(c)))
+            .collect();
         let pushed_at = now_iso();
         let manifest = json!({
             "format": FORMAT,
@@ -1055,6 +1248,7 @@ impl Sync {
             "counter": counter,
             "pushedAt": pushed_at,
             "recordCount": local.len(),
+            "seen": seen,
             "files": files,
         });
         let signed =
@@ -1453,13 +1647,19 @@ impl Sync {
         };
         for (reference, rp) in &remote {
             let Some(lo) = local.get(reference) else {
-                if local_tombs
+                // A deletion yields only to a later edit. A device that had not seen the
+                // deletion can push the old record again (a new recipient, a lost file), with
+                // a new push time but the same edit time, and it must stay deleted.
+                let edited = ms_or_epoch(&rp.record.updated_at);
+                let deleted_here = local_tombs
                     .get(reference)
-                    .is_some_and(|d| later(ms(d), ms(&rp.pushed_at)))
-                {
-                    continue;
+                    .is_some_and(|d| later(ms(d), edited));
+                let deleted_there = remote_tombs
+                    .get(reference)
+                    .is_some_and(|t| later(ms(&t.deleted_at), edited));
+                if !(deleted_here || deleted_there) {
+                    plan.added.push(rp.clone());
                 }
-                plan.added.push(rp.clone());
                 continue;
             };
             if lo.hash == rp.hash {

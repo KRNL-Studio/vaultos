@@ -29,6 +29,8 @@ use vaultos_core::{Error, Store};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const GUARD_INTERVAL: Duration = Duration::from_secs(10);
 const FAILED_UNLOCK_DELAY: Duration = Duration::from_secs(1);
+/// The longest a sync round is given: a connection's limit, and shutdown's wait for one.
+const ROUND_LIMIT: Duration = Duration::from_secs(150);
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -42,7 +44,6 @@ pub struct Config {
     pub sync_repo: Option<PathBuf>,
 }
 
-#[derive(Debug)]
 pub(crate) struct Shared {
     store: Mutex<Store>,
     unlocked: AtomicBool,
@@ -52,6 +53,16 @@ pub(crate) struct Shared {
     last_used: Mutex<Instant>,
     shutdown: Notify,
     pub(crate) autosync: AutoSync,
+}
+
+/// Never prints the session token.
+impl std::fmt::Debug for Shared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shared")
+            .field("data_dir", &self.data_dir)
+            .field("unlocked", &self.unlocked)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Shared {
@@ -119,6 +130,10 @@ fn my_uid() -> u32 {
 /// removed and the vault is released.
 pub async fn run(cfg: Config) -> Result<(), Error> {
     vaultos_core::fs_safe::private_dir(&cfg.data_dir)?;
+    let sync_repo = match cfg.sync_repo.clone() {
+        Some(r) => r,
+        None => vaultos_sync::default_repo(&cfg.data_dir).map_err(|e| Error::Invalid(e.message))?,
+    };
     let socket = socket_path(&cfg.data_dir)?;
     let owner_lock = claim_owner(&cfg).await?;
     let store = Store::new(&cfg.data_dir)?;
@@ -141,11 +156,7 @@ pub async fn run(cfg: Config) -> Result<(), Error> {
         data_dir: cfg.data_dir.clone(),
         last_used: Mutex::new(Instant::now()),
         shutdown: Notify::new(),
-        autosync: AutoSync::new(
-            cfg.sync_repo
-                .clone()
-                .unwrap_or_else(|| vaultos_sync::default_repo(&cfg.data_dir)),
-        ),
+        autosync: AutoSync::new(sync_repo),
     });
 
     let guard = tokio::spawn(guard_loop(shared.clone(), cfg.idle_lock));
@@ -154,9 +165,17 @@ pub async fn run(cfg: Config) -> Result<(), Error> {
     guard.abort();
     autosync.abort();
 
-    // Lock before releasing anything, then remove what clients use to find this daemon.
+    // A round already running is a blocking task that abort cannot stop. Wait for it, so no
+    // Git command of this daemon still runs in the checkout once another process owns the
+    // vault. Then lock before releasing anything, and remove what clients use to find it.
     let s = shared.clone();
-    let _ = tokio::task::spawn_blocking(move || s.with_store(Store::lock)).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        if !s.autosync.stop(ROUND_LIMIT) {
+            eprintln!("vaultosd: a sync round is still running; stopping without it");
+        }
+        s.with_store(Store::lock)
+    })
+    .await;
     let _ = std::fs::remove_file(&socket);
     shared.session.remove_if_ours(&shared.data_dir);
     drop(owner_lock);
@@ -193,7 +212,7 @@ async fn accept_loop(listener: &UnixListener, shared: Arc<Shared>) -> Result<(),
                 .max_buf_size(16 * 1024)
                 .serve_connection(TokioIo::new(stream), service);
             // Sync rounds may take up to two minutes; nothing else comes close.
-            let _ = tokio::time::timeout(Duration::from_secs(150), conn).await;
+            let _ = tokio::time::timeout(ROUND_LIMIT, conn).await;
         });
     }
 }

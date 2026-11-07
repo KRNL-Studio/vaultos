@@ -134,7 +134,9 @@ node cli.cjs backup /absolute/new/dated-backup-directory
 Use the correct `VAULTOS_DATA_DIR` when nondefault. This copies encrypted
 `vault.enc` without a password prompt. The command overwrites the destination's
 `vault.enc`, so choose a new directory. It does not include sync machine keys.
-Keep backups private and on encrypted storage; do not upload them to the public
+With the Rust tools, `vaultos backup /absolute/new/dated-backup-directory` also
+copies the audit log and the sync index (the memory of which sync manifests were
+seen); the sync keys are inside the vault. No tokens are copied. Keep backups private and on encrypted storage; do not upload them to the public
 source repository.
 
 Read [recovery instructions](https://github.com/rohit3a/vaultos/blob/main/docs/RECOVERY.md)

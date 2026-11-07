@@ -23,12 +23,14 @@ A device's keys are made by `vaultos sync init` and kept **inside the encrypted 
 | `recipients.txt` | The age public key of every device |
 | `machines/<id>.json` | Each device's public identity: id, label, signing and age public keys |
 | `records/<hash>.age`, `tombstones/<hash>.age` | One age file per record or deletion, encrypted to every recipient; the name is a SHA-256 of the record's id |
-| `manifests/<id>.json` | Each device's Ed25519-signed list of the ciphertext files it published, with a counter |
+| `manifests/<id>.json` | Each device's Ed25519-signed manifest: a counter, the newest push it had seen from every other device, and every ciphertext file with its digest and the push that wrote it |
 | `peers/<id>.json` | Each device's signed heartbeat |
+
+A file verifies only if some manifest signs it and no manifest that had seen the push which wrote it lists it differently or not at all: an older ciphertext restored from Git history is refused as `ROLLBACK`, even while a stale manifest from another device still signs it. A manifest that names a push newer than the checkout holds, or a device whose manifest is gone, is refused the same way. A committed `.gitignore`, `.gitattributes` or `.gitmodules` anywhere in the checkout stops sync (remove it with `git rm`), and a push refuses to commit if a Git filter or line-ending rule would store other bytes than sync wrote.
 
 Manifests sign ciphertext digests, not plaintext. Unlike format 1, they carry no per-record content hash or fingerprint, so the repository cannot be used to guess low-entropy values. Signatures are domain-separated (`vaultos/v4/sync-manifest`, `vaultos/v4/sync-heartbeat`), so a manifest signature cannot be replayed as a heartbeat or as anything the vault signs.
 
-The local index (`sync-index.json` in the data directory) remembers what was last synced, each peer's latest counter and the recipient list. Its record hashes are keyed with a key derived from this device's signing key, and the whole file carries an HMAC under another, so it reveals nothing to someone who copies it, and a modified index stops sync with `Invalid sync index; restore a trusted backup`.
+The local index (`sync-index.json` in the data directory) remembers what was last synced, each peer's latest counter and the recipient list. Its record hashes are keyed with a key derived from this device's signing key, and the whole file carries an HMAC under another, so it reveals nothing to someone who copies it, and a modified index stops sync with `Invalid sync index; restore a trusted backup`. `vaultos backup` copies it with the vault and audit log. A device restored without it still continues its push counter from its manifest in the repository, but forgets which manifests it had seen, so it cannot tell a complete older copy of the repository from the current one.
 
 ### First device
 

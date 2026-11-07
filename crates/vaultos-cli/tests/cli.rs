@@ -74,20 +74,19 @@ impl Env {
         env
     }
 
-    fn run(&self, bin: &str, args: &[&str], stdin: &str, token: Option<&str>) -> Out {
+    fn run(&self, bin: &str, args: &[&str], stdin: &str, vars: &[(&str, &str)]) -> Out {
         let mut cmd = Command::new(bin);
         cmd.args(args)
             .current_dir(&self.work)
             .env("VAULTOS_DATA_DIR", &self.data)
+            .env_remove("VAULTOS_SYNC_REPO")
             .env_remove("VAULTOS_AGENT_TOKEN")
             .env_remove("VAULTOS_AGENT_TOKEN_FILE")
             .env_remove("VAULTOS_AGENT")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(t) = token {
-            cmd.env("VAULTOS_AGENT_TOKEN", t);
-        }
+        cmd.envs(vars.iter().copied());
         let mut child = cmd.spawn().unwrap();
         child
             .stdin
@@ -104,7 +103,7 @@ impl Env {
     }
 
     fn human(&self, args: &[&str], stdin: &str) -> Out {
-        self.run(env!("CARGO_BIN_EXE_vaultos"), args, stdin, None)
+        self.run(env!("CARGO_BIN_EXE_vaultos"), args, stdin, &[])
     }
 
     fn admin(&self, args: &[&str]) -> Out {
@@ -118,7 +117,7 @@ impl Env {
             env!("CARGO_BIN_EXE_vaultos-agent"),
             args,
             stdin,
-            Some(token),
+            &[("VAULTOS_AGENT_TOKEN", token)],
         )
     }
 
@@ -228,6 +227,24 @@ fn admin_commands_work_on_a_vault_this_process_owns() {
     assert_eq!(
         std::fs::read(backup.join("vault.enc")).unwrap(),
         std::fs::read(env.data.join("vault.enc")).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(backup.join("audit-v4.log")).unwrap(),
+        std::fs::read(env.data.join("audit-v4.log")).unwrap()
+    );
+
+    // A relative sync checkout would differ by working directory, so it is refused.
+    let relative = env.run(
+        env!("CARGO_BIN_EXE_vaultos"),
+        &["sync", "status"],
+        "",
+        &[("VAULTOS_SYNC_REPO", "relative/checkout")],
+    );
+    assert_ne!(relative.code, 0);
+    assert!(
+        relative.stderr.contains("must be an absolute path"),
+        "{}",
+        relative.stderr
     );
 
     let wrong = env.human(
@@ -400,7 +417,7 @@ fn the_daemon_serves_the_agent_cli() {
     let down = env.agent(&["status"], "", &token).json();
     assert_eq!(down["running"], false);
     assert_eq!(env.agent(&["whoami"], "", &token).code, 3);
-    let no_token = env.run(env!("CARGO_BIN_EXE_vaultos-agent"), &["whoami"], "", None);
+    let no_token = env.run(env!("CARGO_BIN_EXE_vaultos-agent"), &["whoami"], "", &[]);
     assert_eq!(no_token.code, 5);
 }
 

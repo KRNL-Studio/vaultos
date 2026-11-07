@@ -430,6 +430,16 @@ impl GitRepo {
             if !r.ok {
                 return fail(r.error);
             }
+            match self.converted(paths) {
+                Ok(c) if c.is_empty() => {}
+                Ok(c) => {
+                    return fail(format!(
+                        "Git would change the bytes of {} (a .gitattributes, info/attributes or line-ending rule); refusing to commit",
+                        c.join(", ")
+                    ))
+                }
+                Err(e) => return fail(e),
+            }
         }
         if !untrack.is_empty() {
             let mut args = vec!["rm", "--cached", "--quiet", "--ignore-unmatch", "-r", "--"];
@@ -451,6 +461,47 @@ impl GitRepo {
             return fail(c.error);
         }
         done(true)
+    }
+
+    /// Of `paths`, the files whose staged content is not their bytes on disk: an attribute,
+    /// filter or line-ending rule changed them on the way into Git, so a digest signed over
+    /// the file would not match what peers receive.
+    fn converted(&self, paths: &[String]) -> Result<Vec<String>, String> {
+        let files: Vec<&str> = paths
+            .iter()
+            .map(String::as_str)
+            .filter(|p| self.dir.join(p).is_file())
+            .collect();
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut args = vec!["hash-object", "--no-filters", "--"];
+        args.extend(&files);
+        let raw = self.git(&args);
+        if !raw.ok {
+            return Err(raw.error);
+        }
+        let mut args = vec!["ls-files", "--stage", "-z", "--"];
+        args.extend(&files);
+        let staged = self.git(&args);
+        if !staged.ok {
+            return Err(staged.error);
+        }
+        // `<mode> <object> <stage>\t<path>` per entry.
+        let index: std::collections::HashMap<&str, &str> = staged
+            .out
+            .split('\0')
+            .filter_map(|e| {
+                let (meta, path) = e.split_once('\t')?;
+                Some((path, meta.split_whitespace().nth(1)?))
+            })
+            .collect();
+        Ok(files
+            .iter()
+            .zip(raw.out.split_whitespace())
+            .filter(|(f, object)| index.get(*f) != Some(object))
+            .map(|(f, _)| (*f).to_owned())
+            .collect())
     }
 
     fn rebase_on_remote(&self) -> Remote {
