@@ -6,7 +6,7 @@
   "version_name": "0.3.0-preview.1",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqb4A4wsJ0i1bAP2FIy0ITtKBCE/Oatb8ZoeCLWri5rSpT5DuogDmmQBWNrgHHr0rp2L3z2jpBOCyT8wCigpaBDmR7Wb2L56HfZK76Xf6001nr1SRxH4QofiJeM+mKj2HXcLf7qhj8gJ5FQp+lItbBWXFmpGHRPEZfp61mUsDCMIva0dFIVoZYdK4vObDv0osqsRO2LiIPb4iTySX9kBkdA2gL/tKqMY0wqFn0zAbe1M+sXjfJqp8sZt0xkvUaLT0eHA+HXMT462VXpclro4wnxiMwlbLNoguaJdpYjvYUtleEzuNaeGel1SHcRSjxCJ01ksIDRIcU4/ocyHTQ1X0AQIDAQAB",
   "minimum_chrome_version": "116",
-  "permissions": ["nativeMessaging", "storage", "activeTab"],
+  "permissions": ["nativeMessaging", "storage", "activeTab", "alarms"],
   "background": { "service_worker": "background.js" },
   "action": {
     "default_title": "VaultOS",

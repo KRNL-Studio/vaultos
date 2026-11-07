@@ -70,7 +70,7 @@ async function render() {
                 if (f.ok) window.close();
                 else show(el("p", "error", f.error || "VaultOS could not fill this login."));
             });
-            b.append(el("span", "name", login.name), el("span", "sub", login.username || login.project));
+            b.append(el("span", "name", login.name), el("span", "sub", S.loginDetail(login)));
             const li = el("li");
             li.append(b);
             list.append(li);

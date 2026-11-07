@@ -49,6 +49,9 @@ pub struct LoginMatch {
     pub name: String,
     pub username: String,
     pub url: String,
+    /// The host of the saved address that fits the page, shown beside the login so a login
+    /// for another part of the site is not taken for this one.
+    pub host: String,
     pub has_password: bool,
     pub has_otp: bool,
 }
@@ -84,11 +87,24 @@ fn saved_sites(meta: &ItemMeta) -> impl Iterator<Item = Site> + '_ {
         .filter_map(site)
 }
 
+/// The host of the login's saved address that fits the page, preferring the page's own host;
+/// `None` when the login is not offered on the page.
+fn fitting_host(meta: &ItemMeta, page: &Site) -> Option<String> {
+    if !meta.trashed_at.is_empty() || meta.archived || meta.kind() != "login" {
+        return None;
+    }
+    let mut hosts = saved_sites(meta)
+        .filter(|s| page.matches(s))
+        .map(|s| s.host);
+    let first = hosts.next()?;
+    if first == page.host {
+        return Some(first);
+    }
+    Some(hosts.find(|h| *h == page.host).unwrap_or(first))
+}
+
 fn fits(meta: &ItemMeta, page: &Site) -> bool {
-    meta.trashed_at.is_empty()
-        && !meta.archived
-        && meta.kind() == "login"
-        && saved_sites(meta).any(|s| page.matches(&s))
+    fitting_host(meta, page).is_some()
 }
 
 fn browser_actor(b: &Browser) -> String {
@@ -178,13 +194,17 @@ impl Store {
         }
     }
 
-    /// The logins saved for the page's site, with no values.
+    /// The logins saved for the page's site, with no values: those saved for the page's own
+    /// host first.
     pub fn logins_for(&self, page: &str) -> Result<Vec<LoginMatch>> {
         let page = page_site(page)?;
         let st = self.state()?;
         let mut out = Vec::new();
         for p in &st.projects {
-            for i in p.items.iter().filter(|i| fits(&i.meta, &page)) {
+            for i in &p.items {
+                let Some(host) = fitting_host(&i.meta, &page) else {
+                    continue;
+                };
                 out.push(LoginMatch {
                     project_id: p.id.clone(),
                     project: p.meta.name.clone(),
@@ -192,14 +212,14 @@ impl Store {
                     name: i.meta.key.clone(),
                     username: i.meta.username.clone(),
                     url: i.meta.url.clone(),
+                    host,
                     has_password: i.meta.has_password,
                     has_otp: i.meta.has_otp(),
                 });
-                if out.len() >= MAX_MATCHES {
-                    return Ok(out);
-                }
             }
         }
+        out.sort_by_key(|m| m.host != page.host);
+        out.truncate(MAX_MATCHES);
         Ok(out)
     }
 
@@ -244,31 +264,59 @@ impl Store {
         Ok(filled)
     }
 
-    /// Saves a login from a page: a new password for the login of that site and username,
-    /// wherever it is, or a new item in [`DEFAULT_PROJECT`] (created when missing). Returns the
-    /// project's name with the item. The human clicked Save in the extension; the item is the
-    /// human's.
+    /// Saves a login from a page. With `target` (a project and item id), a new password for
+    /// that login, which must be one for this site and username; without, a new password for
+    /// the one login of this site and username, or a new item in [`DEFAULT_PROJECT`] (created
+    /// when missing) when there is none. Several such logins and no target is a conflict, so
+    /// VaultOS never picks one of them for the human. Returns the project's name, the item and
+    /// whether an existing login was updated. The human clicked Save in the extension; the item
+    /// is the human's.
     pub fn save_login(
         &mut self,
         page: &str,
         username: &str,
         password: &SecretString,
+        target: Option<(&str, &str)>,
         browser: &Browser,
-    ) -> Result<(String, Saved)> {
+    ) -> Result<(String, Saved, bool)> {
         let page_site = page_site(page)?;
         validate::text(username, "username", 256, true)?;
         if password.expose().is_empty() {
             return Err(Error::invalid("There is no password to save"));
         }
-        let existing = self.state()?.projects.iter().find_map(|p| {
-            p.items
-                .iter()
-                .find(|i| fits(&i.meta, &page_site) && i.meta.username == username)
-                .map(|i| (p.id.clone(), p.meta.name.clone(), i.meta.key.clone()))
-        });
+        // (project id, project name, item id, item name) of each login for this site and user.
+        let mut candidates: Vec<(String, String, String, String)> = Vec::new();
+        for p in &self.state()?.projects {
+            for i in &p.items {
+                if fits(&i.meta, &page_site) && i.meta.username == username {
+                    candidates.push((
+                        p.id.clone(),
+                        p.meta.name.clone(),
+                        i.id.clone(),
+                        i.meta.key.clone(),
+                    ));
+                }
+            }
+        }
+        let existing = match target {
+            Some((project_id, item_id)) => Some(
+                candidates
+                    .into_iter()
+                    .find(|c| c.0 == project_id && c.2 == item_id)
+                    .ok_or_else(|| {
+                        Error::not_found("That login is not saved for this site and username")
+                    })?,
+            ),
+            None if candidates.len() > 1 => return Err(Error::Conflict(
+                "Several logins for this site use this username; change the password in VaultOS"
+                    .into(),
+            )),
+            None => candidates.pop(),
+        };
+        let updated = existing.is_some();
         // An existing login keeps its address, fields and everything else but the password.
         let (project_id, name, key, url) = match existing {
-            Some((id, name, key)) => (id, name, key, None),
+            Some((id, name, _, key)) => (id, name, key, None),
             None => {
                 let id = match self.find_project(DEFAULT_PROJECT)? {
                     Some((id, _)) => id,
@@ -295,7 +343,7 @@ impl Store {
             &format!("{name}/{} from {}", saved.key, page_site.host),
             &browser_actor(browser),
         )?;
-        Ok((name, saved))
+        Ok((name, saved, updated))
     }
 
     /// `host`, or `host (username)`, or with a number, whichever is not taken.

@@ -8,7 +8,8 @@
 //! - `GET /browser/whoami`: the paired browser.
 //! - `GET /browser/logins?url=`: the logins saved for that page's site, without values.
 //! - `POST /browser/fill` `{url, projectId, itemId}`: `{username, password, otp}`.
-//! - `POST /browser/save` `{url, username, password}`: saves a login, `{key, project}`.
+//! - `POST /browser/save` `{url, username, password, projectId?, itemId?}`: saves a login,
+//!   `{key, project, updated}`; with ids, a new password for that login only.
 
 use crate::api::{self, Reply};
 use crate::human::{clean, Peer};
@@ -146,13 +147,16 @@ fn serve(
             }
             ("POST", "/browser/save") => {
                 let password = SecretString::new(text(&b, "password")?);
-                let (project, saved) = store.save_login(
+                let id = |k: &str| b.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
+                let target = id("projectId").zip(id("itemId"));
+                let (project, saved, updated) = store.save_login(
                     text(&b, "url")?,
                     b.get("username").and_then(Value::as_str).unwrap_or(""),
                     &password,
+                    target,
                     &browser,
                 )?;
-                Ok(json!({ "key": saved.key, "project": project }))
+                Ok(json!({ "key": saved.key, "project": project, "updated": updated }))
             }
             _ => Err(Error::NotFound("Not found".into())),
         }
@@ -212,7 +216,7 @@ async fn pair(shared: Arc<Shared>, origin: String, body: Vec<u8>, pid: Option<i3
     }
     let _one = Confirming(&shared.confirming);
     let reason = format!(
-        "pair the browser extension “{name}” showing the code {code}, for {}. Confirm only if the extension shows this code",
+        "pair the browser extension “{name}” showing the code {code}, for {}. Confirm only if you just chose Pair with VaultOS in the extension loaded from VaultOS and it shows this code",
         Peer::of(pid).shown(),
     );
     let answer = tokio::task::spawn_blocking(move || (confirm.0)(&reason))

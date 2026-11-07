@@ -1,8 +1,8 @@
 //! Which site a URL belongs to, for the browser extension: its registrable domain, the
 //! public suffix from the Public Suffix List plus one label. `www.example.co.uk` and
 //! `accounts.example.co.uk` are one site; `a.github.io` and `b.github.io` are two. A login is
-//! offered and filled only on a page of its own site, over HTTPS (or plain HTTP to this
-//! computer).
+//! offered and filled only on a page of its own site (and its port, when the saved address
+//! names one), over HTTPS, or plain HTTP to `localhost` or `127.0.0.1`.
 //!
 //! `public_suffix_list.dat` is the list from <https://publicsuffix.org/list/>, unmodified,
 //! under the Mozilla Public License 2.0 (see the file's header).
@@ -74,7 +74,7 @@ pub fn registrable(host: &str) -> Option<String> {
 /// A web address, as far as filling a login is concerned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Site {
-    /// HTTPS, or plain HTTP to this computer.
+    /// HTTPS, or plain HTTP to `localhost`, `*.localhost` or `127.0.0.1`.
     pub secure: bool,
     /// The host, lowercase ASCII; an IPv6 address in brackets.
     pub host: String,
@@ -104,8 +104,9 @@ pub fn site(raw: &str) -> Option<Site> {
             let local = d == "localhost" || d.ends_with(".localhost");
             (d, local, local)
         }
-        url::Host::Ipv4(a) => (a.to_string(), a.is_loopback(), true),
-        url::Host::Ipv6(a) => (format!("[{a}]"), a.is_loopback(), true),
+        // Plain HTTP only where the extension runs on it: 127.0.0.1, not all of 127/8 or ::1.
+        url::Host::Ipv4(a) => (a.to_string(), a == std::net::Ipv4Addr::LOCALHOST, true),
+        url::Host::Ipv6(a) => (format!("[{a}]"), false, true),
     };
     let secure = match u.scheme() {
         "https" => true,
@@ -127,13 +128,14 @@ pub fn site(raw: &str) -> Option<Site> {
 }
 
 impl Site {
-    /// Whether a login saved for `saved` belongs on this page: the same site, or for an
-    /// address or this computer the same host and port.
+    /// Whether a login saved for `saved` belongs on this page: the same site, and the same
+    /// port when the saved address names one; for an address or this computer, the same host
+    /// and port.
     pub fn matches(&self, saved: &Site) -> bool {
         if self.exact || saved.exact {
             self.exact && saved.exact && self.host == saved.host && self.port == saved.port
         } else {
-            self.site == saved.site
+            self.site == saved.site && (saved.port.is_none() || saved.port == self.port)
         }
     }
 }
@@ -176,6 +178,17 @@ mod tests {
         assert!(page("http://localhost:3000").matches(&page("http://localhost:3000/a")));
         assert!(!page("http://localhost:3000").matches(&page("http://localhost:4000")));
         assert!(!page("https://127.0.0.1").matches(&page("https://localhost")));
+        assert!(page("http://127.0.0.1:8080").secure);
+        assert!(!page("http://127.0.0.2").secure);
+        assert!(!page("http://[::1]").secure);
+        assert!(page("https://[::1]").secure);
+        // A saved port is kept to; a saved address without one fits any port of its site.
+        let admin = page("https://admin.example.com:8443");
+        assert!(page("https://example.com:8443/x").matches(&admin));
+        assert!(!page("https://tenant.example.com:9443").matches(&admin));
+        assert!(!page("https://example.com").matches(&admin));
+        assert!(page("https://example.com:9443").matches(&page("example.com")));
+        assert!(page("https://example.com").matches(&page("https://example.com:443")));
         assert!(page("https://Example.COM.").matches(&page("example.com")));
         assert_eq!(page("https://bücher.example").host, "xn--bcher-kva.example");
         assert!(site("ftp://example.com").is_none());

@@ -40,9 +40,28 @@ test("a submitted login matches the one just filled", () => {
     assert.ok(!S.sameLogin(undefined, a));
 });
 
+test("fills only simple sign-in forms and saves the new password", () => {
+    const cur = { autocomplete: "current-password" }, any = {}, fresh = { autocomplete: "new-password" };
+    assert.equal(S.passwordField([ cur ], "fill"), 0);
+    assert.equal(S.passwordField([ any ], "fill"), 0);
+    assert.equal(S.passwordField([ fresh ], "fill"), -1);
+    assert.equal(S.passwordField([ cur, fresh, fresh ], "fill"), -1);
+    assert.equal(S.passwordField([ any, any ], "fill"), -1);
+    assert.equal(S.passwordField([ cur, fresh, fresh ], "save"), 2);
+    assert.equal(S.passwordField([ any ], "save"), 0);
+    assert.equal(S.passwordField([ any, any ], "save"), -1);
+    assert.equal(S.passwordField([], "save"), -1);
+});
+
+test("a login in a menu shows the host it was saved for", () => {
+    assert.equal(S.loginDetail({ username: "alice", host: "admin.example.com", project: "Work" }), "alice · admin.example.com");
+    assert.equal(S.loginDetail({ username: "", host: "example.com", project: "Work" }), "example.com");
+    assert.equal(S.loginDetail({ project: "Work" }), "Work");
+});
+
 test("the manifest asks only for what the extension uses", () => {
     const m = JSON.parse(readFileSync(path.join(__dirname, "..", "extension", "manifest.json"), "utf8"));
-    assert.deepEqual(m.permissions.sort(), [ "activeTab", "nativeMessaging", "storage" ]);
+    assert.deepEqual(m.permissions.sort(), [ "activeTab", "alarms", "nativeMessaging", "storage" ]);
     assert.equal(m.host_permissions, undefined);
     for (const pattern of m.content_scripts[0].matches) assert.match(pattern, /^(https:\/\/\*\/\*|http:\/\/(\*\.)?localhost\/\*|http:\/\/127\.0\.0\.1\/\*)$/);
 });
