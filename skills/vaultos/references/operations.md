@@ -20,7 +20,7 @@ bridge tool names; a client may prefix them with a server namespace.
 | `delete_secret` | `{project,key}`; move this agent's record to the Trash (the human can restore it for 30 days) | `delete:own` |
 | `reveal_secret` | `{project,key}`; returns a raw value to the client/model | `reveal` |
 | `compare` | `{}`; secret-derived fingerprints for approved projects | `reveal` |
-| `run_with_secrets` | `{project,command,cwd,keys?,timeout_seconds?}`; starts an allowed command in an approved folder with the project's values and returns its masked output | `run` and an allowed command |
+| `run_with_secrets` | `{project,command,cwd,keys?,timeout_seconds?}`; starts an allowed command in an approved folder with the project's values (in a clean environment; values under 4 characters are left out and listed in `tooShortToMask`) and returns its masked output | `run` and an allowed command |
 | `request_access` | `{project,scopes,minutes?,reason}`; asks the human for temporary scopes on one project (1-60 minutes) | Enrolled identity; the human confirms |
 
 Prefer `run_with_secrets` to `inject_secrets` when the task is to run a command:

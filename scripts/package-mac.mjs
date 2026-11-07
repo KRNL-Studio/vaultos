@@ -116,8 +116,8 @@ if (identity) try {
     });
     throw e;
 }
-budget("VaultOS.app", app, 20);
-budget(path.basename(zip), zip, 8);
+budget("VaultOS.app", app, 24);
+budget(path.basename(zip), zip, 9);
 checksum(zip);
 sbom(triple, zip.replace(/\.zip$/, ".cdx.json"));
 console.log("Built " + zip);

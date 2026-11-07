@@ -22,6 +22,10 @@ pub const MIN_LEN: usize = 8;
 const MAX_LEN: usize = 4096;
 /// Files larger than this are skipped.
 pub const MAX_FILE: u64 = 8 * 1024 * 1024;
+/// At most this many lines of one multi-line value, and this many values in all, are indexed,
+/// so the index every scan loads stays bounded however large the vault grows.
+const MAX_LINES: usize = 256;
+pub const MAX_ENTRIES: usize = 200_000;
 
 /// Where an indexed value lives: ids only, so the index names nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -101,7 +105,8 @@ impl Index {
         // A multi-line value (a key or certificate, often longer than one value may be) is
         // found by its longest lines.
         if v.contains('\n') {
-            for line in v.lines().map(str::trim).filter(|l| l.len() >= 24) {
+            let lines = v.lines().map(str::trim).filter(|l| l.len() >= 24);
+            for line in lines.take(MAX_LINES) {
                 self.add(line, source.clone());
             }
             return;
@@ -112,8 +117,12 @@ impl Index {
         if v.bytes().any(is_break) {
             return;
         }
+        let tag = self.tag(v.as_bytes());
+        if self.entries.len() >= MAX_ENTRIES && !self.entries.contains_key(&tag) {
+            return;
+        }
         self.lengths.insert(v.len());
-        let sources = self.entries.entry(self.tag(v.as_bytes())).or_default();
+        let sources = self.entries.entry(tag).or_default();
         if !sources.contains(&source) {
             sources.push(source);
         }

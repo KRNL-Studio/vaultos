@@ -271,6 +271,13 @@ fn run(command: Command, client: &Client) -> Result<()> {
                 let names: Vec<&str> = held.iter().filter_map(Value::as_str).collect();
                 eprintln!("vaultos-agent: left out keys awaiting approval: {}", names.join(", "));
             }
+            if let Some(short) = r["tooShortToMask"].as_array().filter(|h| !h.is_empty()) {
+                let names: Vec<&str> = short.iter().filter_map(Value::as_str).collect();
+                eprintln!(
+                    "vaultos-agent: left out keys too short to mask (under 4 characters): {}",
+                    names.join(", ")
+                );
+            }
             let text = |k: &str| r[k].as_str().unwrap_or_default().as_bytes().to_vec();
             let _ = std::io::stdout().write_all(&text("stdout"));
             let _ = std::io::stderr().write_all(&text("stderr"));

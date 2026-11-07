@@ -4,7 +4,7 @@
 
 use crate::access::Grant;
 use serde_json::{json, Map, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use vaultos_client::run::Program;
 use vaultos_core::agents::Agent;
@@ -52,6 +52,14 @@ impl std::fmt::Debug for Reply {
         f.debug_struct("Reply")
             .field("status", &self.status)
             .finish_non_exhaustive()
+    }
+}
+
+/// A reply can carry values (a reveal, the human's values); its strings are zeroed when it
+/// goes, whether it was sent or not.
+impl Drop for Reply {
+    fn drop(&mut self) {
+        vaultos_core::secret::scrub_json(&mut self.body);
     }
 }
 
@@ -559,6 +567,8 @@ pub struct RunPlan {
     pub timeout: Duration,
     pub project: String,
     pub held_for_approval: Vec<String>,
+    /// Keys left out because their values are too short to mask in the output.
+    pub too_short: Vec<String>,
 }
 
 /// The run scope, checked under the store: one of the agent's allowed commands, in an
@@ -606,7 +616,8 @@ fn plan(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Ru
             .filter(|t| (1..=RUN_MAX_TIMEOUT).contains(t))
             .ok_or_else(|| invalid("timeout_seconds must be 1 to 600"))?,
     };
-    // The caller's PATH finds the program, as it would in the caller's shell.
+    // The caller's PATH finds the program, as it would in the caller's shell, less the
+    // folders an agent could put a program of the same name in.
     let path = match body.get("path") {
         None | Some(Value::Null) => None,
         Some(Value::String(p))
@@ -618,21 +629,104 @@ fn plan(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Ru
         }
         Some(_) => return Err(invalid("path must list absolute folders, separated by :")),
     };
-    let purpose = format!("{entry} in {}", cwd.display());
+    let dirs = search_path(path.as_deref(), &cwd, cx.agent, store.data_dir());
+    let program = find_program(&argv[0], &dirs, &cwd)?;
+    let purpose = format!("{entry} in {} (as {})", cwd.display(), program.display());
     let env = store.env_values(&id, keys.as_deref(), &purpose, &cx.actor)?;
+    // A value this short would be masked wherever its characters happen to appear, so the
+    // masker skips it; the command does not get it either.
+    let (pairs, short): (Vec<_>, Vec<_>) = env
+        .pairs
+        .into_iter()
+        .partition(|(_, v)| v.len() >= vaultos_core::mask::MIN_LEN);
+    let mut argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+    argv[0] = program.into_os_string();
+    let path = if dirs.is_empty() {
+        "/usr/bin:/bin".to_owned()
+    } else {
+        dirs.iter()
+            .filter_map(|d| d.to_str())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
     Ok(RunPlan {
         program: Program {
-            argv: argv.into_iter().map(Into::into).collect(),
+            argv,
             cwd: Some(cwd),
-            env: env.pairs,
-            plain: path
-                .map(|p| vec![("PATH".to_owned(), p)])
-                .unwrap_or_default(),
+            env: pairs,
+            plain: vec![("PATH".to_owned(), path)],
         },
         timeout: Duration::from_secs(timeout),
         project: env.project,
         held_for_approval: env.held_for_approval,
+        too_short: short.into_iter().map(|(k, _)| k).collect(),
     })
+}
+
+/// The folders an agent's command and its children may be found in: the caller's PATH, else
+/// this process's, else the system's, less any that are missing, relative, temporary or
+/// writable by other users, or inside the working folder, the agent's folders or the vault's
+/// data. An agent could put a program named like an allowed command in any of those.
+fn search_path(given: Option<&str>, cwd: &Path, agent: &Agent, data_dir: &Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let own = std::env::var("PATH").ok();
+    let list = given
+        .or(own.as_deref())
+        .filter(|p| !p.is_empty())
+        .unwrap_or("/usr/bin:/bin:/usr/sbin:/sbin");
+    let avoid: Vec<PathBuf> = [
+        std::env::temp_dir(),
+        "/tmp".into(),
+        "/var/tmp".into(),
+        "/dev/shm".into(),
+        cwd.to_path_buf(),
+        data_dir.to_path_buf(),
+    ]
+    .into_iter()
+    .chain(agent.roots.iter().map(PathBuf::from))
+    .filter_map(|p| std::fs::canonicalize(p).ok())
+    .collect();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in list.split(':').filter(|d| Path::new(d).is_absolute()) {
+        let Ok(dir) = std::fs::canonicalize(entry) else {
+            continue;
+        };
+        let shared = std::fs::metadata(&dir)
+            .map(|m| !m.is_dir() || m.permissions().mode() & 0o002 != 0)
+            .unwrap_or(true);
+        let plain = dir.to_str().is_some_and(|d| !d.contains(':'));
+        if !shared && plain && !avoid.iter().any(|a| dir.starts_with(a)) && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// The program an agent's command starts: a path as given (against the working folder when
+/// relative), or the first one of that name in `dirs`.
+fn find_program(name: &str, dirs: &[PathBuf], cwd: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let runnable = |p: &Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if name.contains('/') {
+        let p = cwd.join(name);
+        return if runnable(&p) {
+            Ok(p)
+        } else {
+            Err(invalid(&format!("{name} is not a program that can be run")))
+        };
+    }
+    dirs.iter()
+        .map(|d| d.join(name))
+        .find(|p| runnable(p))
+        .ok_or_else(|| {
+            invalid(&format!(
+                "{name} was not found in the PATH folders an agent's command may come from \
+                 (not temporary, shared or agent folders); the human can allow it by its \
+                 absolute path"
+            ))
+        })
 }
 
 fn inject(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {

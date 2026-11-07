@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use vaultos_core::mask::Masker;
@@ -13,8 +13,26 @@ use zeroize::Zeroizing;
 /// Variables never passed on: a program run with secrets should not act as the agent.
 const WITHHELD: [&str; 1] = ["VAULTOS_AGENT_TOKEN"];
 
-/// How long output may keep arriving after the program exits (from children it left behind).
+/// The only variables a captured (agent's) command gets from this process's environment.
+const KEPT: [&str; 10] = [
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "TMPDIR",
+    "TZ",
+];
+
+/// How long output may keep arriving after the program's group is killed (from children that
+/// left it).
 const DRAIN: Duration = Duration::from_secs(2);
+
+/// How long a stopped program has between SIGTERM and SIGKILL.
+const GRACE: Duration = Duration::from_secs(2);
 
 pub struct Program {
     pub argv: Vec<OsString>,
@@ -35,7 +53,9 @@ impl std::fmt::Debug for Program {
 }
 
 impl Program {
-    fn command(&self) -> std::io::Result<Command> {
+    /// The command to spawn. A `clean` one gets only [`KEPT`] from this process's
+    /// environment; otherwise it inherits it, less [`WITHHELD`].
+    fn command(&self, clean: bool) -> std::io::Result<Command> {
         let Some((first, rest)) = self.argv.split_first() else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -47,8 +67,17 @@ impl Program {
         if let Some(dir) = &self.cwd {
             cmd.current_dir(dir);
         }
-        for name in WITHHELD {
-            cmd.env_remove(name);
+        if clean {
+            cmd.env_clear();
+            for name in KEPT {
+                if let Some(v) = std::env::var_os(name) {
+                    cmd.env(name, v);
+                }
+            }
+        } else {
+            for name in WITHHELD {
+                cmd.env_remove(name);
+            }
         }
         for (k, v) in &self.plain {
             cmd.env(k, v);
@@ -94,7 +123,7 @@ fn pump(mut from: impl Read, mut masker: Option<Masker>, mut sink: impl FnMut(&[
 /// output reaches this process's stdout and stderr, masked unless `mask` is false. ^C goes
 /// to the program, and this process waits for it. Returns its exit code.
 pub fn stream(program: &Program, mask: bool) -> std::io::Result<i32> {
-    let mut cmd = program.command()?;
+    let mut cmd = program.command(false)?;
     if !mask {
         let status = cmd.status()?;
         return Ok(exit_code(status));
@@ -153,13 +182,17 @@ pub struct Captured {
     /// The exit code, as a shell reports it; absent when the program was stopped.
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// `stop` returned true before the program finished.
+    pub stopped: bool,
     /// Output past the limit was dropped.
     pub truncated: bool,
 }
 
-/// Runs the program detached from any terminal (stdin is empty, in its own process group),
-/// keeping at most `max_output` bytes of each stream, masked. After `timeout` the whole group
-/// is stopped (SIGTERM, then SIGKILL two seconds later).
+/// Runs the program detached from any terminal, with only [`KEPT`] from this process's
+/// environment plus the program's own variables: stdin is empty and it runs in its own process
+/// group. Keeps at most `max_output` bytes of each stream, masked. After `timeout` the whole
+/// group is stopped (SIGTERM, then SIGKILL two seconds later); when the program exits, whatever
+/// it left running in its group is killed.
 pub fn capture(
     program: &Program,
     timeout: Duration,
@@ -168,106 +201,179 @@ pub fn capture(
     capture_until(program, timeout, max_output, &|| false)
 }
 
+/// One of the program's output pipes, read without blocking.
+struct Stream {
+    file: Option<std::fs::File>,
+    masker: Masker,
+    kept: Vec<u8>,
+    cut: bool,
+}
+
+impl Stream {
+    fn new(fd: std::os::fd::OwnedFd, masker: Masker) -> std::io::Result<Stream> {
+        use std::os::fd::AsRawFd;
+        let raw = fd.as_raw_fd();
+        // SAFETY: fcntl on a descriptor this process owns; it changes only its flags.
+        let ok = unsafe {
+            let flags = libc::fcntl(raw, libc::F_GETFL);
+            flags >= 0 && libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0
+        };
+        if !ok {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Stream {
+            file: Some(fd.into()),
+            masker,
+            kept: Vec::new(),
+            cut: false,
+        })
+    }
+
+    fn keep(&mut self, b: &[u8], max: usize) {
+        let room = max.saturating_sub(self.kept.len());
+        if b.len() > room {
+            self.cut = true;
+        }
+        self.kept.extend_from_slice(&b[..b.len().min(room)]);
+    }
+
+    /// Reads what is waiting; closes the stream at its end.
+    fn read(&mut self, buf: &mut [u8], max: usize) {
+        while let Some(f) = self.file.as_mut() {
+            match f.read(buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let masked = self.masker.push(&buf[..n]);
+                    self.keep(&masked, max);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(_) => break,
+            }
+        }
+        self.close(max);
+    }
+
+    fn close(&mut self, max: usize) {
+        if self.file.take().is_some() {
+            let rest = self.masker.finish();
+            self.keep(&rest, max);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Phase {
+    Running,
+    /// SIGTERM was sent; SIGKILL follows at this time.
+    Stopping(Instant),
+    /// The group was killed; output is read until this time.
+    Draining(Instant),
+}
+
 /// As [`capture`], also stopping the program as at the timeout once `stop` returns true.
+/// Everything happens on the calling thread, and the pipes are closed when it returns.
 pub fn capture_until(
     program: &Program,
     timeout: Duration,
     max_output: usize,
     stop: &dyn Fn() -> bool,
 ) -> std::io::Result<Captured> {
+    use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
-    let mut cmd = program.command()?;
+    let mut cmd = program.command(true)?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
     let mut child = cmd.spawn()?;
-    let (tx, rx) = mpsc::channel::<(bool, Vec<u8>, bool)>();
-    for (is_out, stream) in [
-        (
-            true,
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-        ),
-        (
-            false,
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-        ),
-    ] {
-        let Some(stream) = stream else { continue };
-        let m = program.masker();
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let mut kept = Vec::new();
-            let mut cut = false;
-            pump(stream, Some(m), |b| {
-                let room = max_output.saturating_sub(kept.len());
-                if b.len() > room {
-                    cut = true;
-                }
-                kept.extend_from_slice(&b[..b.len().min(room)]);
-            });
-            let _ = tx.send((is_out, kept, cut));
-        });
-    }
-    drop(tx);
-    let (status, timed_out) = wait_until(&mut child, Instant::now() + timeout, stop)?;
-    let mut out = Captured {
-        exit_code: status.map(exit_code),
-        timed_out,
-        ..Captured::default()
+    let group = -(child.id() as libc::pid_t);
+    let kill = |signal| {
+        // SAFETY: kill only sends a signal, to the child's own group (process_group(0)).
+        unsafe { libc::kill(group, signal) };
     };
-    let deadline = Instant::now() + DRAIN;
-    while let Ok((is_out, kept, cut)) =
-        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-    {
-        let text = String::from_utf8_lossy(&kept).into_owned();
-        if is_out {
-            out.stdout = text;
-        } else {
-            out.stderr = text;
+    let mut streams = Vec::new();
+    for fd in [
+        child.stdout.take().map(OwnedFd::from),
+        child.stderr.take().map(OwnedFd::from),
+    ] {
+        match fd.map(|fd| Stream::new(fd, program.masker())).transpose() {
+            Ok(s) => streams.push(s),
+            Err(e) => {
+                kill(libc::SIGKILL);
+                let _ = child.wait();
+                return Err(e);
+            }
         }
-        out.truncated |= cut;
+    }
+    let deadline = Instant::now() + timeout;
+    let mut buf = Zeroizing::new(vec![0u8; 8192]);
+    let mut status = None;
+    let mut out = Captured::default();
+    let mut phase = Phase::Running;
+    loop {
+        for s in streams.iter_mut().flatten() {
+            s.read(&mut buf, max_output);
+        }
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        let now = Instant::now();
+        let mut open: Vec<libc::pollfd> = streams
+            .iter()
+            .flatten()
+            .filter_map(|s| s.file.as_ref())
+            .map(|f| libc::pollfd {
+                fd: f.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        match phase {
+            Phase::Running if status.is_some() => {
+                // What the program left running in its group goes with it.
+                kill(libc::SIGKILL);
+                phase = Phase::Draining(now + DRAIN);
+                continue;
+            }
+            Phase::Running if now >= deadline || stop() => {
+                out.timed_out = now >= deadline;
+                out.stopped = !out.timed_out;
+                kill(libc::SIGTERM);
+                phase = Phase::Stopping(now + GRACE);
+            }
+            Phase::Stopping(until) if status.is_some() || now >= until => {
+                kill(libc::SIGKILL);
+                if status.is_none() {
+                    status = Some(child.wait()?);
+                }
+                phase = Phase::Draining(now + DRAIN);
+                continue;
+            }
+            Phase::Draining(until) if open.is_empty() || now >= until => break,
+            _ => {}
+        }
+        if open.is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        } else {
+            // SAFETY: poll reads and writes only the `open.len()` entries of `open`.
+            unsafe { libc::poll(open.as_mut_ptr(), open.len() as libc::nfds_t, 20) };
+        }
+    }
+    for s in streams.iter_mut().flatten() {
+        s.close(max_output);
+        out.truncated |= s.cut;
+    }
+    let text = |i: usize| match streams.get(i) {
+        Some(Some(s)) => String::from_utf8_lossy(&s.kept).into_owned(),
+        _ => String::new(),
+    };
+    out.stdout = text(0);
+    out.stderr = text(1);
+    if !out.timed_out && !out.stopped {
+        out.exit_code = status.map(exit_code);
     }
     Ok(out)
-}
-
-/// Waits for the child until `deadline` (or `stop`), then stops its process group.
-fn wait_until(
-    child: &mut Child,
-    deadline: Instant,
-    stop: &dyn Fn() -> bool,
-) -> std::io::Result<(Option<ExitStatus>, bool)> {
-    loop {
-        if let Some(s) = child.try_wait()? {
-            return Ok((Some(s), false));
-        }
-        if Instant::now() >= deadline || stop() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let group = -(child.id() as i32);
-    // SAFETY: kill only sends a signal; the group is the child's own (process_group(0)).
-    unsafe { libc::kill(group, libc::SIGTERM) };
-    let grace = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < grace {
-        if child.try_wait()?.is_some() {
-            // SAFETY: as above; this reaches what the child left running in its group.
-            unsafe { libc::kill(group, libc::SIGKILL) };
-            return Ok((None, true));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    // SAFETY: as above.
-    unsafe { libc::kill(group, libc::SIGKILL) };
-    let _ = child.wait();
-    Ok((None, true))
 }
 
 #[cfg(test)]
@@ -297,6 +403,49 @@ mod tests {
             (c.exit_code, c.timed_out, c.truncated),
             (Some(3), false, false)
         );
+    }
+
+    #[test]
+    fn gives_captured_programs_a_clean_environment() {
+        // Cargo runs tests with this set; it stands for anything in the owner's environment.
+        assert!(std::env::var_os("CARGO_PKG_NAME").is_some());
+        let p = sh("/usr/bin/env", "synthetic-env-value");
+        let c = capture(&p, Duration::from_secs(20), 65536).unwrap();
+        assert!(!c.stdout.contains("CARGO_PKG_NAME"), "{}", c.stdout);
+        assert!(c.stdout.contains("SYNTH_PLAIN=development"));
+        assert!(c.stdout.contains("SYNTH_VALUE=<concealed by VaultOS>"));
+    }
+
+    #[test]
+    fn kills_what_the_program_leaves_running() {
+        let marker = std::env::temp_dir().join(format!("vaultos-run-left-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("(sleep 1; touch '{}') & echo started", marker.display());
+        let start = Instant::now();
+        let c = capture(
+            &sh(&script, "synthetic-unused"),
+            Duration::from_secs(20),
+            4096,
+        )
+        .unwrap();
+        assert_eq!((c.stdout.as_str(), c.exit_code), ("started\n", Some(0)));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "the background job outlived the run");
+    }
+
+    #[test]
+    fn stops_when_asked() {
+        let asked = Instant::now() + Duration::from_millis(200);
+        let c = capture_until(
+            &sh("echo begun; sleep 30", "synthetic-unused"),
+            Duration::from_secs(60),
+            4096,
+            &|| Instant::now() >= asked,
+        )
+        .unwrap();
+        assert!(c.stopped && !c.timed_out && c.exit_code.is_none());
+        assert_eq!(c.stdout, "begun\n");
     }
 
     #[test]
