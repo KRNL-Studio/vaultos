@@ -1,6 +1,6 @@
 import { _electron as electron } from "playwright";
 
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 
 import { tmpdir } from "node:os";
 
@@ -18,6 +18,20 @@ const syncRepo = path.join(dir, "sync-repository");
 execFileSync("git", [ "init", "-q", syncRepo ]);
 
 execFileSync("git", [ "-C", syncRepo, "remote", "add", "origin", path.join(dir, "unreachable.git") ]);
+
+// The test must not take the human's Quick Access shortcut while it runs.
+mkdirSync(path.join(dir, "data"), {
+    recursive: true,
+    mode: 0o700
+});
+
+writeFileSync(path.join(dir, "data", "desktop-prefs.json"), JSON.stringify({
+    shortcut: ""
+}), {
+    mode: 0o600
+});
+
+const mainWindow = "vaultos-preview://app/index.html";
 
 const app = await electron.launch({
     args: [ "." ],
@@ -127,7 +141,69 @@ try {
         }
     });
     assert.match(pullError, /cannot update the sync repo: .*unreachable\.git/, "a failed pull says why, not that a file operation failed");
-    console.log("Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason. Synthetic screenshot saved.");
+    // Search returns metadata only, and Enter opens the item in its project.
+    const found = await page.evaluate(() => window.vault.search("demo"));
+    assert.equal(found.length, 1);
+    assert.equal(found[0].key, "DEMO_API_KEY");
+    assert(!JSON.stringify(found).includes("synthetic-demo-only"), "search results carry no values");
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+K" : "Control+K");
+    await page.locator(".searchbox input").fill("demo api");
+    await page.locator(".results .row.result").first().waitFor();
+    await page.locator(".searchbox input").press("Enter");
+    await page.locator(".secret.card.flash").waitFor();
+    // Quick Access: its own window and preload. The main window cannot use its channels.
+    const quickOpened = app.waitForEvent("window");
+    await app.evaluate(({Menu}) => {
+        const find = items => {
+            for (const item of items) {
+                if (item.label === "Quick Access…") return item;
+                const inner = item.submenu && find(item.submenu.items);
+                if (inner) return inner;
+            }
+            return null;
+        };
+        find(Menu.getApplicationMenu().items).click();
+    });
+    const quick = await quickOpened;
+    await quick.waitForSelector("#q:not([disabled])");
+    assert.equal(await quick.evaluate(() => typeof window.vault), "undefined", "Quick Access has no main-window API");
+    const quickFound = await quick.evaluate(() => window.quick.search("demo"));
+    assert.equal(quickFound.length, 1);
+    assert(!JSON.stringify(quickFound).includes("synthetic-demo-only"), "Quick Access never receives values");
+    const crossed = await app.evaluate(async ({BrowserWindow}, url) => {
+        const w = BrowserWindow.getAllWindows().find(x => x.webContents.getURL() === url);
+        return w.webContents.executeJavaScript("typeof window.quick");
+    }, mainWindow);
+    assert.equal(crossed, "undefined", "the main window has no Quick Access API");
+    await quick.fill("#q", "DEMO");
+    await quick.locator("#results li[aria-selected=true]").waitFor();
+    await quick.locator("#q").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+    await page.locator(".secret.card.flash").waitFor();
+    assert.equal(await app.evaluate(({BrowserWindow}) => BrowserWindow.getAllWindows().filter(w => w.isVisible()).length), 1, "Quick Access hides after opening an item");
+    if (process.platform === "darwin") {
+        // Closing the window locks the vault and leaves VaultOS in the menu bar.
+        const closed = page.waitForEvent("close");
+        await app.evaluate(({BrowserWindow}, url) => BrowserWindow.getAllWindows().find(w => w.webContents.getURL() === url).close(), mainWindow);
+        await closed;
+        assert.equal((await quick.evaluate(() => window.quick.state())).unlocked, false, "closing the window locks the vault");
+        await assert.rejects(quick.evaluate(() => window.quick.search("demo")), /Vault is locked/);
+        const reopened = app.waitForEvent("window");
+        await app.evaluate(({app}) => app.emit("activate"));
+        const again = await reopened;
+        await again.waitForSelector("text=VaultOS is locked");
+        await again.getByPlaceholder("Master password", {
+            exact: true
+        }).fill("synthetic-ui-password");
+        await again.getByRole("button", {
+            name: "Unlock",
+            exact: true
+        }).click();
+        await again.getByRole("button", {
+            name: "Example App",
+            exact: false
+        }).waitFor();
+    }
+    console.log("Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, Quick Access, close to menu bar. Synthetic screenshot saved.");
 } finally {
     await app.close();
     rmSync(dir, {

@@ -67,13 +67,70 @@ async function boot() {
     document.documentElement.dataset.platform = s.isMac ? "mac" : "other";
     TOUCH_ID = s.touchId || TOUCH_ID;
     // Touch ID is offered automatically only when the window opens, never right after Lock.
-    view = s.exists ? {
+    view = !s.exists ? {
+        name: "setup"
+    } : s.unlocked ? {
+        name: "projects"
+    } : {
         name: "unlock",
         auto: TOUCH_ID.autoPrompt
-    } : {
-        name: "setup"
     };
     render();
+    runCommand();
+}
+
+// A field for a stored password: concealed until the human chooses Show.
+function concealedRow(input) {
+    const row = el(`<div class="concealed"></div>`);
+    const toggle = el(`<button type="button" class="iconbtn">Show</button>`);
+    toggle.onclick = () => {
+        const show = input.type === "password";
+        input.type = show ? "text" : "password";
+        toggle.textContent = show ? "Hide" : "Show";
+    };
+    row.appendChild(input);
+    row.appendChild(toggle);
+    return row;
+}
+
+const isUnlockedView = () => ![ "setup", "unlock", "loading" ].includes(view.name);
+
+// Navigation requests from the menu bar, app menu and Quick Access. A locked window keeps
+// the latest one and follows it after unlock.
+let queuedCommand = null;
+
+async function runCommand() {
+    let cmd = null;
+    try {
+        cmd = await window.vault.takeCommand();
+    } catch {}
+    if (cmd) queuedCommand = cmd;
+    if (!queuedCommand || !isUnlockedView()) return;
+    cmd = queuedCommand;
+    queuedCommand = null;
+    if (cmd.name === "settings") view = {
+        name: "settings"
+    }; else if (cmd.name === "project" && typeof cmd.project === "string") view = {
+        name: "project",
+        project: cmd.project,
+        focusKey: typeof cmd.focusKey === "string" ? cmd.focusKey : null
+    }; else if (cmd.name === "search") view = {
+        name: "projects",
+        query: view.name === "projects" ? view.query || "" : "",
+        focusSearch: true
+    }; else view = {
+        name: "projects"
+    };
+    render();
+}
+
+function afterUnlockRoute() {
+    if (isUnlockedView()) return;
+    view = {
+        name: "projects"
+    };
+    render();
+    runCommand();
 }
 
 async function refreshAgents() {
@@ -93,6 +150,9 @@ function topbar({crumb: crumb} = {}) {
     }
     bar.appendChild(el(`<div class="wordmark">VaultOS</div>`));
     bar.appendChild(el(`<div class="status" title="Vault unlocked"><span class="led"></span><span class="st">Unlocked</span></div>`));
+    const find = el(`<button class="iconbtn" title="Search (${modKey()}K)" aria-label="Search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>`);
+    find.onclick = () => openSearch();
+    bar.appendChild(find);
     const gear = el(`<button class="iconbtn gear" title="Settings"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>`);
     gear.onclick = () => {
         view = {
@@ -158,10 +218,7 @@ function renderSetup() {
             return;
         }
         pw.value = pw2.value = "";
-        view = {
-            name: "projects"
-        };
-        render();
+        afterUnlockRoute();
     };
     pw2.addEventListener("keydown", e => {
         if (e.key === "Enter") btn.click();
@@ -190,10 +247,7 @@ async function renderUnlock() {
             pw.focus();
             return;
         }
-        view = {
-            name: "projects"
-        };
-        render();
+        afterUnlockRoute();
     };
     pw.addEventListener("keydown", e => {
         if (e.key === "Enter") btn.click();
@@ -207,10 +261,7 @@ async function renderUnlock() {
             try {
                 const r = await window.vault.unlockTouchId();
                 if (r.ok) {
-                    view = {
-                        name: "projects"
-                    };
-                    render();
+                    afterUnlockRoute();
                     return;
                 }
                 err.textContent = r.error;
@@ -290,6 +341,7 @@ async function renderProjects() {
     if (revision !== renderVersion) return;
     await refreshAgents();
     if (revision !== renderVersion) return;
+    searchPanel(scroll, revision);
     scroll.appendChild(el(`<div class="section"><span class="label">Projects</span><span class="label">${projects.length}</span></div>`));
     const pending = await window.vault.pending();
     if (revision !== renderVersion) return;
@@ -384,6 +436,130 @@ async function renderProjects() {
     $app.appendChild(scroll);
 }
 
+const modKey = () => document.documentElement.dataset.platform === "mac" ? "⌘" : "Ctrl+";
+
+function openSearch() {
+    if (!isUnlockedView()) return;
+    const input = document.querySelector(".searchbox input");
+    if (view.name === "projects" && input) {
+        input.focus();
+        input.select();
+        return;
+    }
+    view = {
+        name: "projects",
+        focusSearch: true
+    };
+    render();
+}
+
+// Search across every project. The query lives in `view` so a re-render keeps it; while it
+// is non-empty the project list is hidden and ranked results show instead.
+function searchPanel(scroll, revision) {
+    const box = el(`<div class="searchbox"><input type="search" placeholder="Search keys, projects, usernames, websites" aria-label="Search all keys" aria-controls="search-results" /><kbd></kbd></div>`);
+    box.querySelector("kbd").textContent = `${modKey()}K`;
+    const input = box.querySelector("input");
+    const results = el(`<div class="results" id="search-results" role="listbox" aria-label="Search results"></div>`);
+    let found = [], sel = 0, token = 0;
+    const open = item => {
+        view = {
+            name: "project",
+            project: item.project,
+            focusKey: item.key
+        };
+        render();
+    };
+    const mark = () => {
+        [ ...results.children ].forEach((row, i) => row.setAttribute("aria-selected", String(i === sel)));
+        const row = results.children[sel];
+        if (row) row.scrollIntoView({
+            block: "nearest"
+        });
+    };
+    const draw = () => {
+        results.textContent = "";
+        if (!found.length) {
+            const empty = el(`<div class="empty"><p></p></div>`);
+            empty.querySelector("p").textContent = `No keys match "${input.value.trim()}". Try a project, username or website.`;
+            results.appendChild(empty);
+            return;
+        }
+        found.forEach((item, i) => {
+            const row = el(`<div class="row result" role="option" tabindex="-1"><span class="tile" aria-hidden="true"></span><div class="grow"><div class="name mono"></div><div class="sub"></div></div></div>`);
+            row.querySelector(".tile").textContent = initialOf(item.key);
+            row.querySelector(".name").textContent = item.key;
+            row.querySelector(".sub").textContent = [ item.project, item.username || item.email, item.host ].filter(Boolean).join(" · ");
+            if (item.hasValue) {
+                const copy = el(`<button class="iconbtn">Copy</button>`);
+                copy.onclick = async e => {
+                    e.stopPropagation();
+                    await human("copy", item.project, item.key);
+                    copy.textContent = "Copied";
+                    copy.classList.add("copied");
+                    setTimeout(() => {
+                        copy.textContent = "Copy";
+                        copy.classList.remove("copied");
+                    }, 1200);
+                };
+                row.appendChild(copy);
+            }
+            row.onclick = () => open(item);
+            row.onmousemove = () => {
+                if (sel !== i) {
+                    sel = i;
+                    mark();
+                }
+            };
+            results.appendChild(row);
+        });
+        mark();
+    };
+    const run = async () => {
+        view.query = input.value;
+        const active = !!input.value.trim();
+        scroll.classList.toggle("searching", active);
+        if (!active) {
+            results.textContent = "";
+            found = [];
+            return;
+        }
+        const t = ++token;
+        const r = await window.vault.search(input.value);
+        if (t !== token || revision !== renderVersion) return;
+        found = r;
+        sel = 0;
+        draw();
+    };
+    input.addEventListener("input", run);
+    input.addEventListener("keydown", e => {
+        if ((e.key === "ArrowDown" || e.key === "ArrowUp") && found.length) {
+            e.preventDefault();
+            sel = (sel + (e.key === "ArrowDown" ? 1 : -1) + found.length) % found.length;
+            mark();
+        } else if (e.key === "Enter" && found[sel]) {
+            e.preventDefault();
+            open(found[sel]);
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            if (input.value) {
+                input.value = "";
+                run();
+            } else input.blur();
+        }
+    });
+    scroll.appendChild(box);
+    scroll.appendChild(results);
+    input.value = view.query || "";
+    if (input.value) run();
+    if (view.focusSearch) {
+        view.focusSearch = false;
+        requestAnimationFrame(() => {
+            input.focus();
+            input.select();
+        });
+    }
+}
+
 async function renderProject() {
     const revision = renderVersion;
     const project = view.project;
@@ -455,6 +631,7 @@ async function renderProject() {
             badges.push(`<span class="badge ${cls}">${txt}</span>`);
         }
         const card = el(`<div class="secret card">\n      <div class="head">${prov.svg}<span class="key mono">${esc(s.key)}</span><span class="pname">${esc(prov.name)}</span></div>\n      ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}\n      ${sub ? `<div class="note">${sub}</div>` : ""}\n      ${s.note ? `<div class="note">${esc(s.note)}</div>` : ""}\n      <div class="val" data-val style="display:none"></div>\n      <div class="actions"></div></div>`);
+        card.dataset.key = s.key;
         const valEl = card.querySelector("[data-val]");
         const actions = card.querySelector(".actions");
         const showBtn = el(`<button class="iconbtn">Reveal</button>`);
@@ -566,6 +743,20 @@ async function renderProject() {
     };
     scroll.appendChild(del);
     $app.appendChild(scroll);
+    if (view.focusKey) {
+        const card = [ ...scroll.querySelectorAll(".secret.card") ].find(c => c.dataset.key === view.focusKey);
+        view.focusKey = null;
+        if (card) {
+            card.scrollIntoView({
+                block: "center"
+            });
+            card.classList.add("flash");
+            card.tabIndex = -1;
+            card.focus({
+                preventScroll: true
+            });
+        }
+    }
 }
 
 function renderProviderPicker(project) {
@@ -799,8 +990,8 @@ function buildPasswordForm(scroll, project, prov, editing, current) {
     const emailInput = el(`<input type="text" placeholder="login@example.com" value="${esc(current ? current.email : "")}" />`);
     emailField.appendChild(emailInput);
     const passField = fieldBlock("Password");
-    const passInput = el(`<input type="text" placeholder="the password" value="${esc(current ? current.value : "")}" />`);
-    passField.appendChild(passInput);
+    const passInput = el(`<input type="password" placeholder="the password" autocomplete="off" value="${esc(current ? current.value : "")}" />`);
+    passField.appendChild(concealedRow(passInput));
     const urlField = fieldBlock("URL" + OPTIONAL);
     const urlInput = el(`<input type="text" placeholder="https://…" value="${esc(current ? current.url : "")}" />`);
     urlField.appendChild(urlInput);
@@ -904,6 +1095,85 @@ async function renderSettings() {
     soft.checked = s.lockPolicy === "soft";
     scroll.appendChild(softLabel);
     scroll.appendChild(el(`<p class="note">Off by default. With soft lock, the vault stays decrypted in memory and enrolled agents keep working while your Mac is locked, asleep or idle; anyone or anything that can act as your account in that time can use their grants. The Lock button always stops the API and clears the remembered password.</p>`));
+    const dp = await window.vault.getDesktopPrefs();
+    if (revision !== renderVersion) return;
+    const mac = document.documentElement.dataset.platform === "mac";
+    scroll = panel(page, mac ? "Menu bar & Quick Access" : "Tray & Quick Access");
+    const desktopBox = (text, checked, disabled = false) => {
+        const label = el(`<label class="toggle"><input type="checkbox" class="switch" /><span></span></label>`);
+        label.querySelector("span").textContent = text;
+        const box = label.querySelector("input");
+        box.checked = checked;
+        box.disabled = disabled;
+        scroll.appendChild(label);
+        return box;
+    };
+    const menuBar = desktopBox(mac ? "Keep VaultOS in the menu bar when the window closes" : "Keep VaultOS in the system tray when the window closes", dp.menuBar);
+    scroll.appendChild(el(`<p class="note">Closing the window still locks the vault. VaultOS then waits, locked, ${mac ? "in the menu bar" : "in the tray"} so Quick Access and Open are one click away. Quit from its menu.</p>`));
+    const shortcutField = fieldBlock("Quick Access shortcut");
+    const recorder = el(`<div class="concealed"><input type="text" readonly aria-label="Quick Access shortcut" /><button type="button" class="iconbtn">Record</button><button type="button" class="iconbtn">Turn off</button></div>`);
+    const [shortcutShown] = recorder.querySelectorAll("input");
+    const [recordBtn, offBtn] = recorder.querySelectorAll("button");
+    let shortcut = dp.shortcut;
+    const pretty = acc => !acc ? "Off" : mac ? acc.replace(/CommandOrControl|CmdOrCtrl|Command|Cmd/g, "⌘").replace(/Shift/g, "⇧").replace(/Alt|Option/g, "⌥").replace(/Control|Ctrl/g, "⌃").replace(/\+/g, "") : acc.replace(/CommandOrControl|CmdOrCtrl/g, "Ctrl");
+    const showShortcut = () => {
+        shortcutShown.value = pretty(shortcut);
+    };
+    showShortcut();
+    const shortcutNote = el(`<p class="note"></p>`);
+    shortcutNote.textContent = dp.shortcutError || "Opens Quick Access from any app: search, then press Return to copy.";
+    if (dp.shortcutError) shortcutNote.classList.add("err");
+    const KEY_NAMES = {
+        Space: "Space",
+        ArrowUp: "Up",
+        ArrowDown: "Down",
+        ArrowLeft: "Left",
+        ArrowRight: "Right",
+        Enter: "Return",
+        Tab: "Tab",
+        Backspace: "Backspace",
+        Delete: "Delete",
+        Home: "Home",
+        End: "End",
+        PageUp: "PageUp",
+        PageDown: "PageDown"
+    };
+    const record = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === "Escape") return stopRecording();
+        if ([ "Shift", "Control", "Alt", "Meta" ].includes(e.key)) return;
+        const key = KEY_NAMES[e.code] || (/^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : /^Digit\d$/.test(e.code) ? e.code.slice(5) : /^F\d{1,2}$/.test(e.code) ? e.code : null);
+        if (!key) return;
+        const mods = [ e.metaKey && (mac ? "CommandOrControl" : "Super"), e.ctrlKey && (mac ? "Control" : "CommandOrControl"), e.altKey && "Alt", e.shiftKey && "Shift" ].filter(Boolean);
+        if (!mods.length && !/^F\d/.test(key)) {
+            shortcutNote.textContent = "Include at least one modifier key, like ⌘ or Ctrl.";
+            return;
+        }
+        shortcut = [ ...mods, key ].join("+");
+        stopRecording();
+    };
+    const stopRecording = () => {
+        window.removeEventListener("keydown", record, true);
+        recordBtn.textContent = "Record";
+        showShortcut();
+    };
+    recordBtn.onclick = () => {
+        recordBtn.textContent = "Press keys…";
+        shortcutShown.value = "";
+        window.addEventListener("keydown", record, true);
+    };
+    offBtn.onclick = () => {
+        shortcut = "";
+        stopRecording();
+    };
+    shortcutField.appendChild(recorder);
+    scroll.appendChild(shortcutField);
+    scroll.appendChild(shortcutNote);
+    const atLogin = desktopBox(mac ? "Open at login, locked in the menu bar" : "Open at login, locked in the tray", dp.launchAtLogin, !dp.loginItemSupported);
+    const notifyApprovals = desktopBox("Notify me when an agent's key is waiting for approval", dp.notifyApprovals);
+    const notifyExpiry = desktopBox("Notify me about keys that expire within 7 days", dp.notifyExpiry);
+    scroll.appendChild(el(`<p class="note">Notifications never include key names, because they can appear on the lock screen.</p>`));
     scroll = panel(page, "Sync");
     const autoLabel = el(`<label class="toggle"><input type="checkbox" class="switch" />Sync automatically while unlocked</label>`);
     const auto = autoLabel.querySelector("input");
@@ -944,6 +1214,15 @@ async function renderSettings() {
     const save = el(`<button class="btn primary">Save settings</button>`);
     save.onclick = async () => {
         try {
+            const saved = await window.vault.setDesktopPrefs({
+                menuBar: menuBar.checked,
+                shortcut: shortcut,
+                launchAtLogin: atLogin.checked,
+                notifyApprovals: notifyApprovals.checked,
+                notifyExpiry: notifyExpiry.checked
+            });
+            shortcutNote.textContent = saved.shortcutError || "Opens Quick Access from any app: search, then press Return to copy.";
+            shortcutNote.classList.toggle("err", !!saved.shortcutError);
             await human("setSettings", {
                 ...input.value ? {
                     exportPassword: input.value
@@ -1448,11 +1727,29 @@ window.addEventListener("focus", async () => {
 });
 
 window.vault.onLocked(() => {
+    for (const modal of document.querySelectorAll(".modal")) {
+        const cancel = modal.querySelector(".btn.ghost");
+        if (cancel) cancel.click(); else modal.remove();
+    }
     AGENTS = [];
     view = {
         name: "unlock"
     };
     render();
+});
+
+window.vault.onUnlocked(() => {
+    if (view.name === "unlock") afterUnlockRoute();
+});
+
+window.vault.onCommand(() => runCommand());
+
+document.addEventListener("keydown", e => {
+    const mod = document.documentElement.dataset.platform === "mac" ? e.metaKey : e.ctrlKey;
+    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k" && isUnlockedView()) {
+        e.preventDefault();
+        openSearch();
+    }
 });
 
 window.addEventListener("unhandledrejection", event => {
