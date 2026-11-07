@@ -24,4 +24,18 @@ Coding client → MCP stdio bridge → authenticated localhost API
 
 `sync.js` separates local merging from remote transport. `autosync.js` runs pull-then-push rounds inside the owning process, debounced after local writes and on an interval, and halts on any conflict or verification failure. `git.js` uses argument arrays, disabled hooks, known staged paths and remote receipts. Fetch and push run asynchronously, so the owner keeps serving the window and API while a remote is slow (local Git commands stay synchronous); `Sync` runs one remote operation per checkout at a time, and the local merge and age encryption still run synchronously. Fetches and pushes over SSH share one multiplexed connection unless the user configured SSH for Git. A pull reuses plaintext it already decrypted from byte-identical ciphertext, so only new or changed sync files run `age`. `Store.batch()` defers saves inside a bulk change (an .env import, Approve all, an agent creating a project) to one encrypted write. Trust pins live inside the encrypted vault; age/signing machine keys and the replay index live in the private data directory. The sync format is specific to this preview and is not a public interoperability standard.
 
+## Rust core (format v4)
+
+`crates/vaultos-core` is the Rust implementation of vault format v4, the base for moving the app to Rust. The desktop app, CLI, backend and MCP bridge do not use it yet; they still read and write format v3 through `store.js`.
+
+```text
+master password ─Argon2id─┐
+Secret Key (optional) ────┴─HKDF─▶ Account Unlock Key ─unwraps─▶ Vault Key
+                                                                  ├─▶ per-project keys ─▶ item metadata, item secrets
+                                                                  ├─▶ vault metadata, history, audit signing seed
+                                                                  └─HKDF─▶ file MAC key
+```
+
+`format.rs` defines the file and key derivation; every box is XChaCha20-Poly1305 with associated data naming its purpose and the vault, project and item ids, so a box moved elsewhere in the file fails to open. `store.rs` follows `store.js`: projects, items, ownership, delegation, injection approval, history with Undo, tombstones and settings. While unlocked it holds decrypted metadata, and item secrets stay sealed until `reveal`. Each change is applied to a copy of the state and kept only once the file is saved; saving takes `write.lock`, refuses a file that changed since it was read, and replaces the file atomically. Lock files match `session.js`, so the two implementations never write one data directory at the same time. `audit.rs` writes the signed, hash-chained `audit-v4.log`. `upgrade.rs` is the explicit v3-to-v4 upgrade, and `v3.rs` reads format v3 only for it. `canon.rs` and `providers.rs` match `model.js` and `providers.js`, with tests that compare against them (`tests/fixtures/record-hash.txt`, `test/rust-providers.test.js`). `tests/fixtures/v3-vault.json` is a vault written by `store.js` with synthetic values (`scripts/make-rust-fixtures.mjs`); the upgrade tests read it.
+
 See [SECURITY.md](../SECURITY.md) for trust boundaries and limitations. Test files map to persistence/export, HTTP authorization, MCP transport, desktop behavior and encrypted sync rather than trying to establish security through UI tests alone.

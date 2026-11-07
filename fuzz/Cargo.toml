@@ -1,0 +1,39 @@
+# Fuzz targets for the parsers that read untrusted bytes. Needs nightly and cargo-fuzz:
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run vault_file
+[package]
+name = "vaultos-core-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vaultos-core = { path = "../crates/vaultos-core" }
+
+# Its own workspace, so the main one never builds libFuzzer.
+[workspace]
+
+[[bin]]
+name = "vault_file"
+path = "fuzz_targets/vault_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secret_key"
+path = "fuzz_targets/secret_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "v3_envelope"
+path = "fuzz_targets/v3_envelope.rs"
+test = false
+doc = false
+bench = false
