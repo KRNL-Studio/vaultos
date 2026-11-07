@@ -6,7 +6,8 @@
 //!
 //! Messages: `{id?, op, key?, ...}` with `op` one of `status`, `pair` (`name`, `code`),
 //! `whoami`, `logins` (`url`), `fill` (`url`, `projectId`, `itemId`) and `save` (`url`,
-//! `username`, `password`). Replies: `{id, ok: true, ...}` or
+//! `username`, `password`, and `projectId` and `itemId` to update that login). Replies:
+//! `{id, ok: true, ...}` or
 //! `{id, ok: false, code, error}`.
 
 use serde_json::{json, Map, Value};
@@ -64,9 +65,9 @@ fn handle(
         .get("key")
         .and_then(Value::as_str)
         .filter(|k| !k.is_empty());
-    let call = |method: &str, route: &str, body: Option<Value>, timeout: Duration| {
+    let call = |method: &str, route: &str, body: Option<&Value>, timeout: Duration| {
         client
-            .browser(method, route, body.as_ref(), origin, key, timeout)
+            .browser(method, route, body, origin, key, timeout)
             .map_err(|e| {
                 let code = match (e.code.as_str(), e.status) {
                     (_, Some(401)) => "unpaired",
@@ -94,7 +95,7 @@ fn handle(
         "pair" => call(
             "POST",
             "/browser/pair",
-            Some(pick(&["name", "code"])),
+            Some(&pick(&["name", "code"])),
             PAIR_TIMEOUT,
         ),
         "whoami" => call("GET", "/browser/whoami", None, TIMEOUT),
@@ -105,15 +106,16 @@ fn handle(
         "fill" => call(
             "POST",
             "/browser/fill",
-            Some(pick(&["url", "projectId", "itemId"])),
+            Some(&pick(&["url", "projectId", "itemId"])),
             TIMEOUT,
         ),
-        "save" => call(
-            "POST",
-            "/browser/save",
-            Some(pick(&["url", "username", "password"])),
-            TIMEOUT,
-        ),
+        "save" => {
+            // The copy of the password sent on is scrubbed as the message itself is.
+            let mut body = pick(&["url", "username", "password", "projectId", "itemId"]);
+            let r = call("POST", "/browser/save", Some(&body), TIMEOUT);
+            vaultos_core::secret::scrub_json(&mut body);
+            r
+        }
         _ => Err(("usage".into(), "Unknown operation".into())),
     }
 }

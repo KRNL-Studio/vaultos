@@ -46,6 +46,26 @@
         return Boolean(a && b) && a.username === b.username && a.passwordHash === b.passwordHash;
     }
 
+    const isNewPassword = f => (f.autocomplete || "").includes("new-password");
+
+    /**
+     * Which of a form's password fields (`{autocomplete}` each, in order) to fill or to save
+     * from, or -1 when the form is not that simple. Filling needs the form's only password
+     * field, for the current password; saving takes the last new password (after the current
+     * one and before none), or the only field.
+     */
+    function passwordField(fields, purpose) {
+        if (purpose === "fill") return fields.length === 1 && !isNewPassword(fields[0]) ? 0 : -1;
+        const fresh = fields.map((f, i) => isNewPassword(f) ? i : -1).filter(i => i >= 0);
+        if (fresh.length) return fresh[fresh.length - 1];
+        return fields.length === 1 ? 0 : -1;
+    }
+
+    /** The second line of a login in a menu: its username and the host it was saved for. */
+    function loginDetail(login) {
+        return [ login.username, login.host ].filter(Boolean).join(" · ") || login.project || "";
+    }
+
     const CSS = `
 :host { all: initial; }
 .vo { font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; }
@@ -72,7 +92,7 @@
   .secondary { background: #161b22; color: #e6edf3; border-color: #30363d; }
 }`;
 
-    const shared = { CODE_ALPHABET, pairingCode, browserName, isOtp, isUsername, sameLogin, CSS };
+    const shared = { CODE_ALPHABET, pairingCode, browserName, isOtp, isUsername, sameLogin, isNewPassword, passwordField, loginDetail, CSS };
     if (typeof module !== "undefined" && module.exports) module.exports = shared;
     else root.VaultOSShared = shared;
 })(globalThis);

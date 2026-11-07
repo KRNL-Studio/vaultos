@@ -191,9 +191,30 @@ fn pairs_after_confirmation_and_fills_only_matching_sites() {
         Some(json!({ "url": "https://accounts.example.org/signin", "username": "bob", "password": "synthetic-new-pass" })),
     )
     .unwrap();
-    assert_eq!(saved["project"], "Logins");
+    assert_eq!(
+        (&saved["project"], &saved["updated"]),
+        (&json!("Logins"), &json!(false))
+    );
     let again = logins("https://example.org/").unwrap();
     assert_eq!(again["logins"][0]["username"], "bob");
+    // With the login's ids, that login gets the new password; with another's, nothing does.
+    let bob = &again["logins"][0];
+    let (project_id, item_id) = (bob["projectId"].clone(), bob["itemId"].clone());
+    let updated = call(
+        "POST",
+        "/browser/save",
+        Some(json!({ "url": "https://example.org/", "username": "bob", "password": "synthetic-newer-pass", "projectId": project_id, "itemId": item_id })),
+    )
+    .unwrap();
+    assert_eq!(updated["updated"], true);
+    let other = call(
+        "POST",
+        "/browser/save",
+        Some(
+            json!({ "url": "https://example.org/", "username": "carol", "password": "synthetic-other-pass", "projectId": project_id, "itemId": item_id }),
+        ),
+    );
+    assert_eq!(status(other), Some(404));
 
     let audited = handle.with_store(|s| {
         let (_, entries) = s.verify_audit().unwrap();

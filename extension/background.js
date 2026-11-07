@@ -12,6 +12,8 @@ const api = globalThis.browser ?? globalThis.chrome;
 const S = globalThis.VaultOSShared;
 /** How long a submitted login waits for the human to choose Save. */
 const SAVE_WINDOW_MS = 2 * 60 * 1000;
+/** How long the login filled in a tab is remembered, to know which one a new password is for. */
+const FILLED_MS = 15 * 60 * 1000;
 const NO_HOST = "The VaultOS browser helper is not set up. In VaultOS, open Settings and choose Set up browsers.";
 
 function database() {
@@ -66,6 +68,44 @@ function hostOf(url) {
 
 const session = api.storage.session;
 let pairing = null;
+
+const expired = (k, v) => !v || (k.startsWith("save:") && Date.now() - v.at > SAVE_WINDOW_MS) || (k.startsWith("filled:") && Date.now() - v.at > FILLED_MS);
+
+/** Removes submitted passwords nobody saved in time, and old fill records. */
+async function purge() {
+    const all = await session.get(null);
+    const old = Object.keys(all).filter(k => expired(k, all[k]));
+    if (old.length) await session.remove(old);
+}
+
+async function stored(k) {
+    const v = (await session.get(k))[k];
+    if (!v || !expired(k, v)) return v || null;
+    await session.remove(k);
+    return null;
+}
+
+api.alarms.onAlarm.addListener(a => {
+    if (a.name === "purge") purge();
+});
+api.tabs.onRemoved.addListener(tabId => session.remove([ `save:${tabId}`, `filled:${tabId}` ]));
+purge();
+
+/**
+ * The login a submitted password would update: the one filled in this tab if it has the same
+ * username, else the only saved login for the site with that username. `"several"` when
+ * there is more than one and none was filled, so the human changes it in the app.
+ */
+async function target(p, tabId) {
+    const r = await call("logins", { url: p.url });
+    if (!r.ok) return null;
+    const same = r.logins.filter(l => l.username === p.username);
+    const filled = await stored(`filled:${tabId}`);
+    const was = filled && same.find(l => l.projectId === filled.projectId && l.itemId === filled.itemId);
+    if (was) return was;
+    if (same.length > 1) return "several";
+    return same[0] || null;
+}
 
 const fromPopup = s => s.id === api.runtime.id && !s.tab && typeof s.url === "string" && s.url.startsWith(api.runtime.getURL(""));
 const fromPage = s => s.id === api.runtime.id && Boolean(s.tab) && typeof s.url === "string" && /^https?:\/\//.test(s.url);
@@ -128,30 +168,42 @@ const pageOps = {
     async fill(m, s) {
         const r = await call("fill", { url: s.url, projectId: String(m.projectId || ""), itemId: String(m.itemId || "") });
         if (r.ok) {
-            await session.set({ [`filled:${s.tab.id}`]: { username: r.username, passwordHash: await sha256(r.password || "") } });
+            const filled = { username: r.username, passwordHash: await sha256(r.password || ""), projectId: String(m.projectId), itemId: String(m.itemId), at: Date.now() };
+            await session.set({ [`filled:${s.tab.id}`]: filled });
         }
         return r;
     },
     async offerSave(m, s) {
-        const username = String(m.username || "").slice(0, 256), password = String(m.password || "");
+        let username = String(m.username || "").slice(0, 256);
+        const password = String(m.password || "");
         if (!password || password.length > 4096) return { ok: true, offered: false };
-        const filled = (await session.get(`filled:${s.tab.id}`))[`filled:${s.tab.id}`];
+        const filled = await stored(`filled:${s.tab.id}`);
+        // A change-password form often shows no username: it is the one just filled.
+        if (!username && filled) username = filled.username;
         if (S.sameLogin(filled, { username, passwordHash: await sha256(password) })) return { ok: true, offered: false };
         await session.set({ [`save:${s.tab.id}`]: { url: s.url, username, password, at: Date.now() } });
+        await api.alarms.create("purge", { when: Date.now() + SAVE_WINDOW_MS + 1000 });
         return { ok: true, offered: true };
     },
     async pendingSave(m, s) {
         if (s.frameId !== 0) return { ok: true, pending: null };
-        const p = (await session.get(`save:${s.tab.id}`))[`save:${s.tab.id}`];
-        if (!p || Date.now() - p.at > SAVE_WINDOW_MS) return { ok: true, pending: null };
-        return { ok: true, pending: { username: p.username, site: hostOf(p.url) } };
+        const p = await stored(`save:${s.tab.id}`);
+        if (!p) return { ok: true, pending: null };
+        const t = await target(p, s.tab.id);
+        // Several logins could be meant: none is offered, rather than one picked.
+        if (t === "several") return { ok: true, pending: null };
+        const update = t ? { name: t.name, project: t.project } : null;
+        return { ok: true, pending: { username: p.username, site: hostOf(p.url), update } };
     },
     async save(m, s) {
         const k = `save:${s.tab.id}`;
-        const p = (await session.get(k))[k];
+        const p = await stored(k);
         await session.remove(k);
-        if (!p || Date.now() - p.at > SAVE_WINDOW_MS) return { ok: false, code: "expired", error: "Nothing is waiting to be saved." };
-        return call("save", { url: p.url, username: p.username, password: p.password });
+        if (!p) return { ok: false, code: "expired", error: "Nothing is waiting to be saved." };
+        const t = await target(p, s.tab.id);
+        if (t === "several") return { ok: false, code: "conflict", error: "Several logins for this site use this username; change the password in VaultOS." };
+        const ids = t ? { projectId: t.projectId, itemId: t.itemId } : {};
+        return call("save", { url: p.url, username: p.username, password: p.password, ...ids });
     },
     async dismissSave(m, s) {
         await session.remove(`save:${s.tab.id}`);

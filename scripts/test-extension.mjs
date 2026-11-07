@@ -151,6 +151,8 @@ try {
     if (await find("item")) throw new Error("A script's click opened the menu");
     await click(button);
     const item = await until("the login in the menu", () => find("item", "alice"));
+    // Controls act only once they have been visible for a moment.
+    await sleep(700);
     await click(item);
     const values = await until("the filled login", async () => {
         const v = await evaluate(tab, `[document.getElementById("user").value, document.getElementById("pass").value]`);
@@ -165,6 +167,7 @@ try {
     await clickPage("#go");
     await until("the welcome page", () => evaluate(tab, `document.title === "Welcome"`));
     const save = await until("the save offer", () => find("primary", "Save"));
+    await sleep(700);
     await click(save);
     await until("the saved note", () => find("note", "Saved as"));
     console.log("saved the new login");
