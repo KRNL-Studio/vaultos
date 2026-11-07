@@ -30,7 +30,7 @@ fn to_json<T: serde::Serialize>(v: T) -> Reply {
 }
 
 pub async fn trash(app: &Arc<App>) -> Reply {
-    to_json(store(app, |s| s.list_trash()).await?)
+    to_json(store(app, |s| s.list_trash(HUMAN)).await?)
 }
 
 pub async fn restore(app: &Arc<App>, project: String, key: String) -> Reply {
@@ -100,18 +100,26 @@ pub async fn copy_otp(app: &Arc<App>, project: String, key: String) -> Reply {
 }
 
 /// Reads a file the person picked, refusing anything but a regular file up to `max` bytes.
+/// The limit holds while reading too, for a file that grows after the check.
 fn read_picked(path: &Path, max: usize) -> Result<Vec<u8>, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    use std::io::Read;
+    let too_big = || format!("The file is larger than {} MB", max / (1024 * 1024));
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() {
         return Err("Choose a regular file".into());
     }
     if meta.len() > max as u64 {
-        return Err(format!(
-            "The file is larger than {} MB",
-            max / (1024 * 1024)
-        ));
+        return Err(too_big());
     }
-    std::fs::read(path).map_err(|e| e.to_string())
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > max {
+        return Err(too_big());
+    }
+    Ok(bytes)
 }
 
 pub async fn add_attachment(
@@ -193,7 +201,7 @@ pub async fn remove_attachment(app: &Arc<App>, project: String, key: String, id:
 }
 
 pub async fn item_history(app: &Arc<App>, project: String, key: String) -> Reply {
-    to_json(store(app, move |s| s.item_history(&project, &key)).await?)
+    to_json(store(app, move |s| s.item_history(&project, &key, HUMAN)).await?)
 }
 
 pub async fn restore_version(app: &Arc<App>, id: String) -> Reply {
@@ -270,9 +278,13 @@ fn pwned_range(prefix: &str) -> Result<String, String> {
         .iter()
         .find(|c| Path::new(c).is_file())
         .ok_or("The breach check needs curl")?;
-    let out = std::process::Command::new(curl)
+    // -q first: no ~/.curlrc, so only these options apply.
+    let mut child = std::process::Command::new(curl)
         .args([
+            "-q",
             "-fsS",
+            "--max-filesize",
+            "1048576",
             "--max-time",
             "20",
             "--proto",
@@ -284,12 +296,27 @@ fn pwned_range(prefix: &str) -> Result<String, String> {
         ])
         .arg(format!("https://api.pwnedpasswords.com/range/{prefix}"))
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    if !out.status.success() {
+    // A reply is about 40 KB; read at most 1 MB of whatever comes back.
+    const LIMIT: usize = 1 << 20;
+    let mut body = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        use std::io::Read;
+        let _ = out.take(LIMIT as u64 + 1).read_to_end(&mut body);
+    }
+    if body.len() > LIMIT {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Unexpected reply from the breach check".into());
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
         return Err("The breach check could not reach api.pwnedpasswords.com".into());
     }
-    String::from_utf8(out.stdout).map_err(|_| "Unexpected reply from the breach check".into())
+    String::from_utf8(body).map_err(|_| "Unexpected reply from the breach check".into())
 }
 
 fn breach_counts(range: &str, suffix: &str) -> u64 {

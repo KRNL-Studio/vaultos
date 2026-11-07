@@ -98,6 +98,9 @@ pub struct App {
     running: AtomicUsize,
     human: AtomicBool,
     generation: AtomicU64,
+    /// Held by a Lock and by an unlock's last step, so a Lock either stops the unlock or
+    /// undoes it.
+    finishing: Mutex<()>,
     unlocks: tokio::sync::Mutex<()>,
     proving: tokio::sync::Mutex<()>,
     retry: Mutex<Backoff>,
@@ -134,6 +137,7 @@ impl App {
             running: AtomicUsize::new(0),
             human: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            finishing: Mutex::default(),
             unlocks: tokio::sync::Mutex::new(()),
             proving: tokio::sync::Mutex::new(()),
             retry: Mutex::default(),
@@ -215,12 +219,14 @@ impl App {
         Store::new(&self.data_dir).ok()?.file_version().ok()
     }
 
-    fn needs_secret_key(&self) -> bool {
+    /// The vault needs a Secret Key this device does not hold: none, or an earlier one that
+    /// `vaultos secret-key` has since replaced.
+    fn secret_key_missing(&self) -> bool {
         Store::new(&self.data_dir)
             .ok()
             .and_then(|s| s.secret_key_id().ok())
             .flatten()
-            .is_some()
+            .is_some_and(|id| keyring::stored_secret_key(&self.keyring, &id).is_none())
     }
 
     /// Runs `f` on the open store.
@@ -301,6 +307,7 @@ impl App {
     /// `forget` (Lock, screen lock, sleep, idle) the remembered password is removed too and the
     /// next unlock must be typed.
     pub fn lock(&self, forget: bool) {
+        let _gate = lock(&self.finishing);
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.human.store(false, Ordering::SeqCst);
         if let Some(app) = self.tauri.get() {
@@ -309,8 +316,18 @@ impl App {
         self.clipboard.clear();
         self.forget_proof();
         if forget {
-            let _ = atomic_write(&self.data_dir.join(LOCKED_FILE), b"");
-            self.keyring.clear(keyring::PASSWORD);
+            // Either one keeps background access from unlocking again.
+            let blocked = atomic_write(&self.data_dir.join(LOCKED_FILE), b"").is_ok();
+            let forgotten = self.keyring.clear(keyring::PASSWORD).is_ok();
+            if !blocked && !forgotten {
+                if let Some(app) = self.tauri.get() {
+                    ui::notify(
+                        app,
+                        "VaultOS could not record the Lock",
+                        "Background access may unlock the vault again. Turn off Remember password in Settings.",
+                    );
+                }
+            }
         }
         *lock(&self.password) = None;
         *lock(&self.secret_key) = None;
@@ -324,6 +341,7 @@ impl App {
     /// Locks only the window: the human must unlock again to see or change anything, while
     /// this process keeps the vault open for enrolled agents.
     pub fn lock_window(&self) {
+        let _gate = lock(&self.finishing);
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.human.store(false, Ordering::SeqCst);
         if let Some(app) = self.tauri.get() {
@@ -341,6 +359,8 @@ impl App {
     /// chose soft.
     pub fn auto_lock(&self) {
         if !self.human.load(Ordering::SeqCst) && !self.store_unlocked() {
+            // An unlock may still be waiting for its turn, Touch ID or the key derivation.
+            self.lock(false);
             return;
         }
         let soft = self
@@ -456,23 +476,20 @@ impl App {
         store: &Store,
         typed: Option<&str>,
     ) -> Result<Option<SecretKey>, Refusal> {
-        if store
+        let Some(id) = store
             .secret_key_id()
             .map_err(|e| Refusal::Failed(Some(e.to_string())))?
-            .is_none()
-        {
+        else {
             return Ok(None);
-        }
-        let text = match typed.filter(|t| !t.trim().is_empty()) {
-            Some(t) => SecretString::new(t.to_owned()),
-            None => self
-                .keyring
-                .get(keyring::SECRET_KEY)
-                .ok_or(Refusal::NeedsSecretKey)?,
         };
-        SecretKey::parse(text.expose().trim())
-            .map(Some)
-            .map_err(|e| Refusal::Failed(Some(e.to_string())))
+        match typed.filter(|t| !t.trim().is_empty()) {
+            Some(t) => SecretKey::parse(t.trim())
+                .map(Some)
+                .map_err(|e| Refusal::Failed(Some(e.to_string()))),
+            None => keyring::stored_secret_key(&self.keyring, &id)
+                .map(Some)
+                .ok_or(Refusal::NeedsSecretKey),
+        }
     }
 
     /// Opens the vault with a password (or checks it, when the server already has it open).
@@ -549,9 +566,25 @@ impl App {
         self.touch();
     }
 
+    /// Opens the window unless a Lock came after `generation`.
+    fn finish(
+        &self,
+        generation: u64,
+        password: SecretString,
+        key: Option<SecretKey>,
+        typed_key: bool,
+    ) -> bool {
+        let _gate = lock(&self.finishing);
+        if self.locked_since(generation) {
+            return false;
+        }
+        self.opened(password, key, typed_key);
+        true
+    }
+
     fn after_unlock(&self) {
         // What has been in the Trash for 30 days goes, with its history.
-        let _ = self.with_store(|s| s.purge_expired_trash());
+        let _ = self.with_store(|s| s.purge_expired_trash(vaultos_core::model::HUMAN));
         self.emit("main", "vault:unlocked");
         if let Some(app) = self.tauri.get() {
             ui::refresh_tray(app);
@@ -635,10 +668,9 @@ impl App {
         };
         match key {
             Ok(key) => {
-                if self.locked_since(generation) {
+                if !self.finish(generation, pw, key, typed_key.is_some()) {
                     return self.abandon();
                 }
-                self.opened(pw, key, typed_key.is_some());
                 json!({ "ok": true })
             }
             Err(refusal) => self.failed_unlock(refusal),
@@ -668,10 +700,9 @@ impl App {
             self.lock(false);
             return Err(e.to_string());
         }
-        if self.locked_since(generation) {
+        if !self.finish(generation, password, None, false) {
             return Ok(self.abandon());
         }
-        self.opened(password, None, false);
         drop(_turn);
         self.after_unlock();
         Ok(json!({ "ok": true }))
@@ -763,7 +794,7 @@ impl App {
             "shortcut": prefs.shortcut,
             "touchId": self.touch_id_status(),
             "needsUpgrade": self.exists() && self.file_version().is_some_and(|v| v < 4),
-            "needsSecretKey": self.needs_secret_key() && self.keyring.get(keyring::SECRET_KEY).is_none(),
+            "needsSecretKey": self.secret_key_missing(),
         })
     }
 
@@ -859,11 +890,12 @@ impl App {
         .ok()
         .flatten();
         match opened {
-            Some((pw, key)) if !self.locked_since(generation) => {
-                self.opened(pw, key, false);
+            Some((pw, key)) => {
+                if !self.finish(generation, pw, key, false) {
+                    return self.abandon();
+                }
                 json!({ "ok": true })
             }
-            Some(_) => self.abandon(),
             None => {
                 if !was_unlocked {
                     // Picks up a Touch ID setting turned off elsewhere before locking again.
@@ -957,9 +989,16 @@ impl App {
         }
     }
 
-    /// Copies a value; it is cleared after 30 seconds if it is still on the clipboard.
+    /// Copies a value; it is cleared after 30 seconds if it is still on the clipboard. A Lock
+    /// that came after the value was read wins: nothing is copied.
     pub fn copy_secret(self: &Arc<Self>, text: &str) -> Result<&'static str, String> {
-        let mode = self.clipboard.write(text)?;
+        let mode = {
+            let _gate = lock(&self.finishing);
+            if !self.human_unlocked() {
+                return Err("Vault is locked".into());
+            }
+            self.clipboard.write(text)?
+        };
         let n = self.copies.fetch_add(1, Ordering::SeqCst) + 1;
         let me = self.clone();
         tauri::async_runtime::spawn(async move {

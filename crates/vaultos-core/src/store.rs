@@ -1032,13 +1032,19 @@ impl Store {
     // ── Projects ────────────────────────────────────────────────────────────────────────
 
     pub fn list_projects(&self) -> Result<Vec<ProjectSummary>> {
+        self.list_projects_as(HUMAN)
+    }
+
+    /// Projects with counts of the items `actor` sees.
+    pub fn list_projects_as(&self, actor: &str) -> Result<Vec<ProjectSummary>> {
         Ok(self
             .state()?
             .projects
             .iter()
             .map(|p| {
+                let shown: Vec<&Item> = p.items.iter().filter(|i| i.meta.shown_to(actor)).collect();
                 let mut providers: Vec<String> = Vec::new();
-                for i in &p.items {
+                for i in &shown {
                     if !i.meta.provider.is_empty() && !providers.contains(&i.meta.provider) {
                         providers.push(i.meta.provider.clone());
                     }
@@ -1046,9 +1052,9 @@ impl Store {
                 ProjectSummary {
                     id: p.id.clone(),
                     name: p.meta.name.clone(),
-                    secret_count: p.items.len(),
-                    agent_key_count: p.items.iter().filter(|i| is_agent(&i.meta.owner)).count(),
-                    pending_count: p.items.iter().filter(|i| !i.meta.inject_approved).count(),
+                    secret_count: shown.len(),
+                    agent_key_count: shown.iter().filter(|i| is_agent(&i.meta.owner)).count(),
+                    pending_count: shown.iter().filter(|i| !i.meta.inject_approved).count(),
                     providers,
                     updated_at: if p.meta.updated_at.is_empty() {
                         p.meta.created_at.clone()
@@ -1205,17 +1211,23 @@ impl Store {
         Ok(out)
     }
 
-    /// Each record's hash (`model.js` `recordHash`), for comparing two vaults without values.
-    pub fn fingerprints(&self) -> Result<Vec<Fingerprint>> {
+    /// Each record's hash (`model.js` `recordHash`), for comparing two vaults without values,
+    /// over the items `actor` sees. Secret custom fields are left out of the hash: an agent
+    /// cannot reveal them, so it must not be able to test guesses against them either.
+    pub fn fingerprints(&self, actor: &str) -> Result<Vec<Fingerprint>> {
         let keys = &self.open()?.keys;
         let mut out = Vec::new();
         for p in &self.state()?.projects {
-            for i in &p.items {
+            for i in p.items.iter().filter(|i| i.meta.shown_to(actor)) {
+                let mut record = keys.record(p, i)?;
+                for f in record.fields.iter_mut().filter(|f| f.is_secret()) {
+                    f.value.clear();
+                }
                 out.push(Fingerprint {
                     project: p.meta.name.clone(),
                     project_id: p.id.clone(),
                     key: i.meta.key.clone(),
-                    hash: record_hash(&keys.record(p, i)?),
+                    hash: record_hash(&record),
                     owner: i.meta.owner.clone(),
                     updated_at: i.meta.updated_at.clone(),
                 });
@@ -1322,6 +1334,11 @@ impl Store {
                 .position(|i| i.meta.key == fields.key || i.id == fields.key);
             if let Some(ii) = existing {
                 let p = &st.projects[pi];
+                if is_agent(actor) && !p.items[ii].meta.shown_to(actor) {
+                    return Err(Error::Conflict(
+                        "This key name belongs to an archived item or one in the Trash. Ask the human, or use another name.".into(),
+                    ));
+                }
                 can_edit(&p.items[ii].meta, actor)?;
                 let before = k.record(p, &p.items[ii])?;
                 let mut after = before.clone();
@@ -1343,7 +1360,7 @@ impl Store {
                 set(&mut after.url, &fields.url);
                 set(&mut after.permission, &fields.permission);
                 set(&mut after.expires_at, &fields.expires_at);
-                apply_typed(&mut after, &before, fields);
+                apply_typed(&mut after, &before, fields)?;
                 // Saving a key that is in the Trash brings it back.
                 after.trashed_at.clear();
                 if secret_changed(&before, &after) {
@@ -1417,7 +1434,7 @@ impl Store {
             r.created_at.clone_from(&now);
             r.updated_at.clone_from(&now);
             r.rev = 1;
-            apply_typed(&mut r, &Record::default(), fields);
+            apply_typed(&mut r, &Record::default(), fields)?;
             if secret_changed(&Record::default(), &r) {
                 r.secret_changed_at.clone_from(&now);
             }
@@ -1459,7 +1476,7 @@ impl Store {
             let st = self.state()?;
             let pi = st.project(project)?;
             let i = &st.projects[pi].items[st.item(pi, key)?];
-            if !i.meta.trashed_at.is_empty() {
+            if !i.meta.shown_to(actor) {
                 return Err(Error::not_found("secret not found"));
             }
             can_delete(&i.meta, actor)?;
@@ -1628,12 +1645,22 @@ impl Store {
             )?;
             Ok(true)
         });
-        let keep_new = matches!(moved, Ok(true)) && !self.batching;
-        self.drop_attachment_files(if keep_new { &old } else { &new_ids });
+        // In a batch nothing is saved yet: keep both sets of files, and the next prune
+        // removes whichever the saved vault no longer names. After Unconfirmed the vault
+        // names the new ones.
+        if !self.batching {
+            let saved = matches!(moved, Ok(true) | Err(Error::Unconfirmed(_)));
+            self.drop_attachment_files(if saved { &old } else { &new_ids });
+        }
         moved
     }
 
     pub fn pending_approvals(&self) -> Result<Vec<Pending>> {
+        self.pending_approvals_as(HUMAN)
+    }
+
+    /// Keys awaiting approval among the items `actor` sees.
+    pub fn pending_approvals_as(&self, actor: &str) -> Result<Vec<Pending>> {
         let st = self.state()?;
         let names: std::collections::HashMap<String, String> = st
             .meta
@@ -1648,7 +1675,11 @@ impl Store {
             .collect();
         let mut out = Vec::new();
         for p in &st.projects {
-            for i in p.items.iter().filter(|i| !i.meta.inject_approved) {
+            for i in p
+                .items
+                .iter()
+                .filter(|i| !i.meta.inject_approved && i.meta.shown_to(actor))
+            {
                 out.push(Pending {
                     project: p.meta.name.clone(),
                     key: i.meta.key.clone(),
@@ -1670,17 +1701,22 @@ impl Store {
             let ii = st.item(pi, key)?;
             let p = &st.projects[pi];
             let i = &p.items[ii];
-            if is_agent(actor) && (i.meta.archived || !i.meta.trashed_at.is_empty()) {
+            if !i.meta.shown_to(actor) && is_agent(actor) {
                 return Err(Error::not_found("secret not found"));
             }
             let secret = keys.open_secret(p, i)?;
+            // Concealed and one-time code fields are the human's.
+            let fields = if is_agent(actor) {
+                &[][..]
+            } else {
+                &secret.fields[..]
+            };
             (
                 Revealed {
                     key: i.meta.key.clone(),
                     value: SecretString::new(secret.value.clone()),
                     password: SecretString::new(secret.password.clone()),
-                    fields: secret
-                        .fields
+                    fields: fields
                         .iter()
                         .map(|f| (f.id.clone(), SecretString::new(f.value.clone())))
                         .collect(),
@@ -2003,7 +2039,7 @@ pub(crate) fn expiry_info(expires_at: &str) -> (String, Option<i64>) {
 }
 
 /// The typed-item fields a save sets.
-fn apply_typed(after: &mut Record, before: &Record, f: &Fields) {
+fn apply_typed(after: &mut Record, before: &Record, f: &Fields) -> Result<()> {
     if let Some(k) = &f.kind {
         after.kind.clone_from(k);
     }
@@ -2017,15 +2053,18 @@ fn apply_typed(after: &mut Record, before: &Record, f: &Fields) {
         after.archived = v;
     }
     if let Some(list) = &f.fields {
-        after.fields = merge_fields(&before.fields, list);
+        after.fields = merge_fields(&before.fields, list)?;
     }
+    Ok(())
 }
 
-/// The fields as given; a secret one without a value keeps the stored value of the same id.
+/// The fields as given; a secret one without a value keeps the stored value of the same id,
+/// which must then suit its type: a concealed value turned into a one-time code needs to be
+/// a valid one.
 fn merge_fields(
     before: &[crate::model::Field],
     input: &[validate::FieldInput],
-) -> Vec<crate::model::Field> {
+) -> Result<Vec<crate::model::Field>> {
     let mut out: Vec<crate::model::Field> = Vec::with_capacity(input.len());
     for x in input {
         let mut f = crate::model::Field::default();
@@ -2045,9 +2084,17 @@ fn merge_fields(
                 .map(|b| b.value.clone())
                 .unwrap_or_default(),
         };
+        if x.value.is_none() && f.kind == "otp" && !f.value.is_empty() {
+            crate::totp::Totp::parse(&f.value).map_err(|_| {
+                Error::invalid(format!(
+                    "Enter the one-time code setup key for \"{}\" again",
+                    f.label
+                ))
+            })?;
+        }
         out.push(f);
     }
-    out
+    Ok(out)
 }
 
 /// Whether the value, the password or a secret field differs.

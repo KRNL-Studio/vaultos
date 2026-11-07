@@ -304,9 +304,13 @@ async fn accept_loop(
         (None, None)
     };
     let uid = my_uid();
+    // Connections end with the loop: a request still being answered when the server stops
+    // gets no reply, so nothing reaches a client after a Lock.
+    let mut conns = tokio::task::JoinSet::new();
     loop {
         let stream = tokio::select! {
             _ = shared.shutdown.notified() => return Ok(()),
+            Some(_) = conns.join_next() => continue,
             Some(()) = recv(&mut term) => return Ok(()),
             Some(()) = recv(&mut int) => return Ok(()),
             accepted = listener.accept() => match accepted {
@@ -322,7 +326,7 @@ async fn accept_loop(
         }
         let pid = cred.pid();
         let shared = shared.clone();
-        tokio::spawn(async move {
+        conns.spawn(async move {
             let service = service_fn(move |req| {
                 let shared = shared.clone();
                 async move { Ok::<_, Infallible>(respond(shared, req, pid).await) }

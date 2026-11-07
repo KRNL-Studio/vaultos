@@ -75,7 +75,8 @@ impl Totp {
             issuer: String::new(),
             account: String::new(),
         };
-        let secret = if input.len() > 10 && input[..10].eq_ignore_ascii_case("otpauth://") {
+        let scheme = input.get(..10);
+        let secret = if scheme.is_some_and(|s| s.eq_ignore_ascii_case("otpauth://")) {
             let rest = &input[10..];
             let (kind, rest) = rest.split_once('/').ok_or_else(|| invalid("no label"))?;
             if kind.eq_ignore_ascii_case("hotp") {

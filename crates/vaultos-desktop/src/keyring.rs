@@ -58,9 +58,15 @@ impl Keyring {
         }
     }
 
-    pub fn clear(&self, account: &str) {
-        if self.secure() {
-            let _ = imp::delete(&self.service, account);
+    /// Removes the item; an item that is not there is not an error.
+    pub fn clear(&self, account: &str) -> Result<(), String> {
+        if !self.secure() {
+            return Ok(());
+        }
+        imp::delete(&self.service, account)?;
+        match self.get(account) {
+            None => Ok(()),
+            Some(_) => Err("The keychain kept the remembered password".into()),
         }
     }
 
@@ -72,6 +78,14 @@ impl Keyring {
             secret_key: self.get(SECRET_KEY),
         })
     }
+}
+
+/// The Secret Key this device keeps, if it is the one the vault's header names.
+pub fn stored_secret_key(keyring: &Keyring, id: &str) -> Option<vaultos_core::SecretKey> {
+    let text = keyring.get(SECRET_KEY)?;
+    vaultos_core::SecretKey::parse(text.expose().trim())
+        .ok()
+        .filter(|k| k.id() == id)
 }
 
 #[derive(Debug)]

@@ -491,9 +491,27 @@ fn bitwarden(json: &Value) -> Result<Report> {
 // --- CSV ---
 
 /// RFC 4180: quoted fields may hold commas, quotes ("") and line breaks.
+/// Far more than a password manager's export holds, and few enough that a file of empty
+/// cells cannot make millions of allocations.
+const MAX_CSV_ROWS: usize = 20_000;
+const MAX_CSV_COLUMNS: usize = 256;
+
 fn csv(text: &str) -> Result<Vec<Vec<String>>> {
     let (mut rows, mut row, mut cell) = (Vec::new(), Vec::new(), String::new());
     let (mut quoted, mut chars) = (false, text.chars().peekable());
+    let full = |rows: &Vec<Vec<String>>, row: &Vec<String>| {
+        if rows.len() >= MAX_CSV_ROWS {
+            Err(bad(&format!(
+                "a CSV file can have up to {MAX_CSV_ROWS} rows"
+            )))
+        } else if row.len() >= MAX_CSV_COLUMNS {
+            Err(bad(&format!(
+                "a CSV row can have up to {MAX_CSV_COLUMNS} columns"
+            )))
+        } else {
+            Ok(())
+        }
+    };
     while let Some(c) = chars.next() {
         if quoted {
             if c == '"' {
@@ -510,9 +528,13 @@ fn csv(text: &str) -> Result<Vec<Vec<String>>> {
         }
         match c {
             '"' if cell.is_empty() => quoted = true,
-            ',' => row.push(std::mem::take(&mut cell)),
+            ',' => {
+                full(&rows, &row)?;
+                row.push(std::mem::take(&mut cell));
+            }
             '\r' => {}
             '\n' => {
+                full(&rows, &row)?;
                 row.push(std::mem::take(&mut cell));
                 rows.push(std::mem::take(&mut row));
             }

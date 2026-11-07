@@ -203,6 +203,7 @@ fn unlock(store: &mut Store, body: &Map<String, Value>) -> Result<Reply> {
         .map(|s| SecretKey::parse(&s))
         .transpose()?;
     store.unlock(&password, secret_key.as_ref())?;
+    let _ = store.purge_expired_trash(vaultos_core::model::HUMAN);
     Ok(Reply::ok(json!({
         "ok": true,
         "locked": false,
@@ -417,7 +418,7 @@ fn route(
         }
         ("GET", "/projects") => {
             cx.scope("read")?;
-            let all = store.list_projects()?;
+            let all = store.list_projects_as(&cx.actor)?;
             let mine: Vec<_> = all
                 .iter()
                 .filter(|p| cx.allowed(Some(&p.id), "read"))
@@ -447,7 +448,7 @@ fn route(
         ("GET", "/pending") => {
             cx.scope("read")?;
             let mut out = Vec::new();
-            for p in store.pending_approvals()? {
+            for p in store.pending_approvals_as(&cx.actor)? {
                 let id = store.find_project(&p.project)?.map(|(id, _)| id);
                 if cx.allowed(id.as_deref(), "read") {
                     out.push(p);
@@ -472,7 +473,7 @@ fn route(
         }
         ("GET", "/compare") => {
             cx.scope("reveal")?;
-            let all = store.fingerprints()?;
+            let all = store.fingerprints(&cx.actor)?;
             let mine: Vec<_> = all
                 .iter()
                 .filter(|f| cx.allowed(Some(&f.project_id), "reveal"))
