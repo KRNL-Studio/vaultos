@@ -21,7 +21,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Notify;
 use vaultos_core::crypto::{ct_eq, hex, random_array};
 use vaultos_core::fs_safe::{claim, LockFile};
-use vaultos_core::session::{socket_path, Session};
+use vaultos_core::session::{prepare_socket_dir, socket_path, Session};
 use vaultos_core::{Error, Store};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -95,9 +95,10 @@ fn remove_stale_socket(path: &Path) -> Result<(), Error> {
         Ok(m) if m.file_type().is_socket() => {
             std::fs::remove_file(path).map_err(Error::io("cannot remove the old socket"))
         }
-        Ok(_) => Err(Error::Conflict(
-            "vaultosd.sock exists and is not a socket; inspect it before removing it".into(),
-        )),
+        Ok(_) => Err(Error::Conflict(format!(
+            "{} exists and is not a socket; inspect it before removing it",
+            path.display()
+        ))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(Error::io("cannot inspect the socket path")(e)),
     }
@@ -115,6 +116,7 @@ pub async fn run(cfg: Config) -> Result<(), Error> {
     let socket = socket_path(&cfg.data_dir)?;
     let owner_lock = claim_owner(&cfg).await?;
     let store = Store::new(&cfg.data_dir)?;
+    prepare_socket_dir(&socket, &cfg.data_dir)?;
     remove_stale_socket(&socket)?;
     let listener = UnixListener::bind(&socket).map_err(Error::io("cannot listen on the socket"))?;
     {

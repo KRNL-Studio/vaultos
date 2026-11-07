@@ -1,0 +1,938 @@
+//! `vaultos`: the human's command line, ported from `cli.cjs` and `admin.js`. It creates and
+//! upgrades vaults, drives `vaultosd` (start, unlock, lock, stop), and runs recovery and
+//! admin commands directly on the vault file while it holds the vault's owner lock. It never
+//! prints secret values; tokens and Secret Keys go to private files.
+
+use clap::{Parser, Subcommand};
+use serde_json::{json, Value};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command as Process, ExitCode, Stdio};
+use std::time::{Duration, Instant};
+use vaultos_cli::{emit, read_stdin, say, Fail, Result};
+use vaultos_client::Client;
+use vaultos_core::agents::Wildcards;
+use vaultos_core::fs_safe::{self, LockFile};
+use vaultos_core::model::HUMAN;
+use vaultos_core::store::VAULT_FILE;
+use vaultos_core::{Error, KdfParams, SecretKey, SecretString, Store};
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+const VIA: &str = "admin CLI";
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "vaultos",
+    version,
+    about = "VaultOS for the human: create, unlock and manage the vault. Secret values are never printed.",
+    after_help = "Set VAULTOS_DATA_DIR to use a non-default data directory. Commands that read or \
+change the vault directly need it to themselves: quit the desktop app, or pass --stop-backend \
+to stop vaultosd first."
+)]
+struct Cli {
+    /// Read the master password from stdin (rotate-password: the new one on the next line)
+    #[arg(long, global = true)]
+    password_stdin: bool,
+    /// The file holding this vault's Secret Key, when it has one
+    #[arg(long, global = true, value_name = "PATH")]
+    secret_key_file: Option<PathBuf>,
+    /// Stop a running vaultosd before a command that needs the vault to itself
+    #[arg(long, global = true)]
+    stop_backend: bool,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Create a new vault
+    Init {
+        /// Also require a new Secret Key, written to this file (mode 0600). Without it the
+        /// vault cannot be opened: keep a copy offline.
+        #[arg(long, value_name = "PATH")]
+        new_secret_key_file: Option<PathBuf>,
+    },
+    /// Upgrade a v3 vault to v4, keeping the password. A backup of the v3 file is made
+    /// first; the earlier app cannot open the upgraded vault.
+    Upgrade {
+        /// Also require a new Secret Key, written to this file (mode 0600)
+        #[arg(long, value_name = "PATH")]
+        new_secret_key_file: Option<PathBuf>,
+    },
+    /// Is vaultosd running and unlocked?
+    Status,
+    /// Start vaultosd in the background (it starts locked)
+    Start,
+    /// Unlock the running vaultosd
+    Unlock,
+    /// Lock the running vaultosd
+    Lock,
+    /// Stop the running vaultosd
+    Stop,
+    /// List projects
+    Projects,
+    /// List a project's key names and metadata
+    Keys { project: String },
+    /// Write a project's keys into an absolute file, replacing it
+    Inject {
+        project: String,
+        file: PathBuf,
+        #[arg(default_value = "dotenv", value_parser = ["dotenv", "json", "shell"])]
+        format: String,
+    },
+    /// Copy the encrypted vault file into an absolute directory
+    Backup { directory: PathBuf },
+    /// Enrolled agents
+    #[command(subcommand)]
+    Agents(AgentsCommand),
+    /// Agent-added keys waiting for approval before injection
+    #[command(subcommand)]
+    Pending(PendingCommand),
+    /// The approval relay's token
+    #[command(subcommand)]
+    Approver(ApproverCommand),
+    /// Change the master password
+    RotatePassword,
+    /// Add, replace or remove the vault's Secret Key
+    #[command(subcommand)]
+    SecretKey(SecretKeyCommand),
+}
+
+#[derive(Debug, clap::Args)]
+struct Access {
+    /// Projects to grant (names or ids, comma-separated or repeated)
+    #[arg(long, value_name = "A,B")]
+    projects: Vec<String>,
+    /// Grant every project, including future ones
+    #[arg(long)]
+    all_projects: bool,
+    /// Folders the agent may read and write files in (absolute)
+    #[arg(long, value_name = "DIR,DIR")]
+    roots: Vec<String>,
+    /// Allow files in any folder
+    #[arg(long)]
+    any_root: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentsCommand {
+    List,
+    /// Enroll an agent (or reissue its token) and write the token to a private file
+    #[command(alias = "enrol")]
+    Enroll {
+        name: String,
+        #[arg(long, value_name = "PATH", required = true)]
+        token_file: PathBuf,
+        /// Scopes, comma-separated (default read,inject)
+        #[arg(long, value_name = "A,B")]
+        scopes: Option<String>,
+        #[command(flatten)]
+        access: Access,
+    },
+    /// Change an agent's scopes or grants
+    Grant {
+        name: String,
+        #[arg(long, value_name = "A,B")]
+        scopes: Option<String>,
+        #[command(flatten)]
+        access: Access,
+        /// Remove every project grant
+        #[arg(long)]
+        no_projects: bool,
+        /// Remove every folder grant
+        #[arg(long)]
+        no_roots: bool,
+    },
+    Revoke {
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PendingCommand {
+    List,
+    /// Approve PROJECT KEY, or --all [--project P]
+    Approve {
+        #[arg(value_name = "PROJECT")]
+        project_name: Option<String>,
+        key: Option<String>,
+        #[arg(long)]
+        all: bool,
+        /// With --all, only this project
+        #[arg(long = "project", value_name = "P", requires = "all")]
+        only: Option<String>,
+    },
+    Deny {
+        project: String,
+        key: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ApproverCommand {
+    /// Issue a new relay token and write it to a private file
+    Set {
+        #[arg(long, value_name = "PATH", required = true)]
+        token_file: PathBuf,
+    },
+    Clear,
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretKeyCommand {
+    /// Generate a new Secret Key (replacing any current one) and write it to a private file
+    Set {
+        #[arg(long, value_name = "PATH", required = true)]
+        new_secret_key_file: PathBuf,
+    },
+    /// Stop requiring a Secret Key
+    Remove,
+}
+
+struct Ctx {
+    data_dir: PathBuf,
+    password_stdin: bool,
+    secret_key_file: Option<PathBuf>,
+    stop_backend: bool,
+}
+
+/// A vault this process has to itself, unlocked.
+struct Open {
+    store: Store,
+    password: SecretString,
+    secret_key: Option<SecretKey>,
+    _owner: LockFile,
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.store.lock();
+    }
+}
+
+fn prompt(label: &str) -> Result<SecretString> {
+    rpassword::prompt_password(label)
+        .map(SecretString::new)
+        .map_err(|_| Fail::new("cannot read the password from the terminal"))
+}
+
+fn list(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `admin.js` `prepareTokenFile`: an absolute path whose parent is a writable directory
+/// (created 0700 if missing) and which, if it exists, is a regular file.
+fn prepare_private_file(file: &Path, flag: &str) -> Result<()> {
+    if !file.is_absolute() {
+        return Err(Fail::usage(format!("{flag} must be an absolute path")));
+    }
+    let dir = file
+        .parent()
+        .ok_or_else(|| Fail::usage(format!("{flag} must name a file")))?;
+    if !dir.exists() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder
+            .create(dir)
+            .map_err(|_| Fail::new("cannot create the file's folder"))?;
+    }
+    if !dir.is_dir() {
+        return Err(Fail::new("The file's parent must be a directory"));
+    }
+    if std::fs::symlink_metadata(file).is_ok_and(|m| !m.is_file()) {
+        return Err(Fail::new("The file path must be a regular file"));
+    }
+    Ok(())
+}
+
+fn write_token(file: &Path, token: &SecretString) -> Result<()> {
+    let mut line = zeroize::Zeroizing::new(token.expose().as_bytes().to_vec());
+    line.push(b'\n');
+    fs_safe::atomic_write(file, &line)?;
+    Ok(())
+}
+
+/// Writes a new Secret Key to a file that must not exist yet, so a key belonging to another
+/// vault is never overwritten.
+fn write_secret_key(file: &Path, key: &SecretKey) -> Result<()> {
+    prepare_private_file(file, "--new-secret-key-file")?;
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut f = opts.open(file).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            Fail::new("The Secret Key file already exists; choose a new path")
+        } else {
+            Fail::new("cannot create the Secret Key file")
+        }
+    })?;
+    let text = key.display();
+    let written = f
+        .write_all(text.expose().as_bytes())
+        .and_then(|()| f.write_all(b"\n"))
+        .and_then(|()| f.sync_all());
+    if written.is_err() {
+        let _ = std::fs::remove_file(file);
+        return Err(Fail::new("cannot write the Secret Key file"));
+    }
+    if let Some(dir) = file.parent() {
+        fs_safe::sync_dir(dir)?;
+    }
+    Ok(())
+}
+
+/// Runs `f` with a new Secret Key already safe in `file`; if `f` fails before the vault
+/// could need the key, the file is removed again.
+fn with_new_secret_key<R>(
+    file: Option<&Path>,
+    f: impl FnOnce(Option<&SecretKey>) -> std::result::Result<R, Error>,
+) -> Result<(R, Option<Value>)> {
+    let Some(file) = file else {
+        return Ok((f(None)?, None));
+    };
+    let key = SecretKey::generate();
+    write_secret_key(file, &key)?;
+    match f(Some(&key)) {
+        Ok(r) => Ok((
+            r,
+            Some(json!({
+                "secretKeyFile": file,
+                "secretKeyId": key.id(),
+                "note": "Keep a copy of the Secret Key offline: the vault cannot be opened without it.",
+            })),
+        )),
+        Err(e) => {
+            if !matches!(e, Error::Unconfirmed(_)) {
+                let _ = std::fs::remove_file(file);
+            }
+            Err(e.into())
+        }
+    }
+}
+
+/// Records a change that has already been saved; failing to record it does not undo it.
+fn audited(store: &mut Store, action: &str) -> bool {
+    store.audit(action, &format!("via {VIA}"), HUMAN).is_ok()
+}
+
+fn warnings(audited: bool) -> Vec<&'static str> {
+    if audited {
+        Vec::new()
+    } else {
+        vec!["The change was saved, but the audit event could not be written."]
+    }
+}
+
+fn merge(mut base: Value, extra: Option<Value>) -> Value {
+    if let (Some(b), Some(Value::Object(e))) = (base.as_object_mut(), extra) {
+        b.extend(e);
+    }
+    base
+}
+
+impl Ctx {
+    fn owner_client(&self) -> Client {
+        Client::with_token(self.data_dir.clone(), None)
+    }
+
+    /// The master password (and, for `count == 2`, the new one).
+    fn passwords(&self, count: usize, confirm_new: bool) -> Result<Vec<SecretString>> {
+        if self.password_stdin {
+            let input = read_stdin(8192, "Password input too long")?;
+            let lines: Vec<&str> = input
+                .split('\n')
+                .map(|l| l.trim_end_matches('\r'))
+                .collect();
+            if lines.len() < count || lines[..count].iter().any(|l| l.is_empty()) {
+                return Err(Fail::new(format!(
+                    "Expected {count} password line(s) on stdin"
+                )));
+            }
+            return Ok(lines[..count]
+                .iter()
+                .map(|l| SecretString::new(*l))
+                .collect());
+        }
+        let mut out = Vec::new();
+        if count == 2 || !confirm_new {
+            out.push(prompt("Master password: ")?);
+        }
+        if count == 2 || confirm_new {
+            let next = prompt("New master password: ")?;
+            if prompt("Confirm new password: ")?.expose() != next.expose() {
+                return Err(Fail::new("The new passwords do not match"));
+            }
+            out.push(next);
+        }
+        Ok(out)
+    }
+
+    /// The vault's Secret Key, from `--secret-key-file` or a prompt, when it has one.
+    fn secret_key(&self, store: &Store) -> Result<Option<SecretKey>> {
+        if let Some(file) = &self.secret_key_file {
+            let bytes = zeroize::Zeroizing::new(fs_safe::read_regular(file, 256)?);
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| Fail::new("The Secret Key file is not text"))?;
+            return Ok(Some(SecretKey::parse(text.trim())?));
+        }
+        // A v3 vault has no Secret Key; unlocking it asks for the upgrade.
+        if store.file_version()? < 4 || store.secret_key_id()?.is_none() {
+            return Ok(None);
+        }
+        if self.password_stdin {
+            return Err(Fail::usage(
+                "This vault uses a Secret Key; pass --secret-key-file PATH",
+            ));
+        }
+        let typed = prompt("Secret Key: ")?;
+        Ok(Some(SecretKey::parse(typed.expose().trim())?))
+    }
+
+    /// `admin.js` `own`: the owner lock, after stopping vaultosd when asked to.
+    fn own(&self) -> Result<LockFile> {
+        match fs_safe::claim(&self.data_dir, "owner.lock") {
+            Ok(l) => return Ok(l),
+            Err(Error::Busy) => {}
+            Err(e) => return Err(e.into()),
+        }
+        if !self.stop_backend {
+            return Err(Fail::new(
+                "VaultOS is running. Quit the desktop app, or pass --stop-backend to stop vaultosd, then retry",
+            ));
+        }
+        let client = self.owner_client();
+        if client.live(Duration::from_millis(1500)).is_some() {
+            let _ = client.owner("POST", "/shutdown", None);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match fs_safe::claim(&self.data_dir, "owner.lock") {
+                Ok(l) => return Ok(l),
+                Err(Error::Busy) => std::thread::sleep(Duration::from_millis(200)),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(Fail::new(
+            "The running VaultOS owner did not stop; quit the desktop app and retry",
+        ))
+    }
+
+    fn store(&self) -> Result<Store> {
+        let store = Store::new(&self.data_dir)?;
+        if !store.exists() {
+            return Err(Fail::new("No vault exists in this data directory"));
+        }
+        Ok(store)
+    }
+
+    fn open(&self) -> Result<Open> {
+        let mut store = self.store()?;
+        let owner = self.own()?;
+        let password = self.passwords(1, false)?.remove(0);
+        let secret_key = self.secret_key(&store)?;
+        store.unlock(&password, secret_key.as_ref())?;
+        Ok(Open {
+            store,
+            password,
+            secret_key,
+            _owner: owner,
+        })
+    }
+
+    fn start(&self) -> Result<()> {
+        let client = self.owner_client();
+        if let Some((s, _)) = client.live(Duration::from_millis(1500)) {
+            return emit(&json!({ "running": true, "started": false, "pid": s.pid }));
+        }
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("vaultosd")))
+            .filter(|p| p.is_file());
+        // Its messages (no secrets) go to a private log, so a failed start can say why.
+        fs_safe::private_dir(&self.data_dir)?;
+        let log_path = self.data_dir.join("vaultosd.log");
+        let mut opts = OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let log = opts
+            .open(&log_path)
+            .map_err(|_| Fail::new("cannot create vaultosd.log"))?;
+        let mut cmd = Process::new(sibling.unwrap_or_else(|| PathBuf::from("vaultosd")));
+        cmd.arg("--data-dir")
+            .arg(&self.data_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(log);
+        // Its own process group, so ^C here does not stop it.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn().map_err(|_| {
+            Fail::new("cannot start vaultosd; is it installed next to vaultos or on PATH?")
+        })?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if let Some((s, _)) = client.live(Duration::from_millis(500)) {
+                return emit(&json!({ "running": true, "started": true, "pid": s.pid }));
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                let said = fs_safe::read_regular(&log_path, 64 * 1024)
+                    .ok()
+                    .and_then(|b| {
+                        String::from_utf8_lossy(&b)
+                            .lines()
+                            .rev()
+                            .find(|l| !l.trim().is_empty())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| format!("vaultosd exited ({status})"));
+                return Err(Fail::new(said));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Err(Fail::new(format!(
+            "vaultosd did not answer; see {}",
+            log_path.display()
+        )))
+    }
+
+    fn unlock(&self) -> Result<()> {
+        let client = self.owner_client();
+        let status = client.status();
+        if status["running"] != json!(true) {
+            return Err(Fail {
+                message: "vaultosd is not running. Start it with `vaultos start`".into(),
+                code: 3,
+            });
+        }
+        if status["unlocked"] == json!(true) {
+            return emit(&json!({ "ok": true, "locked": false }));
+        }
+        let store = self.store()?;
+        let password = self.passwords(1, false)?.remove(0);
+        let secret_key = self.secret_key(&store)?;
+        let mut body = json!({ "password": password.expose() });
+        if let Some(k) = &secret_key {
+            body["secretKey"] = json!(k.display().expose());
+        }
+        let reply = client.owner("POST", "/unlock", Some(&body));
+        if let Some(o) = body.as_object_mut() {
+            for v in o.values_mut() {
+                if let Value::String(s) = v {
+                    zeroize::Zeroize::zeroize(s);
+                }
+            }
+        }
+        emit(&reply?)
+    }
+
+    fn owner_route(&self, route: &str) -> Result<()> {
+        emit(&self.owner_client().owner("POST", route, None)?)
+    }
+
+    /// Asks vaultosd to stop and waits until it has released the vault.
+    fn stop(&self) -> Result<()> {
+        let client = self.owner_client();
+        client.owner("POST", "/shutdown", None)?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if client.live(Duration::from_millis(500)).is_none() {
+                return emit(&json!({ "ok": true, "stopped": true }));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Err(Fail::new("vaultosd did not stop in time"))
+    }
+
+    fn status(&self) -> Result<()> {
+        let mut status = self.owner_client().status();
+        let store = Store::new(&self.data_dir)?;
+        if let Some(o) = status.as_object_mut() {
+            o.insert("dataDir".into(), json!(self.data_dir));
+            o.insert("vault".into(), json!(store.exists()));
+            if store.exists() {
+                let version = store.file_version()?;
+                o.insert("fileVersion".into(), json!(version));
+                if version >= 4 {
+                    o.insert("secretKey".into(), json!(store.secret_key_id()?.is_some()));
+                } else {
+                    o.insert("needsUpgrade".into(), json!(true));
+                }
+            }
+        }
+        emit(&status)
+    }
+
+    fn init(&self, new_secret_key_file: Option<&Path>) -> Result<()> {
+        let mut store = Store::new(&self.data_dir)?;
+        if store.exists() {
+            return Err(Fail::new("A vault already exists in this data directory"));
+        }
+        let _owner = self.own()?;
+        let password = self.passwords(1, true)?.remove(0);
+        let ((), key) = with_new_secret_key(new_secret_key_file, |k| {
+            store.create(&password, k, KdfParams::DEFAULT)
+        })?;
+        store.lock();
+        emit(&merge(
+            json!({ "created": true, "dataDir": self.data_dir, "formatVersion": 4 }),
+            key,
+        ))
+    }
+
+    fn upgrade(&self, new_secret_key_file: Option<&Path>) -> Result<()> {
+        self.store()?;
+        let _owner = self.own()?;
+        let password = self.passwords(1, false)?.remove(0);
+        let (done, key) = with_new_secret_key(new_secret_key_file, |k| {
+            vaultos_core::upgrade::upgrade(&self.data_dir, &password, k, KdfParams::DEFAULT)
+        })?;
+        emit(&merge(
+            json!({
+                "upgraded": true,
+                "formatVersion": 4,
+                "backup": done.backup,
+                "projects": done.projects,
+                "items": done.items,
+                "history": done.history,
+                "note": "The earlier app cannot open this vault; the backup is the untouched v3 file.",
+            }),
+            key,
+        ))
+    }
+
+    fn backup(&self, target: &Path) -> Result<()> {
+        if !target.is_absolute() {
+            return Err(Fail::usage("Specify an absolute backup directory"));
+        }
+        let store = self.store()?;
+        fs_safe::private_dir(target)?;
+        let bytes =
+            fs_safe::read_regular(&store.data_dir().join(VAULT_FILE), fs_safe::MAX_VAULT_BYTES)?;
+        fs_safe::atomic_write(&target.join(VAULT_FILE), &bytes)?;
+        say("Encrypted vault backed up. Passwords and machine credentials were not copied.")
+    }
+
+    fn rotate_password(&self) -> Result<()> {
+        let mut store = self.store()?;
+        let _owner = self.own()?;
+        let pw = self.passwords(2, true)?;
+        if pw[0].expose() == pw[1].expose() {
+            return Err(Fail::new(
+                "The new password must differ from the current one",
+            ));
+        }
+        let secret_key = self.secret_key(&store)?;
+        store.unlock(&pw[0], secret_key.as_ref())?;
+        let changed = store.change_password(&pw[0], &pw[1], secret_key.as_ref());
+        let audited = changed.is_ok() && audited(&mut store, "rotate_master_password");
+        store.lock();
+        changed?;
+        emit(&json!({
+            "ok": true,
+            "note": "Unlock VaultOS again with the new password.",
+            "warnings": warnings(audited),
+        }))
+    }
+}
+
+/// `admin.js` `accessChange`: which grants the flags give, keeping the current ones a flag
+/// does not mention.
+fn access_change(
+    a: &Access,
+    no_projects: bool,
+    no_roots: bool,
+    current: Option<&vaultos_core::agents::Agent>,
+) -> Result<(bool, Vec<String>, Vec<String>, Wildcards)> {
+    if a.all_projects && (!a.projects.is_empty() || no_projects) {
+        return Err(Fail::usage(
+            "Use either --all-projects or --projects/--no-projects",
+        ));
+    }
+    if a.any_root && (!a.roots.is_empty() || no_roots) {
+        return Err(Fail::usage("Use either --any-root or --roots/--no-roots"));
+    }
+    let projects_given = a.all_projects || !a.projects.is_empty() || no_projects;
+    let roots_given = a.any_root || !a.roots.is_empty() || no_roots;
+    let projects = if projects_given {
+        list(&a.projects)
+    } else {
+        current.map(|c| c.projects.clone()).unwrap_or_default()
+    };
+    let roots = if roots_given {
+        list(&a.roots)
+    } else {
+        current.map(|c| c.roots.clone()).unwrap_or_default()
+    };
+    let wildcards = Wildcards {
+        all_projects: if projects_given {
+            a.all_projects
+        } else {
+            current.is_some_and(|c| c.all_projects)
+        },
+        any_root: if roots_given {
+            a.any_root
+        } else {
+            current.is_some_and(|c| c.any_root)
+        },
+    };
+    Ok((projects_given || roots_given, projects, roots, wildcards))
+}
+
+fn summary(store: &Store, id: &str) -> Result<Value> {
+    let s = store
+        .list_agents()?
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| Fail::new("Agent not found"))?;
+    serde_json::to_value(s).map_err(|_| Fail::new("The result could not be encoded"))
+}
+
+fn agent(store: &Store, name: &str) -> Result<vaultos_core::agents::Agent> {
+    store
+        .find_agent(name)?
+        .ok_or_else(|| Fail::new("Agent not found"))
+}
+
+fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
+    if let AgentsCommand::Enroll { token_file, .. } = &cmd {
+        prepare_private_file(token_file, "--token-file")?;
+    }
+    let mut open = ctx.open()?;
+    let store = &mut open.store;
+    match cmd {
+        AgentsCommand::List => emit(&store.list_agents()?),
+        AgentsCommand::Enroll {
+            name,
+            token_file,
+            scopes,
+            access,
+        } => {
+            let scopes = scopes.map(|s| list(&[s]));
+            let existing = store
+                .agent_records()?
+                .into_iter()
+                .find(|a| a.name.to_lowercase() == name.trim().to_lowercase());
+            let reissued = existing.is_some();
+            let issued = store.batch(|s| {
+                let Some(current) = &existing else {
+                    let (_, projects, roots, wildcards) =
+                        access_change(&access, false, false, None).map_err(to_core)?;
+                    return s.enrol_agent(&name, scopes.as_deref(), &projects, &roots, wildcards);
+                };
+                let (changed, projects, roots, wildcards) =
+                    access_change(&access, false, false, Some(current)).map_err(to_core)?;
+                if changed {
+                    s.set_agent_access(&current.id, &projects, &roots, wildcards)?;
+                }
+                if let Some(scopes) = &scopes {
+                    s.set_agent_scopes(&current.id, scopes)?;
+                }
+                s.reissue_agent(&current.id)
+            })?;
+            write_token(&token_file, &issued.token)?;
+            let action = if reissued {
+                "reissue_agent"
+            } else {
+                "enrol_agent"
+            };
+            store.audit(action, &format!("{} via {VIA}", issued.name), HUMAN)?;
+            let mut out = summary(store, &issued.id)?;
+            out["tokenFile"] = json!(token_file);
+            out["reissued"] = json!(reissued);
+            emit(&out)
+        }
+        AgentsCommand::Grant {
+            name,
+            scopes,
+            access,
+            no_projects,
+            no_roots,
+        } => {
+            let a = agent(store, &name)?;
+            let scopes = scopes.map(|s| list(&[s]));
+            let (changed, projects, roots, wildcards) =
+                access_change(&access, no_projects, no_roots, Some(&a))?;
+            if !changed && scopes.is_none() {
+                return Err(Fail::usage(
+                    "Specify --scopes, --projects/--all-projects/--no-projects or --roots/--any-root/--no-roots",
+                ));
+            }
+            store.batch(|s| {
+                if changed {
+                    s.set_agent_access(&a.id, &projects, &roots, wildcards)?;
+                }
+                if let Some(scopes) = &scopes {
+                    s.set_agent_scopes(&a.id, scopes)?;
+                }
+                Ok(())
+            })?;
+            store.audit("grant_agent", &format!("{} via {VIA}", a.name), HUMAN)?;
+            emit(&summary(store, &a.id)?)
+        }
+        AgentsCommand::Revoke { name } => {
+            let a = agent(store, &name)?;
+            store.revoke_agent(&a.id)?;
+            store.audit("revoke_agent", &format!("{} via {VIA}", a.name), HUMAN)?;
+            emit(&summary(store, &a.id)?)
+        }
+    }
+}
+
+/// Carries a usage problem found inside a batch out through the core's error type.
+fn to_core(f: Fail) -> Error {
+    Error::Invalid(f.message)
+}
+
+fn pending(ctx: &Ctx, cmd: PendingCommand) -> Result<()> {
+    let usage = "usage: vaultos pending approve PROJECT KEY | --all [--project P]";
+    if let PendingCommand::Approve {
+        all: false,
+        key: None,
+        ..
+    } = &cmd
+    {
+        return Err(Fail::usage(usage));
+    }
+    let mut open = ctx.open()?;
+    let store = &mut open.store;
+    match cmd {
+        PendingCommand::List => emit(&store.pending_approvals()?),
+        PendingCommand::Approve {
+            all: true, only, ..
+        } => emit(&store.approve_all_pending(VIA, only.as_deref())?),
+        PendingCommand::Approve {
+            project_name: Some(p),
+            key: Some(k),
+            ..
+        } => emit(&store.approve_pending(&p, &k, VIA)?),
+        PendingCommand::Approve { .. } => Err(Fail::usage(usage)),
+        PendingCommand::Deny { project, key } => emit(&store.deny_pending(&project, &key, VIA)?),
+    }
+}
+
+fn approver(ctx: &Ctx, cmd: ApproverCommand) -> Result<()> {
+    if let ApproverCommand::Set { token_file } = &cmd {
+        prepare_private_file(token_file, "--token-file")?;
+    }
+    let mut open = ctx.open()?;
+    let store = &mut open.store;
+    match cmd {
+        ApproverCommand::Set { token_file } => {
+            let token = store.issue_approver_token()?;
+            write_token(&token_file, &token)?;
+            emit(&json!({ "approverConfigured": true, "tokenFile": token_file }))
+        }
+        ApproverCommand::Clear => {
+            emit(&json!({ "approverConfigured": store.set_approver_hash(None)? }))
+        }
+        ApproverCommand::Status => {
+            emit(&json!({ "approverConfigured": store.approver_configured()? }))
+        }
+    }
+}
+
+fn secret_key(ctx: &Ctx, cmd: SecretKeyCommand) -> Result<()> {
+    let mut open = ctx.open()?;
+    let Open {
+        store,
+        password,
+        secret_key,
+        ..
+    } = &mut open;
+    match cmd {
+        SecretKeyCommand::Set {
+            new_secret_key_file,
+        } => {
+            let ((), key) = with_new_secret_key(Some(&new_secret_key_file), |next| {
+                store.set_secret_key(password, secret_key.as_ref(), next)
+            })?;
+            let audited = audited(store, "set_secret_key");
+            emit(&merge(
+                json!({ "ok": true, "warnings": warnings(audited) }),
+                key,
+            ))
+        }
+        SecretKeyCommand::Remove => {
+            if secret_key.is_none() {
+                return Err(Fail::new("This vault does not use a Secret Key"));
+            }
+            store.set_secret_key(password, secret_key.as_ref(), None)?;
+            let audited = audited(store, "remove_secret_key");
+            emit(&json!({ "ok": true, "secretKey": false, "warnings": warnings(audited) }))
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
+    let data_dir = vaultos_core::paths::default_data_dir()?;
+    let ctx = Ctx {
+        data_dir,
+        password_stdin: cli.password_stdin,
+        secret_key_file: cli.secret_key_file,
+        stop_backend: cli.stop_backend,
+    };
+    match cli.command {
+        Command::Init {
+            new_secret_key_file,
+        } => ctx.init(new_secret_key_file.as_deref()),
+        Command::Upgrade {
+            new_secret_key_file,
+        } => ctx.upgrade(new_secret_key_file.as_deref()),
+        Command::Status => ctx.status(),
+        Command::Start => ctx.start(),
+        Command::Unlock => ctx.unlock(),
+        Command::Lock => ctx.owner_route("/lock"),
+        Command::Stop => ctx.stop(),
+        Command::Backup { directory } => ctx.backup(&directory),
+        Command::RotatePassword => ctx.rotate_password(),
+        Command::Projects => emit(&ctx.open()?.store.list_projects()?),
+        Command::Keys { project } => emit(&ctx.open()?.store.list_items(&project)?),
+        Command::Inject {
+            project,
+            file,
+            format,
+        } => {
+            if !file.is_absolute() {
+                return Err(Fail::usage("Specify an absolute file path"));
+            }
+            let format = vaultos_core::env::Format::parse(&format)?;
+            let mut open = ctx.open()?;
+            emit(
+                &open
+                    .store
+                    .inject(&project, &file, format, false, None, HUMAN)?,
+            )
+        }
+        Command::Agents(c) => agents(&ctx, c),
+        Command::Pending(c) => pending(&ctx, c),
+        Command::Approver(c) => approver(&ctx, c),
+        Command::SecretKey(c) => secret_key(&ctx, c),
+    }
+}
+
+fn main() -> ExitCode {
+    vaultos_core::hardening::harden_process();
+    match run(Cli::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(f) => {
+            eprintln!("vaultos: {}", f.message);
+            ExitCode::from(f.code)
+        }
+    }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "vaultos-cli"
+description = "VaultOS command-line tools: vaultos for the human, vaultos-agent for enrolled agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+vaultos-client = { path = "../vaultos-client" }
+vaultos-core = { path = "../vaultos-core" }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+vaultos-daemon = { path = "../vaultos-daemon" }

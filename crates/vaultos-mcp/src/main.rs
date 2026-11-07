@@ -173,6 +173,7 @@ impl ServerHandler for Bridge {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> ExitCode {
+    vaultos_core::hardening::harden_process();
     let data_dir = match vaultos_core::paths::default_data_dir() {
         Ok(d) => d,
         Err(e) => {
