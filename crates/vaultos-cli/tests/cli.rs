@@ -289,6 +289,7 @@ fn the_daemon_serves_the_agent_cli() {
         data_dir: env.data.clone(),
         idle_lock: None,
         wait_for_owner: false,
+        sync_repo: None,
     };
     let daemon = std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()
@@ -471,4 +472,67 @@ fn init_secret_keys_and_upgrade() {
     assert!(Path::new(upgraded["backup"].as_str().unwrap()).is_file());
     let projects = old.human(&["--password-stdin", "projects"], fixture).json();
     assert_eq!(projects.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn sync_commands_enrol_report_and_refuse_without_printing_values() {
+    let env = Env::with_vault();
+    let id = env.admin(&["sync", "init", "Laptop"]).json();
+    assert_eq!(id["label"], "Laptop");
+    assert!(id["agePublicKey"].as_str().unwrap().starts_with("age1"));
+    let me = env.admin(&["sync", "identity"]).json();
+    assert_eq!(me["id"], id["id"]);
+    assert_eq!(me["fingerprint"].as_str().unwrap().len(), 64);
+
+    let plan = env.admin(&["sync", "plan"]).json();
+    assert_eq!(plan["added"], json!([]));
+
+    // Without Git, a push stays on this machine and says so (exit 2).
+    let push = env.admin(&["sync", "push"]);
+    assert_eq!(push.code, 2, "{}", push.stderr);
+    let pushed: Value = serde_json::from_str(&push.stdout).unwrap();
+    assert_eq!(pushed["transport"], "none");
+    assert_eq!(pushed["delivered"], false);
+    let status = env.admin(&["sync", "status"]);
+    assert_eq!(status.code, 2);
+    assert!(status.stdout.contains("NO_GIT_REPO"));
+    for out in [&push.stdout, &status.stdout] {
+        assert!(!out.contains(VALUE) && !out.contains("HUMAN_KEY"));
+    }
+
+    let auto = env
+        .admin(&["sync", "auto", "on", "--interval", "60"])
+        .json();
+    assert_eq!(
+        auto["autoSync"],
+        json!({ "enabled": true, "intervalSeconds": 60 })
+    );
+    assert_eq!(
+        env.admin(&["sync", "auto", "on", "--interval", "5"]).code,
+        2
+    );
+
+    let bad = env.root.join("peer.json");
+    std::fs::write(
+        &bad,
+        br#"{"id":"0123456789abcdef","label":"Peer","agePublicKey":"age1nope","signingPublicKey":"AA=="}"#,
+    )
+    .unwrap();
+    let trust = env.admin(&["sync", "trust", bad.to_str().unwrap()]);
+    assert_eq!(trust.code, 1);
+    assert!(
+        trust.stderr.contains("Invalid peer identity"),
+        "{}",
+        trust.stderr
+    );
+
+    // `sync now` asks a running daemon; there is none.
+    assert_eq!(env.human(&["sync", "now"], "").code, 3);
+
+    let mut store = Store::new(&env.data).unwrap();
+    store.unlock(&SecretString::new(PW), None).unwrap();
+    let (_, entries) = store.verify_audit().unwrap();
+    assert!(entries
+        .iter()
+        .any(|e| e.action == "sync_init" && e.detail == "Laptop"));
 }

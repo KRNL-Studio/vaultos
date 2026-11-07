@@ -2329,6 +2329,7 @@ dependencies = [
  "vaultos-client",
  "vaultos-core",
  "vaultos-daemon",
+ "vaultos-sync",
  "zeroize",
 ]
 
@@ -2387,6 +2388,7 @@ dependencies = [
  "tokio",
  "vaultos-client",
  "vaultos-core",
+ "vaultos-sync",
 ]
 
 [[package]]

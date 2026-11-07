@@ -45,6 +45,7 @@ fn main() -> ExitCode {
         data_dir,
         idle_lock: args.idle_lock_minutes.map(|m| Duration::from_secs(m * 60)),
         wait_for_owner: args.wait,
+        sync_repo: None,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

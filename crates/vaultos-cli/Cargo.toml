@@ -18,6 +18,7 @@ serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 vaultos-client = { path = "../vaultos-client" }
 vaultos-core = { path = "../vaultos-core" }
+vaultos-sync = { path = "../vaultos-sync" }
 zeroize = "1"
 
 [dev-dependencies]

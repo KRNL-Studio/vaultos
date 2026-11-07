@@ -5,6 +5,7 @@
 //! refused anyway.
 
 use crate::api::{self, Reply, Request, MAX_BODY};
+use crate::autosync::AutoSync;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
@@ -12,6 +13,7 @@ use hyper::header::{HeaderValue, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORI
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
+use serde_json::Value;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,21 +37,25 @@ pub struct Config {
     pub idle_lock: Option<Duration>,
     /// Wait for the vault's owner (the app) to quit instead of failing, then take over.
     pub wait_for_owner: bool,
+    /// The sync checkout; by default `VAULTOS_SYNC_REPO`, else `sync-repository` in the
+    /// data folder.
+    pub sync_repo: Option<PathBuf>,
 }
 
 #[derive(Debug)]
-struct Shared {
+pub(crate) struct Shared {
     store: Mutex<Store>,
     unlocked: AtomicBool,
     token: String,
     session: Session,
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
     last_used: Mutex<Instant>,
     shutdown: Notify,
+    pub(crate) autosync: AutoSync,
 }
 
 impl Shared {
-    fn with_store<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R {
+    pub(crate) fn with_store<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R {
         let mut store = self.store.lock().unwrap_or_else(PoisonError::into_inner);
         let r = f(&mut store);
         self.unlocked.store(store.is_unlocked(), Ordering::SeqCst);
@@ -135,11 +141,18 @@ pub async fn run(cfg: Config) -> Result<(), Error> {
         data_dir: cfg.data_dir.clone(),
         last_used: Mutex::new(Instant::now()),
         shutdown: Notify::new(),
+        autosync: AutoSync::new(
+            cfg.sync_repo
+                .clone()
+                .unwrap_or_else(|| vaultos_sync::default_repo(&cfg.data_dir)),
+        ),
     });
 
     let guard = tokio::spawn(guard_loop(shared.clone(), cfg.idle_lock));
+    let autosync = tokio::spawn(AutoSync::run_loop(shared.clone()));
     let result = accept_loop(&listener, shared.clone()).await;
     guard.abort();
+    autosync.abort();
 
     // Lock before releasing anything, then remove what clients use to find this daemon.
     let s = shared.clone();
@@ -221,12 +234,18 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>) -> Reply {
         .path_and_query()
         .map_or("/", |p| p.as_str())
         .to_owned();
-    if method == "GET" && target == "/status" {
-        return Reply::ok(api::status(shared.unlocked.load(Ordering::SeqCst)));
-    }
     let expected = format!("Bearer {}", shared.token);
     let presented = header(&req, AUTHORIZATION.as_str()).unwrap_or_default();
-    if !ct_eq(presented.as_bytes(), expected.as_bytes()) {
+    let authorized = ct_eq(presented.as_bytes(), expected.as_bytes());
+    if method == "GET" && target == "/status" {
+        let sync = if authorized {
+            shared.autosync.status()
+        } else {
+            shared.autosync.public_status()
+        };
+        return Reply::ok(api::status(shared.unlocked.load(Ordering::SeqCst), sync));
+    }
+    if !authorized {
         return Reply::error(401, "Unauthorized");
     }
     let agent_token = header(&req, "x-vault-agent-token");
@@ -241,11 +260,25 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>) -> Reply {
         });
         return Reply::ok(serde_json::json!({ "ok": true }));
     }
+    // Owner control, like /shutdown: the session token alone, never an agent. It cannot
+    // accept conflicts or return values; it runs the same round autosync would.
     if method == "POST" && target == "/sync" {
         if agent_token.is_some() {
             return Reply::error(403, "Agents cannot trigger sync");
         }
-        return Reply::error(404, "Not found");
+        let s = shared.clone();
+        return match tokio::task::spawn_blocking(move || s.autosync.round(&s, true)).await {
+            Ok(Ok(status)) => {
+                let ok = status["state"] == serde_json::json!("OK");
+                let mut body = serde_json::json!({ "ok": ok });
+                if let (Some(b), Value::Object(s)) = (body.as_object_mut(), status) {
+                    b.extend(s);
+                }
+                Reply::ok(body)
+            }
+            Ok(Err(e)) => Reply::error(e.status, &e.message),
+            Err(_) => Reply::error(500, "Internal error"),
+        };
     }
     let content_type = header(&req, CONTENT_TYPE.as_str());
     let approver = header(&req, "x-vault-approver");
@@ -265,6 +298,7 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>) -> Reply {
         Ok(Err(_)) => return Reply::error(400, "Incomplete request"),
         Ok(Ok(c)) => c.to_bytes().to_vec(),
     };
+    let method_changes = method != "GET";
     let request = Request {
         method,
         target,
@@ -288,6 +322,9 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>) -> Reply {
     .unwrap_or_else(|_| Reply::error(500, "Internal error"));
     if reply.status == 200 {
         shared.touch();
+        if method_changes {
+            shared.autosync.poke();
+        }
     }
     reply
 }
@@ -308,19 +345,25 @@ async fn guard_loop(shared: Arc<Shared>, idle_lock: Option<Duration>) {
         }
         let idle = idle_lock.is_some_and(|limit| shared.idle_for() >= limit);
         let s = shared.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        let changed = tokio::task::spawn_blocking(move || {
             s.with_store(|store| {
                 if idle {
                     store.lock();
-                    return;
+                    return true;
                 }
-                if let Err(e) = store.reload_if_changed() {
-                    if !matches!(e, Error::Busy | Error::Io { .. } | Error::Conflict(_)) {
+                match store.reload_if_changed() {
+                    Ok(reloaded) => reloaded,
+                    Err(Error::Busy | Error::Io { .. } | Error::Conflict(_)) => false,
+                    Err(_) => {
                         store.lock();
+                        true
                     }
                 }
             })
         })
         .await;
+        if changed.unwrap_or(false) {
+            shared.autosync.poke();
+        }
     }
 }

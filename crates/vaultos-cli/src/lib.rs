@@ -19,6 +19,14 @@ impl Fail {
         }
     }
 
+    /// Exit with `code` after printing a result that already says what went wrong.
+    pub fn quiet(code: u8) -> Fail {
+        Fail {
+            message: String::new(),
+            code,
+        }
+    }
+
     pub fn usage(message: impl Into<String>) -> Fail {
         Fail {
             message: message.into(),
@@ -30,6 +38,12 @@ impl Fail {
 impl From<vaultos_core::Error> for Fail {
     fn from(e: vaultos_core::Error) -> Fail {
         Fail::new(e.to_string())
+    }
+}
+
+impl From<vaultos_sync::SyncError> for Fail {
+    fn from(e: vaultos_sync::SyncError) -> Fail {
+        Fail::new(e.message)
     }
 }
 

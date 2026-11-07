@@ -453,7 +453,11 @@ class Sync {
         regularFile(marker, {
             maxBytes: 1024
         });
-        if (JSON.parse(fs.readFileSync(marker)).app !== "VaultOS-Preview") throw new Error("Not a preview sync repository");
+        const markerData = JSON.parse(fs.readFileSync(marker));
+        if (markerData.app !== "VaultOS-Preview") throw new Error("Not a preview sync repository");
+        // VaultOS 0.3 (the Rust core) writes sync format 2, which this preview cannot verify;
+        // writing its own files there would make every 0.3 device refuse the repository.
+        if (markerData.version !== 1) throw new Error("This sync repository was made by a newer VaultOS; this preview cannot read or write it");
         for (const d of Object.values(this.dirs)) {
             fs.mkdirSync(d, {
                 recursive: true,

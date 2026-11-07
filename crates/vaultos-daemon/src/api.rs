@@ -487,7 +487,7 @@ fn import(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<
 
 /// `/status`: answered without the session token, so it says nothing about the vault's
 /// contents.
-pub fn status(unlocked: bool) -> Value {
+pub fn status(unlocked: bool, sync: Value) -> Value {
     json!({
         "app": "VaultOS-Preview",
         "ok": true,
@@ -495,7 +495,7 @@ pub fn status(unlocked: bool) -> Value {
         "locked": !unlocked,
         "formatVersion": vaultos_core::format::VERSION,
         "deployment": deployment(),
-        "sync": { "state": "NOT_RUNNING" },
+        "sync": sync,
     })
 }
 

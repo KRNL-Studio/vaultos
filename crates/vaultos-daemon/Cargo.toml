@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 vaultos-core = { path = "../vaultos-core" }
+vaultos-sync = { path = "../vaultos-sync" }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 form_urlencoded = "1"

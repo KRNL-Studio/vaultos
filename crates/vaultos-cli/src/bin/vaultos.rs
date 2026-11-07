@@ -101,6 +101,42 @@ enum Command {
     /// Add, replace or remove the vault's Secret Key
     #[command(subcommand)]
     SecretKey(SecretKeyCommand),
+    /// End-to-end encrypted sync through a Git checkout (VAULTOS_SYNC_REPO, or
+    /// sync-repository in the data directory)
+    #[command(subcommand)]
+    Sync(SyncCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum SyncCommand {
+    /// Enrol this device: in a new, empty checkout, or in a clone of an existing sync repository
+    Init { label: String },
+    /// This device's public identity and fingerprint, to compare and trust on the others
+    Identity,
+    /// Trust another device's identity file (its machines/<id>.json, or `sync identity`
+    /// output) once its fingerprint matches what that device shows
+    Trust { file: PathBuf },
+    /// Fetch, then report one state for the whole; exits 2 unless IN_SYNC
+    Status,
+    /// Encrypt, commit and push this device's changes; exits 2 unless delivered
+    Push,
+    /// Fetch and merge; concurrent edits stop the merge until accepted
+    Pull,
+    /// What a pull would change, by project and key name (never values)
+    Plan,
+    /// Fetch and merge, resolving concurrent edits by revision (back up first)
+    AcceptConflicts,
+    /// Ask the running vaultosd to sync now, the way autosync would (this also clears a
+    /// halt); exits 2 unless it succeeded
+    Now,
+    /// Turn autosync in vaultosd on or off (it is off until turned on)
+    Auto {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+        /// Seconds between rounds, 30 to 86400 (default 120)
+        #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(30..=86_400))]
+        interval: Option<u64>,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -879,6 +915,70 @@ fn secret_key(ctx: &Ctx, cmd: SecretKeyCommand) -> Result<()> {
     }
 }
 
+fn sync(ctx: &Ctx, cmd: SyncCommand) -> Result<()> {
+    let exit = |ok: bool| if ok { Ok(()) } else { Err(Fail::quiet(2)) };
+    if let SyncCommand::Now = cmd {
+        let reply = ctx.owner_client().owner("POST", "/sync", None)?;
+        emit(&reply)?;
+        return exit(reply["ok"] == json!(true));
+    }
+    let mut open = ctx.open()?;
+    let store = &mut open.store;
+    let repo = vaultos_sync::default_repo(&ctx.data_dir);
+    let engine = vaultos_sync::Sync::new(&ctx.data_dir, &repo);
+    match cmd {
+        SyncCommand::Init { label } => {
+            let identity = engine.init(store, &label)?;
+            let _ = store.audit("sync_init", &label, HUMAN);
+            emit(&identity)
+        }
+        SyncCommand::Identity => emit(&engine.identity(store)?),
+        SyncCommand::Trust { file } => {
+            let bytes = fs_safe::read_regular(&file, 16 * 1024)?;
+            let identity: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| Fail::new("The identity file is not JSON"))?;
+            let trusted = engine.trust(store, &identity)?;
+            let detail = format!(
+                "{} ({})",
+                identity["label"].as_str().unwrap_or_default(),
+                trusted["id"].as_str().unwrap_or_default()
+            );
+            let _ = store.audit("sync_trust", &detail, HUMAN);
+            emit(&trusted)
+        }
+        SyncCommand::Status => {
+            let status = engine.status_remote(store)?;
+            emit(&status)?;
+            exit(status["state"] == json!("IN_SYNC"))
+        }
+        SyncCommand::Push => {
+            let pushed = engine.push_remote(store, None)?;
+            emit(&pushed)?;
+            exit(pushed["delivered"] == json!(true))
+        }
+        SyncCommand::Plan => emit(&engine.pull(store, false, false)?.detail()),
+        SyncCommand::Pull => emit(&engine.pull_remote(store, false)?),
+        SyncCommand::AcceptConflicts => emit(&engine.pull_remote(store, true)?),
+        SyncCommand::Auto { state, interval } => {
+            let mut auto = store
+                .settings()?
+                .get("autoSync")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            auto.insert("enabled".into(), json!(state == "on"));
+            if let Some(i) = interval {
+                auto.insert("intervalSeconds".into(), json!(i));
+            }
+            let mut patch = serde_json::Map::new();
+            patch.insert("autoSync".into(), Value::Object(auto.clone()));
+            store.update_settings(patch, HUMAN)?;
+            emit(&json!({ "ok": true, "autoSync": auto }))
+        }
+        SyncCommand::Now => Ok(()),
+    }
+}
+
 fn run(cli: Cli) -> Result<()> {
     let data_dir = vaultos_core::paths::default_data_dir()?;
     let ctx = Ctx {
@@ -923,6 +1023,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Pending(c) => pending(&ctx, c),
         Command::Approver(c) => approver(&ctx, c),
         Command::SecretKey(c) => secret_key(&ctx, c),
+        Command::Sync(c) => sync(&ctx, c),
     }
 }
 
@@ -931,7 +1032,9 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(f) => {
-            eprintln!("vaultos: {}", f.message);
+            if !f.message.is_empty() {
+                eprintln!("vaultos: {}", f.message);
+            }
             ExitCode::from(f.code)
         }
     }

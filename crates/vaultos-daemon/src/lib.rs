@@ -5,4 +5,5 @@
 //! session file and the background guard. See `docs/AGENTS.md`.
 
 pub mod api;
+pub mod autosync;
 pub mod server;

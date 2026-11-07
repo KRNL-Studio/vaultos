@@ -20,7 +20,11 @@ impl Dev {
         let dir = root.join(name);
         let mut store = Store::new(&dir).unwrap();
         store
-            .create(&SecretString::new("synthetic-sync-password"), None, KdfParams::FLOOR)
+            .create(
+                &SecretString::new("synthetic-sync-password"),
+                None,
+                KdfParams::FLOOR,
+            )
             .unwrap();
         Dev {
             store,
@@ -41,11 +45,21 @@ impl Dev {
     }
 
     fn value(&mut self, project: &str, key: &str) -> String {
-        self.store.reveal(project, key, "human").unwrap().value.expose().to_owned()
+        self.store
+            .reveal(project, key, "human")
+            .unwrap()
+            .value
+            .expose()
+            .to_owned()
     }
 
     fn keys(&self, project: &str) -> Vec<String> {
-        self.store.list_items(project).unwrap().into_iter().map(|i| i.key).collect()
+        self.store
+            .list_items(project)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.key)
+            .collect()
     }
 
     fn push(&mut self) -> vaultos_sync::Wrote {
@@ -147,13 +161,29 @@ fn merges_records_and_deletions_without_disclosing_values_or_their_hashes() {
     assert_eq!(a.fingerprint(), b.fingerprint());
 
     // Neither the repository nor the local index holds a value, a key name or a record hash.
-    let hashes: Vec<String> = a.store.sync_records().unwrap().into_iter().map(|r| r.hash).collect();
+    let hashes: Vec<String> = a
+        .store
+        .sync_records()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.hash)
+        .collect();
     for needle in ["synthetic-sync-private", "API_KEY", "Example"] {
-        assert!(contains(&repo, needle).is_empty(), "{needle} in {:?}", contains(&repo, needle));
+        assert!(
+            contains(&repo, needle).is_empty(),
+            "{needle} in {:?}",
+            contains(&repo, needle)
+        );
     }
     for h in &hashes {
-        assert!(contains(&repo, h).is_empty(), "record hash in the repository");
-        assert!(contains(&root.path().join("a"), h).is_empty(), "record hash beside the vault");
+        assert!(
+            contains(&repo, h).is_empty(),
+            "record hash in the repository"
+        );
+        assert!(
+            contains(&root.path().join("a"), h).is_empty(),
+            "record hash beside the vault"
+        );
     }
     assert!(contains(&root.path().join("a"), "AGE-SECRET-KEY").is_empty());
 }
@@ -167,7 +197,11 @@ fn refuses_recipient_injection_bad_signatures_tampered_files_and_rollback() {
     let recipients = repo.join("recipients.txt");
     let original = std::fs::read(&recipients).unwrap();
     let stranger = age::x25519::Identity::generate().to_public().to_string();
-    std::fs::write(&recipients, [original.clone(), format!("{stranger}\n").into_bytes()].concat()).unwrap();
+    std::fs::write(
+        &recipients,
+        [original.clone(), format!("{stranger}\n").into_bytes()].concat(),
+    )
+    .unwrap();
     a.set("Example", "API_KEY", "synthetic-changed");
     let e = a.sync.push_local(&a.store).unwrap_err();
     assert!(e.message.contains("Unapproved"), "{e}");
@@ -180,22 +214,36 @@ fn refuses_recipient_injection_bad_signatures_tampered_files_and_rollback() {
     m["manifest"]["counter"] = (m["manifest"]["counter"].as_u64().unwrap() + 1).into();
     std::fs::write(&manifest, serde_json::to_vec(&m).unwrap()).unwrap();
     let problems = a.sync.verify_manifests(&a.store, false).unwrap();
-    assert!(problems.contains(&"BAD SIGNATURE".to_owned()), "{problems:?}");
+    assert!(
+        problems.contains(&"BAD SIGNATURE".to_owned()),
+        "{problems:?}"
+    );
     std::fs::write(&manifest, &signed).unwrap();
 
     let records = repo.join("records");
-    let file = std::fs::read_dir(&records).unwrap().next().unwrap().unwrap().path();
+    let file = std::fs::read_dir(&records)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
     let bytes = std::fs::read(&file).unwrap();
     std::fs::write(&file, [bytes.clone(), b"bad".to_vec()].concat()).unwrap();
     let problems = a.sync.verify_manifests(&a.store, false).unwrap();
-    assert!(problems.iter().any(|p| p.contains("ciphertext")), "{problems:?}");
+    assert!(
+        problems.iter().any(|p| p.contains("ciphertext")),
+        "{problems:?}"
+    );
     std::fs::write(&file, &bytes).unwrap();
 
     // A well-named file no manifest signs.
     let unsigned = records.join(format!("{}.age", "0".repeat(64)));
     std::fs::write(&unsigned, b"age-encryption.org/v1").unwrap();
     let problems = a.sync.verify_manifests(&a.store, false).unwrap();
-    assert!(problems.contains(&"Unsigned or modified ciphertext".to_owned()), "{problems:?}");
+    assert!(
+        problems.contains(&"Unsigned or modified ciphertext".to_owned()),
+        "{problems:?}"
+    );
     std::fs::remove_file(&unsigned).unwrap();
 
     // A manifest from a device nobody trusts.
@@ -205,7 +253,10 @@ fn refuses_recipient_injection_bad_signatures_tampered_files_and_rollback() {
     c.trust(&b.identity());
     c.push();
     let problems = a.sync.verify_manifests(&a.store, false).unwrap();
-    assert!(problems.contains(&"Untrusted sync machine".to_owned()), "{problems:?}");
+    assert!(
+        problems.contains(&"Untrusted sync machine".to_owned()),
+        "{problems:?}"
+    );
     let cid = c.identity()["id"].as_str().unwrap().to_owned();
     std::fs::remove_file(repo.join("manifests").join(format!("{cid}.json"))).unwrap();
     std::fs::write(&recipients, &original).unwrap();
@@ -215,7 +266,10 @@ fn refuses_recipient_injection_bad_signatures_tampered_files_and_rollback() {
     assert!(a.sync.verify_manifests(&a.store, true).unwrap().is_empty());
     std::fs::write(&manifest, &signed).unwrap();
     let problems = a.sync.verify_manifests(&a.store, false).unwrap();
-    assert!(problems.iter().any(|p| p.contains("ROLLBACK")), "{problems:?}");
+    assert!(
+        problems.iter().any(|p| p.contains("ROLLBACK")),
+        "{problems:?}"
+    );
     let e = a.sync.pull(&mut a.store, true, false).unwrap_err();
     assert_eq!(e.code, "SIGNATURE_INVALID");
 }
@@ -236,7 +290,12 @@ fn refuses_concurrent_edits_until_accepted_and_keeps_a_backup() {
     let plan = a.accept();
     assert_eq!(plan.conflicts[0]["resolution"], "remote");
     assert_eq!(a.value("Example", "KEY"), "right-again");
-    assert!(std::fs::read_dir(root.path().join("a/backups")).unwrap().count() > 0);
+    assert!(
+        std::fs::read_dir(root.path().join("a/backups"))
+            .unwrap()
+            .count()
+            > 0
+    );
 }
 
 #[test]
@@ -273,7 +332,11 @@ fn a_one_sided_edit_is_an_update_and_a_kept_local_edit_is_pushed_next() {
     a.accept();
     assert_eq!(a.value("Example", "KEY"), "edited-on-b-thrice");
     assert_eq!(a.fingerprint(), b.fingerprint());
-    assert_eq!(b.push().written, 0, "records the repository holds are not rewritten");
+    assert_eq!(
+        b.push().written,
+        0,
+        "records the repository holds are not rewritten"
+    );
 }
 
 #[test]
@@ -290,7 +353,11 @@ fn ties_resolve_to_the_same_winner_on_both_devices() {
     b.push();
     a.accept();
     assert_eq!(plan.conflicts.len(), 1);
-    assert_eq!(a.fingerprint(), b.fingerprint(), "both devices keep the same version");
+    assert_eq!(
+        a.fingerprint(),
+        b.fingerprint(),
+        "both devices keep the same version"
+    );
 }
 
 #[test]
@@ -332,7 +399,11 @@ fn refuses_old_and_foreign_repositories_and_a_tampered_index() {
     let root = tempfile::tempdir().unwrap();
     let repo = root.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    std::fs::write(repo.join("vaultos-sync.json"), br#"{"app":"VaultOS-Preview","version":1}"#).unwrap();
+    std::fs::write(
+        repo.join("vaultos-sync.json"),
+        br#"{"app":"VaultOS-Preview","version":1}"#,
+    )
+    .unwrap();
     let mut a = Dev::new(root.path(), "a", &repo);
     let e = a.sync.init(&mut a.store, "Machine A").unwrap_err();
     assert_eq!(e.code, "UNSUPPORTED_REPOSITORY");
@@ -349,7 +420,8 @@ fn refuses_old_and_foreign_repositories_and_a_tampered_index() {
     a.set("Example", "K", "synthetic");
     a.push();
     let index = root.path().join("a/sync-index.json");
-    let mut idx: serde_json::Value = serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+    let mut idx: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
     idx["lastPush"]["counter"] = 99.into();
     std::fs::write(&index, serde_json::to_vec(&idx).unwrap()).unwrap();
     let e = a.sync.pull(&mut a.store, true, false).unwrap_err();
@@ -364,7 +436,11 @@ fn git(args: &[&str]) -> String {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -384,11 +460,24 @@ fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     let root = tempfile::tempdir().unwrap();
     let remote = root.path().join("remote.git");
     let remote_s = remote.to_str().unwrap();
-    git(&["init", "--quiet", "--bare", "--initial-branch=main", remote_s]);
+    git(&[
+        "init",
+        "--quiet",
+        "--bare",
+        "--initial-branch=main",
+        remote_s,
+    ]);
     let repo_a = root.path().join("checkout-a");
     git(&["init", "--quiet", "-b", "main", repo_a.to_str().unwrap()]);
     configure(&repo_a);
-    git(&["-C", repo_a.to_str().unwrap(), "remote", "add", "origin", remote_s]);
+    git(&[
+        "-C",
+        repo_a.to_str().unwrap(),
+        "remote",
+        "add",
+        "origin",
+        remote_s,
+    ]);
 
     let mut a = Dev::new(root.path(), "a", &repo_a);
     let ia = a.sync.init(&mut a.store, "Machine A").unwrap();
@@ -402,13 +491,34 @@ fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     std::fs::write(repo_a.join("records/.DS_Store"), b"finder").unwrap();
     let r = a.sync.push_remote(&a.store, None).unwrap();
     assert_eq!(r["delivered"], true, "{r}");
-    let published = git(&["--git-dir", remote_s, "ls-tree", "-r", "--name-only", "HEAD"]);
-    assert!(!published.contains("unrelated") && !published.contains("DS_Store"), "{published}");
+    let published = git(&[
+        "--git-dir",
+        remote_s,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        "HEAD",
+    ]);
+    assert!(
+        !published.contains("unrelated") && !published.contains("DS_Store"),
+        "{published}"
+    );
     // Given to Git, it is a change sync did not make.
     git(&["-C", repo_a.to_str().unwrap(), "add", "unrelated.txt"]);
     let e = a.sync.push_remote(&a.store, None).unwrap_err();
-    assert!(e.message.contains(r#"unrelated changes; refusing to commit: "unrelated.txt""#), "{e}");
-    git(&["-C", repo_a.to_str().unwrap(), "rm", "--quiet", "--cached", "unrelated.txt"]);
+    assert!(
+        e.message
+            .contains(r#"unrelated changes; refusing to commit: "unrelated.txt""#),
+        "{e}"
+    );
+    git(&[
+        "-C",
+        repo_a.to_str().unwrap(),
+        "rm",
+        "--quiet",
+        "--cached",
+        "unrelated.txt",
+    ]);
 
     // An ignore rule outside the checkout must not drop a file the manifest signs.
     let exclude = repo_a.join(".git/info/exclude");
@@ -421,7 +531,10 @@ fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     // What that push wrote but could not commit goes out with the next round.
     let r = a.sync.pull_remote(&mut a.store, false).unwrap();
     assert_eq!(r["transport"], "ok", "{r}");
-    assert_eq!(a.sync.push_remote(&a.store, None).unwrap()["delivered"], true);
+    assert_eq!(
+        a.sync.push_remote(&a.store, None).unwrap()["delivered"],
+        true
+    );
 
     // A second device joins from a clone.
     let repo_b = root.path().join("checkout-b");
@@ -431,7 +544,10 @@ fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     let ib = b.sync.init(&mut b.store, "Machine B").unwrap();
     b.trust(&ia);
     a.trust(&ib);
-    assert_eq!(b.sync.push_remote(&b.store, None).unwrap()["delivered"], true);
+    assert_eq!(
+        b.sync.push_remote(&b.store, None).unwrap()["delivered"],
+        true
+    );
     a.sync.pull_remote(&mut a.store, false).unwrap();
     let r = a.sync.push_remote(&a.store, None).unwrap();
     assert_eq!(r["reencryptedForNewRecipients"], true, "{r}");
@@ -453,5 +569,8 @@ fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     git(&["-C", rb, "commit", "--quiet", "-m", "planted"]);
     git(&["-C", rb, "push", "--quiet", "origin", "HEAD:main"]);
     let e = a.sync.pull_remote(&mut a.store, false).unwrap_err();
-    assert!(e.message.contains("Unexpected file in the sync repository"), "{e}");
+    assert!(
+        e.message.contains("Unexpected file in the sync repository"),
+        "{e}"
+    );
 }
