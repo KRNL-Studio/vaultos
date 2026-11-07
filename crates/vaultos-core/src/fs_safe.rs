@@ -249,8 +249,19 @@ fn take_over(path: &Path, held: &[u8]) -> Result<()> {
     }
     let current = fs::read(&aside).ok();
     if current.as_deref() != Some(held) {
-        let _ = fs::hard_link(&aside, path);
-        let _ = fs::remove_file(&aside);
+        // Put the live lock back. A lock is never deleted unless it is back in place: if a
+        // newer one already took its name, or it cannot be restored, it stays aside.
+        match fs::hard_link(&aside, path) {
+            Ok(()) => {
+                let _ = fs::remove_file(&aside);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                if !path.exists() {
+                    let _ = fs::rename(&aside, path);
+                }
+            }
+        }
         return Err(Error::Busy);
     }
     let _ = fs::remove_file(&aside);

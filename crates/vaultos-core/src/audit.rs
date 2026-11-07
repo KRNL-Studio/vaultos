@@ -232,28 +232,44 @@ pub fn restart(
 
 pub const RESET: &str = "audit_log_reset";
 
-/// Replaces a log that failed verification at unlock with a new chain whose first entry
-/// names the problem. If another process that unlocked the same damaged log already did so
-/// since `since` (this process's unlock time), its chain is adopted instead, so two
-/// processes never set each other's new chain aside.
+/// What [`reset`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reset {
+    /// The log now verifies against the vault's anchor after all: nothing was reset.
+    Continued(Option<AuditHead>),
+    /// Another process reset it after this one unlocked; its new chain is followed.
+    Adopted(AuditHead),
+    /// The log was set aside and a new chain started.
+    Restarted(AuditHead),
+}
+
+/// Handles a log that failed verification at unlock. Under the log's lock it checks again:
+/// a log that now verifies against `anchor` continues; a new chain another process started
+/// since `since` (this process's unlock time) is adopted, so two processes never set each
+/// other's chain aside; otherwise the log is set aside and a new chain starts with an entry
+/// naming the problem.
 pub fn reset(
     dir: &Path,
     vault_id: &str,
     seed: &Key32,
+    anchor: Option<&AuditHead>,
     problem: &str,
     since: &str,
-) -> Result<AuditHead> {
+) -> Result<Reset> {
     let _lock = lock(dir)?;
     let public = b64(&public_key(seed));
+    if let Ok((report, _)) = verify(dir, vault_id, &public, anchor) {
+        return Ok(Reset::Continued(report.head));
+    }
     if let Ok((report, entries)) = verify(dir, vault_id, &public, None) {
         if let (Some(first), Some(head)) = (entries.first(), report.head) {
             if first.action == RESET && first.at.as_str() >= since {
-                return Ok(head);
+                return Ok(Reset::Adopted(head));
             }
         }
     }
     set_aside(dir, "set-aside")?;
-    append_locked(dir, vault_id, seed, None, HUMAN, RESET, problem)
+    append_locked(dir, vault_id, seed, None, HUMAN, RESET, problem).map(Reset::Restarted)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
