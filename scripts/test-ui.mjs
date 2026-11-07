@@ -1,6 +1,6 @@
 import { _electron as electron } from "playwright";
 
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 
 import { tmpdir } from "node:os";
 
@@ -180,6 +180,7 @@ try {
     await quick.locator("#q").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
     await page.locator(".secret.card.flash").waitFor();
     assert.equal(await app.evaluate(({BrowserWindow}) => BrowserWindow.getAllWindows().filter(w => w.isVisible()).length), 1, "Quick Access hides after opening an item");
+    let main = page;
     if (process.platform === "darwin") {
         // Closing the window locks the vault and leaves VaultOS in the menu bar.
         const closed = page.waitForEvent("close");
@@ -202,8 +203,31 @@ try {
             name: "Example App",
             exact: false
         }).waitFor();
+        main = again;
     }
-    console.log("Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, Quick Access, close to menu bar. Synthetic screenshot saved.");
+    // Overlapping unlocks run one at a time: a wrong password delays the attempt queued behind
+    // it, and a wrong attempt never gives back ownership a correct one gained.
+    await main.getByRole("button", {
+        name: "Lock",
+        exact: true
+    }).click();
+    await main.getByRole("button", {
+        name: "Unlock",
+        exact: true
+    }).waitFor();
+    const ownerLock = path.join(dir, "data", "owner.lock");
+    const race = order => main.evaluate(pws => Promise.all(pws.map(pw => window.vault.unlock(pw))), order);
+    const [wrongFirst, delayed] = await race([ "synthetic-wrong-password", "synthetic-ui-password" ]);
+    assert.equal(wrongFirst.ok, false);
+    assert.match(delayed.error, /Wait a moment/, "the queued attempt honours the delay the failure set");
+    assert(!existsSync(ownerLock), "a failed unlock releases the vault");
+    await new Promise(r => setTimeout(r, 1200));
+    const [right, wrongAfter] = await race([ "synthetic-ui-password", "synthetic-wrong-password" ]);
+    assert.equal(right.ok, true);
+    assert.equal(wrongAfter.ok, false);
+    assert(existsSync(ownerLock), "a later wrong attempt does not release the unlocked vault");
+    assert.equal(readFileSync(ownerLock, "utf8"), String(await app.evaluate(() => process.pid)));
+    console.log("Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, Quick Access, close to menu bar, overlapping unlocks. Synthetic screenshot saved.");
 } finally {
     await app.close();
     rmSync(dir, {

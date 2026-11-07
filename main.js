@@ -115,20 +115,30 @@ function lockQuick() {
     hideQuick();
 }
 
-// Every lock bumps lockGeneration, so an unlock that was still waiting (for another process
-// to hand over the vault, for Touch ID, for the API to start) cannot finish after a later
-// Lock, window close or quit. The newest abandoned attempt gives back ownership it gained.
-let lockGeneration = 0, unlockAttempts = 0;
+// Every lock bumps lockGeneration. An unlock or vault creation notes the generation when it
+// is requested, so one still waiting (in the queue, for Touch ID, for another process to hand
+// over the vault, for the API to start) cannot finish after a later Lock, window close or quit.
+// They run one at a time: none shares another's pending claim, gives back ownership another
+// gained, or misses the retry delay set by the attempt before it.
+let lockGeneration = 0, unlockQueue = Promise.resolve();
 
-const unlockTicket = () => ({
-    gen: lockGeneration,
-    attempt: ++unlockAttempts
-});
+function serially(fn) {
+    const run = unlockQueue.then(fn);
+    unlockQueue = run.catch(() => {});
+    return run;
+}
 
-const lockedSince = ticket => ticket.gen !== lockGeneration;
+const lockedSince = gen => gen !== lockGeneration;
 
-function abandonUnlock(ticket) {
-    if (ticket.attempt === unlockAttempts && !store.isUnlocked() && release) {
+const retryWait = () => Date.now() < retryAt ? {
+    ok: false,
+    error: "Wait a moment before trying again"
+} : null;
+
+// Gives back ownership this attempt gained, unless the vault is open (a window-only lock
+// keeps serving agents, so it keeps the vault).
+function abandonUnlock() {
+    if (!store.isUnlocked() && release) {
         release();
         release = null;
     }
@@ -194,9 +204,8 @@ function touch() {
     if (humanUnlocked) timer = setTimeout(() => autoLock("idle"), 15 * 60 * 1e3);
 }
 
-// Two unlocks can overlap (a Touch ID prompt and a typed password, or a double submit).
-// Each waits for the one already in flight instead of claiming the vault or starting the
-// API a second time.
+// Claims the vault and starts the API at most once each: a second call waits for the one in
+// flight. Unlocks reach these one at a time (serially, above).
 let owning = null, serving = null;
 
 function own() {
@@ -276,18 +285,24 @@ handle("state", desktopState, true);
 
 handle("providers", () => PROVIDERS, true);
 
-handle("init", async pw => {
-    if (Date.now() < retryAt) return {
-        ok: false,
-        error: "Wait a moment before trying again"
-    };
+handle("init", pw => {
+    const gen = lockGeneration;
+    return serially(() => initVault(pw, gen));
+}, true);
+
+async function initVault(pw, gen) {
+    if (lockedSince(gen)) return abandonUnlock();
+    const wait = retryWait();
+    if (wait) return wait;
     await own();
+    if (lockedSince(gen)) return abandonUnlock();
     try {
         store.init(pw);
         store.allowAutoUnlock();
         humanUnlocked = true;
         humanAuth.markProven();
         await serve();
+        if (lockedSince(gen)) return abandonUnlock();
         touch();
         return {
             ok: true
@@ -298,7 +313,7 @@ handle("init", async pw => {
         });
         throw e;
     }
-}, true);
+}
 
 // After any human unlock (main window or Quick Access): the main window leaves its lock
 // screen, the menu bar updates, and expiring keys are announced if the human asked for it.
@@ -309,7 +324,8 @@ function afterUnlock() {
 }
 
 async function unlockWithPassword(pw) {
-    const r = await unlockPasswordInner(pw);
+    const gen = lockGeneration;
+    const r = await serially(() => unlockPasswordInner(pw, gen));
     if (r.ok) afterUnlock();
     return r;
 }
@@ -324,18 +340,16 @@ handle("unlock", unlockWithPassword, true);
 
 handle("unlockTouchId", unlockWithTouchId, true);
 
-async function unlockPasswordInner(pw) {
+async function unlockPasswordInner(pw, gen) {
     if (typeof pw !== "string" || pw.length > 1024) return {
         ok: false,
         error: "Invalid password"
     };
-    if (Date.now() < retryAt) return {
-        ok: false,
-        error: "Wait a moment before trying again"
-    };
-    const ticket = unlockTicket();
+    if (lockedSince(gen)) return abandonUnlock();
+    const wait = retryWait();
+    if (wait) return wait;
     await own();
-    if (lockedSince(ticket)) return abandonUnlock(ticket);
+    if (lockedSince(gen)) return abandonUnlock();
     try {
         if (store.isUnlocked()) {
             if (!safeEqual(pw, store.password)) throw new Error("Wrong password");
@@ -346,7 +360,7 @@ async function unlockPasswordInner(pw) {
         humanAuth.markProven();
         failed = 0;
         await serve();
-        if (lockedSince(ticket)) return abandonUnlock(ticket);
+        if (lockedSince(gen)) return abandonUnlock();
         touch();
         return {
             ok: true
@@ -366,17 +380,17 @@ async function unlockPasswordInner(pw) {
 
 // Touch ID opens the window with the password the Keychain remembers, through the same
 // checks as a typed unlock. Cancel or failure leaves the password field as the fallback.
+// The prompt runs outside the queue (it claims nothing), so a typed password is not held up
+// by an open Touch ID sheet.
 async function unlockTouchIdInner() {
-    if (Date.now() < retryAt) return {
-        ok: false,
-        error: "Wait a moment before trying again"
-    };
+    const early = retryWait();
+    if (early) return early;
     const status = unlockStatus();
     if (!status.ready) return {
         ok: false,
         error: status.error
     };
-    const ticket = unlockTicket();
+    const gen = lockGeneration;
     try {
         await humanAuth.prompt("unlock VaultOS");
     } catch {
@@ -386,20 +400,24 @@ async function unlockTouchIdInner() {
             error: "Touch ID was not confirmed. Enter the master password."
         };
     }
-    if (lockedSince(ticket)) {
+    return serially(() => touchIdUnlock(gen));
+}
+
+async function touchIdUnlock(gen) {
+    const refuse = r => {
         humanAuth.reset();
-        return abandonUnlock(ticket);
-    }
+        return r;
+    };
+    if (lockedSince(gen)) return refuse(abandonUnlock());
+    const wait = retryWait();
+    if (wait) return refuse(wait);
     try {
         await own();
     } catch (e) {
         humanAuth.reset();
         throw e;
     }
-    if (lockedSince(ticket)) {
-        humanAuth.reset();
-        return abandonUnlock(ticket);
-    }
+    if (lockedSince(gen)) return refuse(abandonUnlock());
     const wasUnlocked = store.isUnlocked();
     try {
         if (store.isAutoUnlockBlocked()) throw new Error("blocked");
@@ -415,7 +433,7 @@ async function unlockTouchIdInner() {
         humanAuth.markProven();
         failed = 0;
         await serve();
-        if (lockedSince(ticket)) return abandonUnlock(ticket);
+        if (lockedSince(gen)) return abandonUnlock();
         touch();
         return {
             ok: true
