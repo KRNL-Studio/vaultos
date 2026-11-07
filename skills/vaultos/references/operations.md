@@ -183,8 +183,9 @@ repository. `vaultos sync auto on` and `accept-conflicts` are the human's
 decisions, as above. An agent's `vault_status` shows only the sync state and
 flags; the reason for a halt is in `vaultos status` and `vaultosd.log`.
 
-For requested uninstall, disable background access or Lock, quit the identified
-preview, and remove only its MCP entry and app. Preserve data and encrypted
+For requested uninstall, disable background access or Lock, have the human turn
+off Open at login if it is on, quit the identified preview from its menu bar item
+(closing the window leaves it running, locked), and remove only its MCP entry and app. Preserve data and encrypted
 backups unless deletion was requested. See the recovery guide for targeted
 preview data, token, Keychain/Secret Service and Linux service cleanup; do not
 remove another vault's files, launch agents, services, or keys.
