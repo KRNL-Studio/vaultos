@@ -250,7 +250,7 @@ fn sync_line(status: &Value) -> Option<String> {
     })
 }
 
-fn notify(app: &AppHandle, title: &str, body: &str) {
+pub fn notify(app: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
     let _ = app.notification().builder().title(title).body(body).show();
 }

@@ -1,7 +1,8 @@
 // Background access (`VaultOS --service`) against a new vault in a temporary folder, with a
 // synthetic password the app itself remembers in the keychain and forgets at the end: no
 // remembered password, unlock and serve, the window's hand-over, a manual lock, a clean quit,
-// and a wrong remembered password. Uses a `ui-test` debug build.
+// a password left in the keychain after background access was turned off, and a wrong
+// remembered password. Uses a `ui-test` debug build.
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -88,6 +89,18 @@ try {
     await quit(running);
 
     rmSync(path.join(data, "locked"));
+    // Background access turned off in the vault, but the keychain kept the password.
+    assert.equal(spawnSync(app, [ "--ui-test-background-off" ], {
+        env: env,
+        input: password + "\n"
+    }).status, 0, "background access turned off in the vault");
+    running = service();
+    const off = await Promise.race([ running.done, sleep(60000).then(() => "running") ]);
+    assert.equal(off, 0, `a stale remembered password stops the service\n${running.log}`);
+    assert.match(running.log, /background access is off/, "the log says background access is off");
+    assert.equal(status().running, false, "the vault stays closed");
+
+    remember(password);
     remember("synthetic-wrong-password");
     running = service();
     const code = await Promise.race([ running.done, sleep(60000).then(() => "running") ]);
@@ -95,7 +108,7 @@ try {
     assert.equal(code, 0, `a wrong remembered password stops the service\n${running.log}`);
     assert.match(running.log, /did not open the vault/, "the log says why the service stopped");
     running = null;
-    console.log("Service mode passed: waits without a remembered password, unlocks and serves, hands over to the window, honours a manual lock, quits cleanly, refuses a wrong password.");
+    console.log("Service mode passed: waits without a remembered password, unlocks and serves, hands over to the window, honours a manual lock, quits cleanly, ignores a password left behind after background access was turned off, refuses a wrong password.");
 } finally {
     if (running && running.exitCode === null) running.kill("SIGKILL");
     spawnSync(app, [ "--ui-test-forget" ], {

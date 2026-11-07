@@ -33,17 +33,32 @@ pub fn script() -> Option<&'static str> {
 
 /// `--ui-test-remember` (password on stdin) and `--ui-test-forget`: what turning background
 /// access on and off does to the keychain, done by this program so that the service test
-/// reads an item this program wrote, as it does for the human.
+/// reads an item this program wrote, as it does for the human. Remembering also turns the
+/// vault's own setting on when the password opens it. `--ui-test-background-off` (password
+/// on stdin) turns only the vault's setting off, leaving the keychain item behind as a
+/// failed deletion would.
 pub fn keyring_flag(data_dir: &std::path::Path) -> Option<i32> {
     use crate::keyring::{Keyring, PASSWORD, SECRET_KEY};
     let keyring = Keyring::new(data_dir);
-    if std::env::args().any(|a| a == "--ui-test-remember") {
+    let stdin_password = || {
         let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
+        std::io::stdin().read_line(&mut line).ok()?;
+        Some(vaultos_core::SecretString::new(
+            line.trim_end_matches(['\r', '\n']).to_owned(),
+        ))
+    };
+    let background = |password: &vaultos_core::SecretString, on: bool| {
+        let mut store = vaultos_core::Store::new(data_dir)?;
+        store.unlock(password, None)?;
+        let mut patch = serde_json::Map::new();
+        patch.insert("rememberPassword".into(), json!(on));
+        store.update_settings(patch, vaultos_core::model::HUMAN)
+    };
+    if std::env::args().any(|a| a == "--ui-test-remember") {
+        let Some(password) = stdin_password() else {
             return Some(1);
-        }
-        let password =
-            vaultos_core::SecretString::new(line.trim_end_matches(['\r', '\n']).to_owned());
+        };
+        let _ = background(&password, true);
         return Some(match keyring.set(PASSWORD, &password) {
             Ok(()) => 0,
             Err(e) => {
@@ -52,9 +67,21 @@ pub fn keyring_flag(data_dir: &std::path::Path) -> Option<i32> {
             }
         });
     }
+    if std::env::args().any(|a| a == "--ui-test-background-off") {
+        let Some(password) = stdin_password() else {
+            return Some(1);
+        };
+        return Some(match background(&password, false) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("ui-test: {e}");
+                1
+            }
+        });
+    }
     if std::env::args().any(|a| a == "--ui-test-forget") {
-        keyring.clear(PASSWORD);
-        keyring.clear(SECRET_KEY);
+        let _ = keyring.clear(PASSWORD);
+        let _ = keyring.clear(SECRET_KEY);
         return Some(0);
     }
     None

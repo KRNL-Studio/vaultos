@@ -118,6 +118,9 @@ fn showable(s: &str) -> bool {
         .all(|c| c == '\n' || c == '\r' || c == '\t' || win_ansi(c).is_some())
 }
 
+/// Text set in one font, size and color on one line.
+type Run<'a> = (Font, f64, &'a str, Zeroizing<String>);
+
 /// The content streams of each page, laid out top to bottom.
 struct Layout {
     pages: Vec<Zeroizing<Vec<u8>>>,
@@ -134,6 +137,18 @@ impl Layout {
         }
     }
 
+    /// Appends to the page. Growing copies into a new buffer and zeroes the old one, which
+    /// a plain `Vec` would free with the page's text still in it.
+    fn put(&mut self, bytes: &[u8]) {
+        let need = self.page.len() + bytes.len();
+        if need > self.page.capacity() {
+            let mut bigger = Zeroizing::new(Vec::with_capacity(need.max(4096) * 2));
+            bigger.extend_from_slice(&self.page);
+            self.page = bigger;
+        }
+        self.page.extend_from_slice(bytes);
+    }
+
     fn new_page(&mut self) {
         let done = std::mem::replace(&mut self.page, Zeroizing::new(Vec::new()));
         self.pages.push(done);
@@ -147,11 +162,11 @@ impl Layout {
 
     fn rule(&mut self, color: &str, width: f64) {
         let y = PAGE_H - self.y;
-        let _ = writeln!(
-            self.page,
-            "{color} RG {width} w {MARGIN} {y:.2} m {:.2} {y:.2} l S",
+        let line = format!(
+            "{color} RG {width} w {MARGIN} {y:.2} m {:.2} {y:.2} l S\n",
             PAGE_W - MARGIN
         );
+        self.put(line.as_bytes());
     }
 
     fn space(&mut self, size: f64) {
@@ -163,7 +178,7 @@ impl Layout {
         let max = PAGE_W - 2.0 * MARGIN;
         let size = runs.iter().map(|r| r.1).fold(0.0, f64::max);
         let line_h = size * 1.25;
-        let mut lines: Vec<Vec<(Font, f64, &str, String)>> = vec![Vec::new()];
+        let mut lines: Vec<Vec<Run<'_>>> = vec![Vec::new()];
         let mut x = 0.0;
         for &(font, sz, color, text) in runs {
             for (n, para) in text.split('\n').enumerate() {
@@ -171,18 +186,20 @@ impl Layout {
                     lines.push(Vec::new());
                     x = 0.0;
                 }
-                let mut current = String::new();
+                // Sized for the whole paragraph, so pushing never reallocates.
+                let cap = para.len();
+                let mut current = Zeroizing::new(String::with_capacity(cap));
                 for word in split_keep_spaces(para) {
                     let w: f64 = word.chars().map(|c| font.width(c) * sz / 1000.0).sum();
                     if x + w > max && x > 0.0 && !word.trim().is_empty() {
-                        flush(&mut lines, font, sz, color, &mut current);
+                        flush(&mut lines, font, sz, color, &mut current, cap);
                         lines.push(Vec::new());
                         x = 0.0;
                     }
                     for c in word.chars() {
                         let cw = font.width(c) * sz / 1000.0;
                         if x + cw > max && x > 0.0 {
-                            flush(&mut lines, font, sz, color, &mut current);
+                            flush(&mut lines, font, sz, color, &mut current, cap);
                             lines.push(Vec::new());
                             x = 0.0;
                             if c == ' ' {
@@ -193,7 +210,7 @@ impl Layout {
                         x += cw;
                     }
                 }
-                flush(&mut lines, font, sz, color, &mut current);
+                flush(&mut lines, font, sz, color, &mut current, cap);
             }
         }
         for line in lines {
@@ -201,18 +218,20 @@ impl Layout {
                 self.new_page();
             }
             let baseline = PAGE_H - self.y - size * 0.8;
-            let _ = writeln!(self.page, "BT {MARGIN} {baseline:.2} Td");
+            self.put(format!("BT {MARGIN} {baseline:.2} Td\n").as_bytes());
             for (font, sz, color, s) in &line {
-                let _ = write!(self.page, "{color} rg /{} {sz} Tf (", font.name());
+                self.put(format!("{color} rg /{} {sz} Tf (", font.name()).as_bytes());
+                let mut run = Zeroizing::new(Vec::with_capacity(s.len() * 2 + 5));
                 for c in s.chars() {
                     match win_ansi(c).unwrap_or(b'?') {
-                        b @ (b'(' | b')' | b'\\') => self.page.extend_from_slice(&[b'\\', b]),
-                        b => self.page.push(b),
+                        b @ (b'(' | b')' | b'\\') => run.extend_from_slice(&[b'\\', b]),
+                        b => run.push(b),
                     }
                 }
-                self.page.extend_from_slice(b") Tj\n");
+                run.extend_from_slice(b") Tj\n");
+                self.put(&run);
             }
-            self.page.extend_from_slice(b"ET\n");
+            self.put(b"ET\n");
             self.y += line_h;
         }
     }
@@ -221,14 +240,21 @@ impl Layout {
         if value.is_empty() {
             return;
         }
-        let shown = if showable(value) {
-            value.replace(['\r', '\t'], " ")
+        // Same length as the value: \r and \t become spaces. Zeroed when dropped.
+        let mut shown = Zeroizing::new(String::with_capacity(value.len() + 2));
+        shown.push_str("  ");
+        if showable(value) {
+            shown.extend(
+                value
+                    .chars()
+                    .map(|c| if c == '\r' || c == '\t' { ' ' } else { c }),
+            );
         } else {
-            "(contains characters this PDF cannot show; reveal it in VaultOS)".into()
-        };
+            shown.push_str("(contains characters this PDF cannot show; reveal it in VaultOS)");
+        }
         self.text(&[
             (Font::Bold, 9.0, GREY, &format!("{label}:")),
-            (Font::Regular, 9.5, DARK, &format!("  {shown}")),
+            (Font::Regular, 9.5, DARK, &shown),
         ]);
     }
 }
@@ -252,17 +278,19 @@ fn split_keep_spaces(s: &str) -> Vec<&str> {
 }
 
 fn flush<'a>(
-    lines: &mut [Vec<(Font, f64, &'a str, String)>],
+    lines: &mut [Vec<Run<'a>>],
     font: Font,
     size: f64,
     color: &'a str,
-    current: &mut String,
+    current: &mut Zeroizing<String>,
+    cap: usize,
 ) {
     if current.is_empty() {
         return;
     }
     if let Some(line) = lines.last_mut() {
-        line.push((font, size, color, std::mem::take(current)));
+        let next = Zeroizing::new(String::with_capacity(cap));
+        line.push((font, size, color, std::mem::replace(current, next)));
     }
 }
 
@@ -583,6 +611,9 @@ pub async fn export_project(
         let (name, items) = me.with_store(|s| s.export_project(&project, HUMAN))?;
         let generated = vaultos_core::model::now_iso();
         let bytes = pdf(&name, &items, &password, &generated);
+        if !me.human_unlocked() {
+            return Err("Vault is locked".into());
+        }
         write_file(&target, &me.data_dir, &bytes)
     })
     .await??;
