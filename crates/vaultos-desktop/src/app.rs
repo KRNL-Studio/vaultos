@@ -86,6 +86,7 @@ pub struct App {
     pub clipboard: Clipboard,
     pub prefs: Mutex<Prefs>,
     pub shortcut_error: Mutex<String>,
+    pub ssh_error: Mutex<String>,
     pub pending_command: Mutex<Option<Value>>,
     pub quitting: AtomicBool,
     pub prompting: AtomicUsize,
@@ -121,6 +122,7 @@ impl App {
             clipboard: Clipboard::default(),
             prefs: Mutex::new(prefs::load(&data_dir)),
             shortcut_error: Mutex::default(),
+            ssh_error: Mutex::default(),
             pending_command: Mutex::default(),
             quitting: AtomicBool::new(false),
             prompting: AtomicUsize::new(0),
@@ -152,6 +154,34 @@ impl App {
 
     fn handle(&self) -> Option<Handle> {
         lock(&self.server).as_ref().map(|(_, h)| h.clone())
+    }
+
+    /// Starts or stops the SSH agent to match the preference, once the app owns the vault.
+    /// Signing asks for Touch ID, or this app's dialog where Touch ID is not available.
+    pub fn apply_ssh_agent(&self) {
+        let Some(h) = self.handle() else {
+            return;
+        };
+        let mut error = lock(&self.ssh_error);
+        error.clear();
+        if !lock(&self.prefs).ssh_agent {
+            h.stop_ssh_agent();
+            return;
+        }
+        let tauri = self.tauri.get().cloned();
+        let confirm = Confirm(Arc::new(move |reason: &str| {
+            if platform::touch_id_available() {
+                return Some(platform::touch_id_prompt(reason));
+            }
+            tauri.as_ref().map(|t| crate::ui::ask_allow(t, reason))
+        }));
+        if let Err(e) = h.start_ssh_agent(confirm) {
+            *error = e.to_string();
+        }
+    }
+
+    pub fn ssh_socket(&self) -> Option<PathBuf> {
+        self.handle().and_then(|h| h.ssh_agent_socket())
     }
 
     pub fn store_unlocked(&self) -> bool {
@@ -396,6 +426,7 @@ impl App {
         match ready_rx.await {
             Ok(h) => {
                 *lock(&self.server) = Some((id, h.clone()));
+                self.apply_ssh_agent();
                 Ok(h)
             }
             Err(_) => Err(match done_rx.await {

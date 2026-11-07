@@ -561,6 +561,33 @@ pub async fn choose_folder(app: &AppHandle) -> Result<Value, String> {
     Ok(json!(real.to_string_lossy()))
 }
 
+/// The SSH agent's confirmation where Touch ID is not available: the app's own dialog, as
+/// ssh-askpass asks for `ssh-add -c` keys. Blocks; never call it on the main thread.
+pub fn ask_allow(app: &AppHandle, reason: &str) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    app.dialog()
+        .message(format!("VaultOS is trying to {reason}."))
+        .title("Allow this signature?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Allow".into(),
+            "Deny".into(),
+        ))
+        .blocking_show()
+}
+
+/// A tool shipped with the app: in Contents/Helpers on macOS, beside the app on Linux and
+/// in a development build. Its bare name (found on PATH) when it is in neither.
+pub fn helper(name: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().ok();
+    let dir = exe.as_deref().and_then(std::path::Path::parent);
+    dir.into_iter()
+        .flat_map(|d| [d.join("../Helpers").join(name), d.join(name)])
+        .find(|p| p.is_file())
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .unwrap_or_else(|| name.into())
+}
+
 /// Quits after the server has released the vault.
 pub fn quit(app: &AppHandle) {
     let s = state(app);

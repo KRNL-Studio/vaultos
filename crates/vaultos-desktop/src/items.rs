@@ -50,6 +50,22 @@ pub async fn empty_trash(app: &Arc<App>) -> Reply {
     Ok(json!({ "ok": true, "purged": n }))
 }
 
+/// A new Ed25519 SSH key for an item's value, with its public key and fingerprint. Nothing
+/// is saved until the human saves the item.
+pub fn generate_ssh_key(comment: &str) -> Reply {
+    let comment: String = comment
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect();
+    let key = vaultos_core::ssh::SshKey::generate(comment.trim());
+    Ok(json!({
+        "privateKey": key.to_openssh().as_str(),
+        "publicKey": key.public_line(),
+        "fingerprint": key.fingerprint(),
+    }))
+}
+
 pub fn generate(recipe: &Value) -> Reply {
     let recipe: Recipe = if recipe.is_null() {
         Recipe::default()

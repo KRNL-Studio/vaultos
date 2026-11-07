@@ -1,5 +1,5 @@
 //! Desktop preferences that must work while the vault is locked (`desktop-prefs.js`): the
-//! Quick Access shortcut, the menu bar item, open at login and notifications. They hold no
+//! Quick Access shortcut, the menu bar item, open at login, notifications and the SSH agent. They hold no
 //! secrets, so they live in a small plaintext file beside the vault. Only the unlocked main
 //! window can change them.
 
@@ -9,11 +9,12 @@ use vaultos_core::fs_safe::{atomic_write, read_regular};
 
 const FILE: &str = "desktop-prefs.json";
 pub const DEFAULT_SHORTCUT: &str = "Shift+CommandOrControl+Space";
-const BOOLEANS: [&str; 4] = [
+const BOOLEANS: [&str; 5] = [
     "menuBar",
     "launchAtLogin",
     "notifyApprovals",
     "notifyExpiry",
+    "sshAgent",
 ];
 const MODIFIERS: [&str; 12] = [
     "Command",
@@ -57,6 +58,8 @@ pub struct Prefs {
     pub launch_at_login: bool,
     pub notify_approvals: bool,
     pub notify_expiry: bool,
+    /// Serve the vault's SSH keys to ssh and Git; off until the human turns it on.
+    pub ssh_agent: bool,
 }
 
 impl Default for Prefs {
@@ -69,6 +72,7 @@ impl Default for Prefs {
             launch_at_login: false,
             notify_approvals: false,
             notify_expiry: false,
+            ssh_agent: false,
         }
     }
 }
@@ -81,6 +85,7 @@ impl Prefs {
             "launchAtLogin": self.launch_at_login,
             "notifyApprovals": self.notify_approvals,
             "notifyExpiry": self.notify_expiry,
+            "sshAgent": self.ssh_agent,
         });
         v.as_object().cloned().unwrap_or_default()
     }
@@ -90,6 +95,7 @@ impl Prefs {
             "menuBar" => self.menu_bar = v,
             "launchAtLogin" => self.launch_at_login = v,
             "notifyApprovals" => self.notify_approvals = v,
+            "sshAgent" => self.ssh_agent = v,
             _ => self.notify_expiry = v,
         }
     }
@@ -198,10 +204,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let p = save(
             dir.path(),
-            &json!({ "menuBar": false, "shortcut": "Alt+Space" }),
+            &json!({ "menuBar": false, "shortcut": "Alt+Space", "sshAgent": true }),
         )
         .expect("saved");
         assert_eq!(p, load(dir.path()));
+        assert!(p.ssh_agent && !Prefs::default().ssh_agent);
         assert!(save(dir.path(), &json!({ "shortcut": "Q" })).is_err());
         assert!(save(dir.path(), &json!({ "other": true })).is_err());
     }

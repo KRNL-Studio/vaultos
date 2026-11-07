@@ -35,6 +35,7 @@ use zeroize::Zeroizing;
 mod items;
 mod leak;
 mod run;
+mod ssh;
 mod sync;
 pub use items::{
     Finding, ImportResult, ItemVersion, Otp, TrashedItem, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES,
@@ -42,6 +43,7 @@ pub use items::{
 };
 pub use leak::Named;
 pub use run::EnvValues;
+pub use ssh::SshIdentity;
 pub use sync::{check_record, SyncChanges, SyncRecord};
 
 pub const VAULT_FILE: &str = "vault.enc";
@@ -602,6 +604,8 @@ pub struct Store {
     disk_id: Option<FileId>,
     batching: bool,
     pending: Option<State>,
+    /// How many times the vault was locked, so approvals given while it was open end with it.
+    locks: u64,
 }
 
 impl Store {
@@ -616,6 +620,7 @@ impl Store {
             disk_id: None,
             batching: false,
             pending: None,
+            locks: 0,
         })
     }
 
@@ -749,6 +754,9 @@ impl Store {
     }
 
     pub fn lock(&mut self) {
+        if self.open.is_some() {
+            self.locks += 1;
+        }
         self.open = None;
         self.pending = None;
         self.batching = false;

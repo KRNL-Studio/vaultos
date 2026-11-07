@@ -5,7 +5,7 @@ const {test} = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path"), {spawnSync} = require("node:child_process");
 
 const script = path.resolve(__dirname, "..", "scripts", "install-linux.sh");
-const PROGRAMS = [ "vaultos-preview", "vaultos", "vaultos-agent", "vaultos-mcp", "vaultosd" ];
+const PROGRAMS = [ "vaultos-preview", "vaultos", "vaultos-agent", "vaultos-mcp", "vaultosd", "vaultos-ssh-sign" ];
 
 // On macOS, a stand-in for Linux's uname lets the installer's logic run in CI there too.
 const DARWIN_UNAME = `#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) /usr/bin/uname "$@" ;; esac\n`;

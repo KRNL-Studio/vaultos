@@ -34,6 +34,7 @@ pub mod refs;
 pub mod secret;
 pub mod secret_key;
 pub mod session;
+pub mod ssh;
 pub mod store;
 pub mod totp;
 pub mod upgrade;

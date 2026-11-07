@@ -38,7 +38,7 @@ fn bad(msg: &str) -> Reply {
 }
 
 /// Text from the caller shown in a system prompt: one line, at most 120 characters.
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     let one: String = s
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -172,7 +172,7 @@ impl Peer {
     }
 
     /// For the prompt: the program's full path, so a look-alike name stands out.
-    fn shown(&self) -> String {
+    pub(crate) fn shown(&self) -> String {
         let exe = self
             .exe
             .as_ref()
@@ -184,7 +184,7 @@ impl Peer {
     }
 
     /// For the audit log: the program's name and pid.
-    fn named(&self) -> String {
+    pub(crate) fn named(&self) -> String {
         let name = self.exe.as_ref().and_then(|e| e.file_name()).map_or_else(
             || "a program".to_owned(),
             |n| n.to_string_lossy().into_owned(),

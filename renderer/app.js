@@ -1138,6 +1138,35 @@ function buildCustomForm(scroll, project, prov, editing, current) {
     const acct = accountFields(current);
     const extra = itemExtras(prov, current);
     const err = el(`<div class="err"></div>`);
+    // An SSH key item: a new Ed25519 key, which the app's SSH agent can serve.
+    const sshGen = el(`<button type="button" class="btn sm ghost">Generate an SSH key</button>`);
+    const showSshGen = () => sshGen.style.display = extra.kind.value === "ssh_key" ? "" : "none";
+    extra.kind.addEventListener("change", showSshGen);
+    showSshGen();
+    let armed = false;
+    sshGen.onclick = async () => {
+        err.textContent = "";
+        if (valInput.value.trim() && !armed) {
+            armed = true;
+            sshGen.textContent = "Replace the value with a new key?";
+            setTimeout(() => {
+                armed = false;
+                sshGen.textContent = "Generate an SSH key";
+            }, 2500);
+            return;
+        }
+        armed = false;
+        sshGen.textContent = "Generate an SSH key";
+        try {
+            const k = await window.vault.generateSshKey(keyInput.value.trim());
+            valInput.value = k.privateKey;
+            extra.setField("public key", k.publicKey);
+            extra.setField("fingerprint", k.fingerprint);
+        } catch (e) {
+            err.textContent = cleanError(e);
+        }
+    };
+    valField.appendChild(sshGen);
     const save = el(`<button class="btn primary">Save</button>`);
     save.onclick = () => {
         if (!keyInput.value.trim()) {
@@ -1275,6 +1304,23 @@ async function renderSettings() {
     const notifyApprovals = desktopBox("Notify me when an agent's key is waiting for approval", dp.notifyApprovals);
     const notifyExpiry = desktopBox("Notify me about keys that expire within 7 days", dp.notifyExpiry);
     scroll.appendChild(el(`<p class="note">Notifications never include key names, because they can appear on the lock screen.</p>`));
+    scroll = panel(page, "SSH agent", {
+        tag: dp.sshSocket ? "on" : "off"
+    });
+    const sshAgent = desktopBox("Serve SSH keys to ssh and Git", dp.sshAgent);
+    scroll.appendChild(el(`<p class="note">Off by default. While VaultOS is unlocked, ssh and Git can use the Ed25519 keys of SSH key items (Generate an SSH key in an item, or paste one without a passphrase). Each program asks for ${TOUCH_ID.available ? "Touch ID" : "your confirmation"} before its first signature, then for 10 minutes or until VaultOS locks. Keys never leave the vault; list them with <span class="mono">vaultos ssh keys</span>.</p>`));
+    if (dp.sshError) scroll.appendChild(el(`<div class="err"></div>`)).textContent = dp.sshError;
+    const sshSetup = el(`<pre class="val" style="white-space:pre-wrap"></pre>`);
+    sshSetup.textContent = `# ~/.ssh/config
+Host *
+  IdentityAgent "${dp.sshSocketPath || "(the data folder's ssh-agent.sock)"}"
+
+# Signing Git commits with a key from vaultos ssh keys
+git config --global gpg.format ssh
+git config --global gpg.ssh.program "${dp.sshSigner}"
+git config --global user.signingkey "key::ssh-ed25519 AAAA…"
+git config --global commit.gpgsign true`;
+    scroll.appendChild(sshSetup);
     scroll = panel(page, "Sync");
     const autoLabel = el(`<label class="toggle"><input type="checkbox" class="switch" />Sync automatically while unlocked</label>`);
     const auto = autoLabel.querySelector("input");
@@ -1320,7 +1366,8 @@ async function renderSettings() {
                 shortcut: shortcut,
                 launchAtLogin: atLogin.checked,
                 notifyApprovals: notifyApprovals.checked,
-                notifyExpiry: notifyExpiry.checked
+                notifyExpiry: notifyExpiry.checked,
+                sshAgent: sshAgent.checked
             });
             shortcutNote.textContent = saved.shortcutError || "Opens Quick Access from any app: search, then press Return to copy.";
             shortcutNote.classList.toggle("err", !!saved.shortcutError);

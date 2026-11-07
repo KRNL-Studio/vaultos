@@ -251,6 +251,16 @@ function itemExtras(prov, current) {
     fieldsBlock.append(rows, add);
     return {
         nodes: [ kindBlock, tagBlock, fieldsBlock, favRow ],
+        kind: kind,
+        // Sets a text field by label (case-insensitive), adding it when missing.
+        setField: (label, value) => {
+            const row = [ ...rows.children ].find(r => r.read().label.toLowerCase() === label.toLowerCase());
+            if (row) row.querySelector(".valslot input").value = value; else addRow({
+                label: label,
+                kind: "text",
+                value: value
+            });
+        },
         get: () => ({
             kind: kind.value,
             tags: tags.value.split(",").map(t => t.trim()).filter(Boolean),

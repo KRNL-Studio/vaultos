@@ -200,6 +200,17 @@ enum Command {
     /// sync-repository in the data directory)
     #[command(subcommand)]
     Sync(SyncCommand),
+    /// The app's SSH agent (turned on in its Settings), for ssh and Git commit signing
+    #[command(subcommand)]
+    Ssh(SshCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum SshCommand {
+    /// The public keys the app's SSH agent offers (only while the app is unlocked)
+    Keys,
+    /// The agent's socket, for SSH_AUTH_SOCK or IdentityAgent in ~/.ssh/config
+    Socket,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1382,6 +1393,30 @@ fn run(cli: Cli) -> Result<()> {
         Command::Approver(c) => approver(&ctx, c),
         Command::SecretKey(c) => secret_key(&ctx, c),
         Command::Sync(c) => sync(&ctx, c),
+        Command::Ssh(c) => ssh(&ctx, c),
+    }
+}
+
+fn ssh(ctx: &Ctx, c: SshCommand) -> Result<()> {
+    let socket = vaultos_core::session::ssh_socket_path(&ctx.data_dir)?;
+    match c {
+        SshCommand::Socket => say(&socket.to_string_lossy()),
+        SshCommand::Keys => {
+            let keys = vaultos_client::ssh::identities(&socket).map_err(|_| {
+                Fail::new("The VaultOS SSH agent is not running. Turn it on in the app's Settings")
+            })?;
+            let keys: Vec<Value> = keys
+                .iter()
+                .map(|(blob, comment)| {
+                    json!({
+                        "publicKey": format!("{} {}", vaultos_core::ssh::ED25519, vaultos_core::crypto::b64(blob)),
+                        "fingerprint": vaultos_core::ssh::fingerprint(blob),
+                        "comment": comment,
+                    })
+                })
+                .collect();
+            emit(&json!({ "socket": socket, "keys": keys }))
+        }
     }
 }
 

@@ -1,5 +1,5 @@
-// Packages the Linux desktop app (vaultos-preview) with vaultos, vaultos-agent, vaultos-mcp and
-// vaultosd as an unsigned tar.gz with a checksum and a CycloneDX inventory. Build it on Linux
+// Packages the Linux desktop app (vaultos-preview) with vaultos, vaultos-agent, vaultos-mcp,
+// vaultosd and vaultos-ssh-sign as an unsigned tar.gz with a checksum and a CycloneDX inventory. Build it on Linux
 // for that machine's architecture: the app links the system's WebKitGTK, so it cannot be
 // cross-built. scripts/install-linux.sh installs the result for the current user.
 import { execFileSync } from "node:child_process";

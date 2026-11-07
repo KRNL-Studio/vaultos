@@ -1,5 +1,5 @@
 // Packages VaultOS.app: the Tauri desktop app in Contents/MacOS, with vaultos, vaultos-agent,
-// vaultos-mcp and vaultosd in Contents/Helpers (not beside it: on a case-insensitive volume
+// vaultos-mcp, vaultosd and vaultos-ssh-sign in Contents/Helpers (not beside it: on a case-insensitive volume
 // `vaultos` would replace `VaultOS`). Writes a ZIP, its checksum and a CycloneDX inventory.
 // The build is ad-hoc signed ("unsigned") unless VAULTOS_SIGN_IDENTITY names a Developer ID
 // Application identity and notarization credentials are set, and signing and notarization

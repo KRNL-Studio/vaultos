@@ -7,6 +7,7 @@
 use crate::api::{self, Reply, Request, MAX_BODY};
 use crate::autosync::AutoSync;
 use crate::human;
+use crate::ssh_agent::{self, SshAgent};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
@@ -72,7 +73,9 @@ pub(crate) struct Shared {
     pub(crate) autosync: AutoSync,
     confirm: Option<Confirm>,
     /// One confirmation sheet at a time; others are refused rather than queued.
-    confirming: AtomicBool,
+    pub(crate) confirming: AtomicBool,
+    pub(crate) ssh: SshAgent,
+    pub(crate) runtime: tokio::runtime::Handle,
 }
 
 /// Never prints the session token.
@@ -126,7 +129,7 @@ async fn claim_owner(cfg: &Config) -> Result<LockFile, Error> {
     }
 }
 
-fn remove_stale_socket(path: &Path) -> Result<(), Error> {
+pub(crate) fn remove_stale_socket(path: &Path) -> Result<(), Error> {
     use std::os::unix::fs::FileTypeExt;
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => {
@@ -179,6 +182,20 @@ impl Handle {
     pub fn sync_round(&self) -> Result<Value, vaultos_sync::SyncError> {
         self.0.autosync.round(&self.0, true)
     }
+
+    /// Starts the SSH agent (see [`crate::ssh_agent`]), which asks `confirm` before each
+    /// signature it has not been allowed recently. Returns its socket.
+    pub fn start_ssh_agent(&self, confirm: Confirm) -> Result<PathBuf, Error> {
+        ssh_agent::start(&self.0, confirm)
+    }
+
+    pub fn stop_ssh_agent(&self) {
+        ssh_agent::stop(&self.0);
+    }
+
+    pub fn ssh_agent_socket(&self) -> Option<PathBuf> {
+        ssh_agent::socket(&self.0)
+    }
 }
 
 /// Runs until `/shutdown`, SIGTERM or SIGINT. Returns once the socket and session file are
@@ -225,6 +242,8 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
         autosync: AutoSync::new(sync_repo),
         confirm: cfg.confirm.clone(),
         confirming: AtomicBool::new(false),
+        ssh: SshAgent::default(),
+        runtime: tokio::runtime::Handle::current(),
     });
 
     let guard = tokio::spawn(guard_loop(shared.clone(), cfg.idle_lock));
@@ -233,6 +252,7 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
     let result = accept_loop(&listener, shared.clone(), signals).await;
     guard.abort();
     autosync.abort();
+    ssh_agent::stop(&shared);
 
     // A round already running is a blocking task that abort cannot stop. Wait for it, so no
     // Git command of this daemon still runs in the checkout once another process owns the
@@ -452,7 +472,7 @@ async fn read_body(req: hyper::Request<Incoming>) -> Result<Vec<u8>, Reply> {
 }
 
 /// Clears the one-confirmation-at-a-time flag however the confirmation ends.
-struct Confirming<'a>(&'a AtomicBool);
+pub(crate) struct Confirming<'a>(pub(crate) &'a AtomicBool);
 
 impl Drop for Confirming<'_> {
     fn drop(&mut self) {

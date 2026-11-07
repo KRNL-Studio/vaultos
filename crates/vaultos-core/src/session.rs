@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 pub const SESSION_FILE: &str = "daemon.json";
 pub const SOCKET_FILE: &str = "vaultosd.sock";
+/// The app's SSH agent, when the human turns it on.
+pub const SSH_SOCKET_FILE: &str = "ssh-agent.sock";
 /// `sun_path` holds 104 bytes on macOS and 108 on Linux, terminator included.
 pub const MAX_SOCKET_PATH: usize = 100;
 
@@ -41,8 +43,12 @@ pub fn euid() -> u32 {
 
 /// The socket's name outside the data folder: one per data folder.
 fn fallback_name(data_dir: &Path) -> String {
+    fallback_named(data_dir, "vaultosd")
+}
+
+fn fallback_named(data_dir: &Path, prefix: &str) -> String {
     let hash = crate::crypto::sha256_hex(data_dir.as_os_str().as_encoded_bytes());
-    format!("vaultosd-{}.sock", &hash[..16])
+    format!("{prefix}-{}.sock", &hash[..16])
 }
 
 /// A short folder private to this user, for when the data folder's path is too long for a
@@ -68,11 +74,25 @@ pub fn private_to_us(dir: &Path) -> bool {
 /// Where the daemon listens: `vaultosd.sock` in the data folder, or, when that path is too
 /// long for a socket, a per-folder name in a short folder private to this user.
 pub fn socket_path(data_dir: &Path) -> Result<PathBuf> {
-    let p = data_dir.join(SOCKET_FILE);
+    short_socket(data_dir, SOCKET_FILE, &fallback_name(data_dir))
+}
+
+/// Where the app's SSH agent listens (`SSH_AUTH_SOCK`, or `IdentityAgent` in
+/// `~/.ssh/config`): `ssh-agent.sock` in the data folder, or beside the daemon's fallback.
+pub fn ssh_socket_path(data_dir: &Path) -> Result<PathBuf> {
+    short_socket(
+        data_dir,
+        SSH_SOCKET_FILE,
+        &fallback_named(data_dir, "vaultos-ssh"),
+    )
+}
+
+fn short_socket(data_dir: &Path, file: &str, fallback: &str) -> Result<PathBuf> {
+    let p = data_dir.join(file);
     if p.as_os_str().len() <= MAX_SOCKET_PATH {
         return Ok(p);
     }
-    let p = fallback_dir().join(fallback_name(data_dir));
+    let p = fallback_dir().join(fallback);
     if p.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(Error::invalid(
             "The data folder's path is too long for a socket; use a shorter VAULTOS_DATA_DIR",

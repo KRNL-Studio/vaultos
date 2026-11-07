@@ -6,9 +6,9 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 // The desktop app and the tools it ships: vaultos-desktop, vaultos and vaultos-agent,
-// vaultos-mcp, vaultosd.
+// vaultos-mcp, vaultosd and vaultos-ssh-sign.
 export const PACKAGES = [ "vaultos-desktop", "vaultos-cli", "vaultos-mcp", "vaultos-daemon" ];
-export const TOOLS = [ "vaultos", "vaultos-agent", "vaultos-mcp", "vaultosd" ];
+export const TOOLS = [ "vaultos", "vaultos-agent", "vaultos-mcp", "vaultosd", "vaultos-ssh-sign" ];
 
 export function version() {
     const toml = readFileSync("Cargo.toml", "utf8");

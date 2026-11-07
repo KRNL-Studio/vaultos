@@ -133,6 +133,7 @@ fn changes(channel: &str) -> bool {
             | "confirmHuman"
             | "trash"
             | "generate"
+            | "generateSshKey"
             | "strength"
             | "otp"
             | "copyOtp"
@@ -293,6 +294,10 @@ pub fn prefs_state(app: &App) -> Value {
     v["shortcutError"] = json!(lock(&app.shortcut_error).clone());
     v["trayAvailable"] = json!(!prefs.menu_bar || ui::has_tray(app));
     v["loginItemSupported"] = json!(login::item_path().is_some());
+    v["sshSocket"] = json!(app.ssh_socket());
+    v["sshSocketPath"] = json!(vaultos_core::session::ssh_socket_path(&app.data_dir).ok());
+    v["sshSigner"] = json!(ui::helper("vaultos-ssh-sign"));
+    v["sshError"] = json!(lock(&app.ssh_error).clone());
     v
 }
 
@@ -399,6 +404,7 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
         "purgeSecret" => items::purge(app, a.str(0, "project")?, a.str(1, "key")?).await,
         "emptyTrash" => items::empty_trash(app).await,
         "generate" => items::generate(a.get(0)),
+        "generateSshKey" => items::generate_ssh_key(&a.str(0, "comment")?),
         "strength" => items::strength(&a.str(0, "password")?),
         "otp" => items::otp(app, a.str(0, "project")?, a.str(1, "key")?).await,
         "copyOtp" => items::copy_otp(app, a.str(0, "project")?, a.str(1, "key")?).await,
@@ -434,6 +440,9 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
                     }
                     return Err(format!("Open at login could not be changed: {e}"));
                 }
+            }
+            if patch.get("sshAgent").is_some() {
+                app.apply_ssh_agent();
             }
             ui::apply_prefs(handle);
             Ok(prefs_state(app))
