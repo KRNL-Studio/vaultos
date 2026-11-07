@@ -10,8 +10,8 @@ use crate::audit;
 use crate::crypto::{sha256_hex, KdfParams};
 use crate::error::{Error, Result};
 use crate::format::{account_unlock_key, VaultFile};
-use crate::fs_safe::{atomic_write, claim, private_dir, read_regular, MAX_VAULT_BYTES};
-use crate::history::Payload;
+use crate::fs_safe::{atomic_write, claim, private_dir, read_regular, sync_dir, MAX_VAULT_BYTES};
+use crate::history::{self, Payload};
 use crate::model::{now_iso, VaultV3, HUMAN};
 use crate::secret::SecretString;
 use crate::secret_key::SecretKey;
@@ -48,6 +48,8 @@ fn write_backup(dir: &Path, bytes: &[u8]) -> Result<PathBuf> {
         .map_err(Error::io("cannot write the upgrade backup"))?;
     f.sync_all()
         .map_err(Error::io("cannot flush the upgrade backup"))?;
+    sync_dir(&backups)?;
+    sync_dir(dir)?;
     Ok(path)
 }
 
@@ -60,25 +62,23 @@ fn comparable(v: &VaultV3) -> VaultV3 {
 }
 
 /// Checks that `round` (decoded from the new file, without the upgrade's own history entry)
-/// holds exactly what `original` held. History may have lost its oldest entries to the size
-/// cap, so it must be a suffix of the original's.
-fn same(original: &VaultV3, round: &VaultV3) -> Result<()> {
+/// holds exactly what `original` held, except the `drop` oldest history entries, which the
+/// size cap removes as the earlier app would at its next save.
+fn same(original: &VaultV3, round: &VaultV3, drop: usize) -> Result<()> {
     let differ = || {
         Error::Format("the upgraded vault did not match the original; nothing was changed".into())
     };
     let mut a = comparable(original);
     let mut b = comparable(round);
-    let skip = a
-        .history
-        .len()
-        .checked_sub(b.history.len())
-        .ok_or_else(differ)?;
-    let tail = a.history.split_off(skip);
+    if drop > a.history.len() {
+        return Err(differ());
+    }
+    let kept = a.history.split_off(drop);
     let round_history = std::mem::take(&mut b.history);
     a.history.clear();
     let vaults = (serde_json::to_value(&a), serde_json::to_value(&b));
     let histories = (
-        serde_json::to_value(&tail),
+        serde_json::to_value(&kept),
         serde_json::to_value(&round_history),
     );
     match (vaults, histories) {
@@ -87,23 +87,9 @@ fn same(original: &VaultV3, round: &VaultV3) -> Result<()> {
     }
 }
 
-/// Moves the v3 activity log to `audit-v3.log` (the v4 chain starts empty) and sets aside a
-/// v4 log left by an earlier attempt.
-fn rotate_logs(dir: &Path) -> Result<()> {
-    let old = dir.join("audit.log");
-    if old.exists() {
-        let mut to = dir.join("audit-v3.log");
-        if to.exists() {
-            to = dir.join(format!(
-                "audit-v3-{}.log",
-                now_iso()
-                    .chars()
-                    .filter(char::is_ascii_digit)
-                    .collect::<String>()
-            ));
-        }
-        std::fs::rename(&old, &to).map_err(Error::io("cannot keep the previous activity log"))?;
-    }
+/// Sets aside a v4 audit log left by an earlier, unfinished attempt; the new vault's chain
+/// starts empty. The v3 `audit.log` stays where it is, with the v3 backup it belongs to.
+fn set_aside_stale_log(dir: &Path) -> Result<()> {
     let stale = dir.join(audit::FILE);
     if stale.exists() {
         let to = dir.join(format!(
@@ -120,6 +106,11 @@ fn rotate_logs(dir: &Path) -> Result<()> {
 
 /// Upgrades the v3 vault in `data_dir` to v4, keeping the same password and optionally
 /// adding a Secret Key.
+///
+/// Everything that can fail happens before the new file replaces the old one: the backup, the
+/// first audit entry (whose head the new vault records) and the check that the new file
+/// decodes to the original. Replacing the file is the last step, so an error always means
+/// the v3 vault is still in place.
 pub fn upgrade(
     data_dir: &Path,
     password: &SecretString,
@@ -147,7 +138,26 @@ pub fn upgrade(
         Payload::default(),
         None,
     )?;
-    let encoded = store::encode_new(&keys, &mut state)?;
+    let mut sizes: Vec<u64> = original.history.iter().map(history::logical_size).collect();
+    sizes.push(state.history.last().map_or(0, |e| e.size));
+    let expected_drop = history::trim_count(&sizes);
+
+    let backup = write_backup(data_dir, &bytes)?;
+    set_aside_stale_log(data_dir)?;
+    let detail = format!(
+        "from v3; backup {}",
+        backup.file_name().and_then(|n| n.to_str()).unwrap_or("")
+    );
+    let head = audit::append(
+        data_dir,
+        &keys.vault_id,
+        &keys.audit_seed,
+        None,
+        HUMAN,
+        "upgrade_v4",
+        &detail,
+    )?;
+    let encoded = store::encode_new(&keys, &mut state, Some(&head))?;
     drop(state);
     drop(keys);
 
@@ -160,28 +170,13 @@ pub fn upgrade(
             "the upgraded vault is missing its upgrade record".into(),
         ));
     }
-    same(&original, &round)?;
+    same(&original, &round, expected_drop)?;
     drop(round);
 
-    let backup = write_backup(data_dir, &bytes)?;
     if read_regular(&vault, MAX_VAULT_BYTES)? != bytes {
         return Err(Error::Stale);
     }
     atomic_write(&vault, &encoded)?;
-    rotate_logs(data_dir)?;
-    let detail = format!(
-        "from v3; backup {}",
-        backup.file_name().and_then(|n| n.to_str()).unwrap_or("")
-    );
-    audit::append(
-        data_dir,
-        &k2.vault_id,
-        &k2.audit_seed,
-        None,
-        HUMAN,
-        "upgrade_v4",
-        &detail,
-    )?;
 
     Ok(Upgraded {
         backup,

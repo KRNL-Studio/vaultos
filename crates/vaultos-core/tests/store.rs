@@ -157,8 +157,13 @@ fn any_change_to_the_file_is_detected() {
     assert!(matches!(s.unlock(&pw(PW), None), Err(Error::Unlock)));
     restore();
 
-    // Unknown fields and newer versions are refused, not ignored.
+    // Unknown fields and newer versions are refused, not ignored, inside boxes too.
     edit_file(d.path(), |v| v["extra"] = true.into());
+    assert!(s.unlock(&pw(PW), None).is_err());
+    restore();
+    edit_file(d.path(), |v| {
+        v["projects"][0]["items"][0]["secret"]["x"] = 1.into()
+    });
     assert!(s.unlock(&pw(PW), None).is_err());
     restore();
     edit_file(d.path(), |v| v["v"] = 5.into());
@@ -441,8 +446,15 @@ fn reveals_are_signed_into_a_chain_the_vault_anchors() {
     .unwrap();
     s.unlock(&pw(PW), None).unwrap();
     assert!(s.audit_problem().is_some());
-    value(&mut s, "K");
+    // An ordinary save must not record "no audit head" over the damaged log, or the next
+    // unlock would accept the cut-short log; it resets the chain first.
+    s.set_item("Example App", &field("M", "synthetic-m"), "human")
+        .unwrap();
     assert!(s.audit_problem().is_none());
+    s.lock();
+    s.unlock(&pw(PW), None).unwrap();
+    assert!(s.audit_problem().is_none());
+    value(&mut s, "K");
     let set_aside = std::fs::read_dir(d.path())
         .unwrap()
         .filter_map(|e| e.ok())
@@ -487,4 +499,78 @@ fn moving_a_key_reseals_it_under_the_other_project() {
         matches!(s.create_project("other", "human"), Err(Error::Conflict(_))),
         "names are unique ignoring case"
     );
+}
+
+#[test]
+fn a_failed_password_change_keeps_the_old_password() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = new_store(d.path());
+    let held = vaultos_core::fs_safe::claim(d.path(), "write.lock").unwrap();
+    assert!(matches!(
+        s.change_password(&pw(PW), &pw("synthetic-new-password"), None),
+        Err(Error::Busy)
+    ));
+    drop(held);
+    s.lock();
+    s.unlock(&pw(PW), None).unwrap();
+    s.change_password(&pw(PW), &pw("synthetic-new-password"), None)
+        .unwrap();
+    let history = s.list_history(0).unwrap();
+    assert_eq!(history[0].action, "change_password");
+    assert_eq!(
+        history
+            .iter()
+            .filter(|h| h.action == "change_password")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn two_stores_appending_keep_one_audit_chain() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = new_store(d.path());
+    a.set_item("Example App", &field("K", "synthetic-k"), "human")
+        .unwrap();
+    let mut b = Store::new(d.path()).unwrap();
+    b.unlock(&pw(PW), None).unwrap();
+    value(&mut a, "K");
+    value(&mut b, "K"); // b's idea of the head is one entry old
+    value(&mut a, "K");
+    let mut c = Store::new(d.path()).unwrap();
+    c.unlock(&pw(PW), None).unwrap();
+    assert!(c.audit_problem().is_none());
+    let (report, entries) = c.verify_audit().unwrap();
+    assert_eq!(report.entries, 3);
+    assert_eq!(
+        entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
+#[test]
+fn metadata_changes_leave_the_secret_box_alone_and_undo() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = new_store(d.path());
+    s.set_item("Example App", &field("K", "synthetic-k"), AGENT)
+        .unwrap();
+    let secret_box = |dir: &Path| {
+        let v: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("vault.enc")).unwrap()).unwrap();
+        v["projects"][0]["items"][0]["secret"].clone()
+    };
+    let sealed = secret_box(d.path());
+    s.delegate("Example App", "K", OTHER_AGENT, true).unwrap();
+    s.approve_inject("Example App", "K", true).unwrap();
+    assert_eq!(secret_box(d.path()), sealed, "the value was not re-sealed");
+    let item = s.list_items("Example App").unwrap().remove(0);
+    assert!(item.inject_approved && item.editable_by == vec![OTHER_AGENT.to_owned()]);
+    assert_eq!(item.rev, 3);
+
+    let approval = s.list_history(1).unwrap().remove(0);
+    assert_eq!(approval.action, "update_meta");
+    s.revert(&approval.id, "human").unwrap();
+    let item = s.list_items("Example App").unwrap().remove(0);
+    assert!(!item.inject_approved, "undo restores the earlier metadata");
+    assert_eq!(value(&mut s, "K"), "synthetic-k");
 }

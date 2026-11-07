@@ -55,7 +55,54 @@ pub fn public_key(seed: &Key32) -> [u8; 32] {
     signing_key(seed).verifying_key().to_bytes()
 }
 
-/// Appends one entry after `head` and returns the new head.
+/// The last entry on disk and its head, read through `f` (opened for reading). `None` for an
+/// empty log. A last line without its newline is a torn write and is refused.
+fn tail(f: &mut std::fs::File, vault_id: &str, public: &[u8; 32]) -> Result<Option<AuditHead>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = f
+        .metadata()
+        .map_err(Error::io("cannot read the audit log"))?
+        .len();
+    if len == 0 {
+        return Ok(None);
+    }
+    // Entries are a few KiB at most (each text field is capped at 1,024 characters).
+    let take = len.min(64 * 1024);
+    f.seek(SeekFrom::Start(len - take))
+        .map_err(Error::io("cannot read the audit log"))?;
+    let mut buf = Vec::with_capacity(take as usize);
+    f.take(take)
+        .read_to_end(&mut buf)
+        .map_err(Error::io("cannot read the audit log"))?;
+    if buf.last() != Some(&b'\n') {
+        return Err(Error::Audit("the last entry is incomplete".into()));
+    }
+    buf.pop();
+    let start = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    if start == 0 && take < len {
+        return Err(Error::Audit("the last entry is too long".into()));
+    }
+    let line = std::str::from_utf8(&buf[start..])
+        .map_err(|_| Error::Audit("the last entry is not UTF-8".into()))?;
+    let e: Entry = serde_json::from_str(line)
+        .map_err(|_| Error::Audit("the last entry is malformed".into()))?;
+    let sig = unb64(e.sig.as_deref().unwrap_or(""), "signature")
+        .map_err(|_| Error::Audit("the last entry is unsigned".into()))?;
+    if !verify_ed25519(public, &signed_bytes(vault_id, &e)?, &sig) {
+        return Err(Error::Audit(
+            "the last entry has an invalid signature".into(),
+        ));
+    }
+    Ok(Some(AuditHead {
+        seq: e.seq,
+        hash: sha256_hex(line.as_bytes()),
+    }))
+}
+
+/// Appends one entry and returns the new head. `head` is the newest entry this process knows
+/// of; the entry actually follows the last one on disk, read under an exclusive lock, so two
+/// processes appending to one log keep a single chain. A last entry not signed by this vault
+/// is refused rather than followed.
 pub fn append(
     dir: &Path,
     vault_id: &str,
@@ -67,31 +114,80 @@ pub fn append(
 ) -> Result<AuditHead> {
     let path = dir.join(FILE);
     regular_file(&path, true, MAX_LOG_BYTES)?;
-    let mut e = Entry {
-        seq: head.map_or(1, |h| h.seq + 1),
-        at: now_iso(),
-        actor: clean(actor),
-        action: clean(action),
-        detail: clean(detail),
-        prev: head.map_or_else(|| GENESIS.to_owned(), |h| h.hash.clone()),
-        sig: None,
-    };
-    let sig = signing_key(seed).sign(&signed_bytes(vault_id, &e)?);
-    e.sig = Some(b64(&sig.to_bytes()));
-    let line = serde_json::to_string(&e).map_err(|e| Error::Audit(e.to_string()))?;
     let mut opts = OpenOptions::new();
-    opts.append(true).create(true);
+    opts.read(true).append(true).create(true);
     #[cfg(unix)]
     opts.mode(0o600);
     let mut f = opts
         .open(&path)
         .map_err(Error::io("cannot open the audit log"))?;
+    let _lock = lock_exclusive(&f)?;
+    let on_disk = tail(&mut f, vault_id, &public_key(seed))?;
+    let after = match (&on_disk, head) {
+        (Some(d), Some(h)) if d.seq < h.seq => {
+            return Err(Error::Audit(
+                "the log is shorter than this vault last saw".into(),
+            ))
+        }
+        (Some(d), Some(h)) if d.seq == h.seq && d.hash != h.hash => {
+            return Err(Error::Audit("the last entry was replaced".into()))
+        }
+        _ => on_disk,
+    };
+    let mut e = Entry {
+        seq: after.as_ref().map_or(1, |h| h.seq + 1),
+        at: now_iso(),
+        actor: clean(actor),
+        action: clean(action),
+        detail: clean(detail),
+        prev: after
+            .as_ref()
+            .map_or_else(|| GENESIS.to_owned(), |h| h.hash.clone()),
+        sig: None,
+    };
+    let sig = signing_key(seed).sign(&signed_bytes(vault_id, &e)?);
+    e.sig = Some(b64(&sig.to_bytes()));
+    let line = serde_json::to_string(&e).map_err(|e| Error::Audit(e.to_string()))?;
     f.write_all(format!("{line}\n").as_bytes())
         .map_err(Error::io("cannot write the audit log"))?;
     Ok(AuditHead {
         seq: e.seq,
         hash: sha256_hex(line.as_bytes()),
     })
+}
+
+/// Holds an exclusive `flock` on the open log until dropped (a no-op elsewhere).
+struct FileLock(#[cfg(unix)] std::os::fd::RawFd);
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // SAFETY: unlocks a descriptor that outlives this guard (it borrows the open file).
+        unsafe {
+            libc::flock(self.0, libc::LOCK_UN);
+        }
+    }
+}
+
+fn lock_exclusive(f: &std::fs::File) -> Result<FileLock> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = f.as_raw_fd();
+        // SAFETY: flock on an open descriptor; blocks only while another append runs.
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err(Error::Io {
+                context: "cannot lock the audit log",
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        Ok(FileLock(fd))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = f;
+        Ok(FileLock())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

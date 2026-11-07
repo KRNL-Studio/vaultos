@@ -95,6 +95,9 @@ impl KdfParams {
         p: 1,
     };
 
+    const MAX_MEMORY_KIB: u32 = 1024 * 1024;
+    const MAX_WORK: u64 = 4 * (Self::DEFAULT.m as u64) * (Self::DEFAULT.t as u64);
+
     pub(crate) fn validate(&self) -> Result<()> {
         // Refuse headers that would make unlock trivially cheap (a downgraded file) or
         // would exhaust memory (a hostile file).
@@ -104,7 +107,11 @@ impl KdfParams {
                 "key derivation parameters are too weak".into(),
             ));
         }
-        if self.m > 4 * 1024 * 1024 || self.t > 64 || self.p > 64 {
+        // The header is read before anything is authenticated, so cap the work a modified
+        // file can demand: at most 1 GiB and four times the default's memory × passes
+        // (a few seconds), whatever the split.
+        let work = u64::from(self.m) * u64::from(self.t);
+        if self.m > Self::MAX_MEMORY_KIB || self.t > 16 || self.p > 16 || work > Self::MAX_WORK {
             return Err(Error::Format(
                 "key derivation parameters are too large".into(),
             ));
@@ -163,6 +170,7 @@ pub fn hmac_verify(key: &Key32, data: &[u8], tag: &[u8]) -> bool {
 /// One XChaCha20-Poly1305 box: a random 192-bit nonce (safe to pick at random for any number
 /// of messages) and ciphertext with its 16-byte tag.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sealed {
     pub n: String,
     pub c: String,
@@ -268,6 +276,11 @@ mod tests {
         .validate()
         .is_err());
         assert!(KdfParams::DEFAULT.validate().is_ok());
+        let big = |m: u32, t: u32| KdfParams { m, t, p: 4 }.validate().is_ok();
+        assert!(big(1024 * 1024, 3), "1 GiB at 3 passes is allowed");
+        assert!(!big(1024 * 1024, 4), "but not more work than that");
+        assert!(!big(4 * 1024 * 1024, 2), "nor more than 1 GiB");
+        assert!(!big(64 * 1024, 64), "nor many passes");
     }
 
     #[test]

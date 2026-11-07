@@ -81,10 +81,16 @@ impl SecretKey {
 
     /// Accepts any case, spaces or dashes, and Crockford's look-alikes (O for 0, I and L for 1).
     pub fn parse(input: &str) -> Result<SecretKey> {
-        let mut symbols: Vec<u8> = Vec::with_capacity(BODY + CHECK + 3);
+        let mut symbols = zeroize::Zeroizing::new(Vec::<u8>::with_capacity(BODY + CHECK + 3));
         for c in input.chars() {
             match c {
                 '-' | ' ' => continue,
+                // Never grow past the reserved capacity, so no unzeroized copy is left behind.
+                _ if c.is_ascii_alphanumeric() && symbols.len() == symbols.capacity() => {
+                    return Err(Error::SecretKeyFormat(
+                        "it should have 30 characters after VK1",
+                    ))
+                }
                 _ if c.is_ascii_alphanumeric() => symbols.push(c.to_ascii_uppercase() as u8),
                 _ => return Err(Error::SecretKeyFormat("unexpected character")),
             }
@@ -124,7 +130,7 @@ impl SecretKey {
         for (slot, &c) in given.iter_mut().zip(&rest[BODY..]) {
             *slot = ALPHABET[value(c)? as usize];
         }
-        symbols.zeroize();
+        drop(symbols);
         if given != Self::checksum(&bytes) {
             return Err(Error::SecretKeyFormat("it was mistyped"));
         }

@@ -70,7 +70,7 @@ fn yes() -> bool {
 
 /// One credential, with its value. In memory the v4 store keeps `value` and `password`
 /// sealed and decrypts them only to reveal, copy or inject.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
     pub id: String,
@@ -167,6 +167,25 @@ impl std::fmt::Debug for ItemSecret {
     }
 }
 
+impl std::fmt::Debug for Record {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Record")
+            .field("id", &self.id)
+            .field("key", &self.key)
+            .field("rev", &self.rev)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Decrypted records pass through upgrade, Undo and sync; wipe their secrets when dropped.
+impl Drop for Record {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.value.zeroize();
+        self.password.zeroize();
+    }
+}
+
 impl Record {
     pub fn split(&self) -> (ItemMeta, ItemSecret) {
         (
@@ -237,7 +256,7 @@ pub struct Tombstone {
 }
 
 /// A v3 history entry: `before` and `after` hold whole records, values included.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryEntryV3 {
     pub id: String,
@@ -261,6 +280,15 @@ pub struct HistoryEntryV3 {
     pub reverted: bool,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+impl std::fmt::Debug for HistoryEntryV3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistoryEntryV3")
+            .field("id", &self.id)
+            .field("action", &self.action)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The current time as the JavaScript app writes it: `2026-11-07T10:13:55.106Z`.

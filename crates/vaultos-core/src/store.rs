@@ -264,6 +264,20 @@ impl Keys {
         reference: Option<String>,
     ) -> Result<String> {
         let id = random_id();
+        let ts = now_iso();
+        let size = history::logical_size(&crate::model::HistoryEntryV3 {
+            id: id.clone(),
+            ts: ts.clone(),
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            project: project.map(str::to_owned),
+            key: key.map(str::to_owned),
+            before: payload.before.clone(),
+            after: payload.after.clone(),
+            reference: reference.clone(),
+            reverted: false,
+            extra: Map::new(),
+        });
         let sealed = if payload.before.is_some() || payload.after.is_some() {
             Some(history::seal_payload(
                 &self.vk,
@@ -276,7 +290,7 @@ impl Keys {
         };
         st.history.push(history::Entry {
             id: id.clone(),
-            ts: now_iso(),
+            ts,
             actor: actor.to_owned(),
             action: action.to_owned(),
             project: project.map(str::to_owned),
@@ -284,6 +298,7 @@ impl Keys {
             reference,
             reverted: false,
             payload: sealed,
+            size,
             extra: Map::new(),
         });
         if st.history.len() > history::MAX_ENTRIES {
@@ -704,6 +719,9 @@ impl Store {
     }
 
     fn commit(&mut self, mut next: State) -> Result<()> {
+        // A save records the audit head; one must never record "no head" over a log that
+        // failed verification, or the next unlock would accept a cut-short log.
+        self.reset_audit_if_needed()?;
         let bytes = {
             let open = self.open.as_ref().ok_or(Error::Locked)?;
             encode(&open.keys, &mut next, open.audit_head.as_ref())?
@@ -793,10 +811,23 @@ impl Store {
         Ok(())
     }
 
-    fn save_keys(&mut self, next_keys: Keys) -> Result<()> {
+    /// Saves new wrapping keys together with the history entry that records the change, in one
+    /// write. If that write fails, the old keys stay in place, so the caller's error is true:
+    /// the vault still opens with the old password and Secret Key.
+    fn save_keys(&mut self, next_keys: Keys, action: &str) -> Result<()> {
+        let open = self.open.as_ref().ok_or(Error::Locked)?;
+        let mut state = self.pending.as_ref().unwrap_or(&open.state).clone();
+        next_keys.history_entry(
+            &mut state,
+            HUMAN,
+            action,
+            None,
+            None,
+            Payload::default(),
+            None,
+        )?;
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         let previous = std::mem::replace(&mut open.keys, next_keys);
-        let state = self.pending.take().unwrap_or_else(|| open.state.clone());
         let r = self.commit(state);
         if r.is_err() {
             if let Some(o) = self.open.as_mut() {
@@ -822,9 +853,7 @@ impl Store {
         let keys = &self.open()?.keys;
         let params = KdfHeader::params(&keys.kdf).unwrap_or(KdfParams::DEFAULT);
         let next = rewrap(keys, new, secret_key, params)?;
-        self.save_keys(next)?;
-        self.record_change("change_password", HUMAN)?;
-        Ok(())
+        self.save_keys(next, "change_password")
     }
 
     /// Adds, replaces (`Some`) or removes (`None`) the Secret Key.
@@ -841,45 +870,43 @@ impl Store {
         let keys = &self.open()?.keys;
         let params = KdfHeader::params(&keys.kdf).unwrap_or(KdfParams::DEFAULT);
         let rewrapped = rewrap(keys, password, next, params)?;
-        self.save_keys(rewrapped)?;
-        self.record_change(
-            if next.is_some() {
-                "set_secret_key"
-            } else {
-                "remove_secret_key"
-            },
-            HUMAN,
-        )?;
-        Ok(())
+        let action = if next.is_some() {
+            "set_secret_key"
+        } else {
+            "remove_secret_key"
+        };
+        self.save_keys(rewrapped, action)
     }
 
-    fn record_change(&mut self, action: &str, actor: &str) -> Result<()> {
-        self.mutate(|k, st| {
-            k.history_entry(st, actor, action, None, None, Payload::default(), None)
-                .map(|_| ())
-        })
+    /// If unlock found the audit log damaged, sets it aside and starts a new chain whose first
+    /// entry records the problem. The problem is cleared only once that entry is written.
+    fn reset_audit_if_needed(&mut self) -> Result<()> {
+        let open = self.open.as_mut().ok_or(Error::Locked)?;
+        let Some(problem) = open.audit_problem.clone() else {
+            return Ok(());
+        };
+        set_aside_audit_log(&self.data_dir)?;
+        let head = audit::append(
+            &self.data_dir,
+            &open.keys.vault_id,
+            &open.keys.audit_seed,
+            None,
+            HUMAN,
+            "audit_log_reset",
+            &problem,
+        )?;
+        open.audit_head = Some(head);
+        // The recorded head belonged to the log just set aside; the next save records the
+        // new chain's.
+        open.saved_anchor = None;
+        open.audit_problem = None;
+        Ok(())
     }
 
     /// Appends to the audit chain. The vault records the new head at its next save.
     pub fn audit(&mut self, action: &str, detail: &str, actor: &str) -> Result<()> {
+        self.reset_audit_if_needed()?;
         let open = self.open.as_mut().ok_or(Error::Locked)?;
-        if open.audit_problem.is_some() {
-            set_aside_audit_log(&self.data_dir)?;
-            open.audit_head = None;
-            // The recorded head belongs to the log just set aside; the next save records the
-            // new chain's.
-            open.saved_anchor = None;
-            let problem = open.audit_problem.take().unwrap_or_default();
-            open.audit_head = Some(audit::append(
-                &self.data_dir,
-                &open.keys.vault_id,
-                &open.keys.audit_seed,
-                None,
-                HUMAN,
-                "audit_log_reset",
-                &problem,
-            )?);
-        }
         open.audit_head = Some(audit::append(
             &self.data_dir,
             &open.keys.vault_id,
@@ -1207,39 +1234,39 @@ impl Store {
     }
 
     /// Applies `change` to one item's metadata as the human, bumping its revision and
-    /// recording the change for Undo.
+    /// recording the change for Undo. The sealed secret is kept as it is, never opened.
     fn change_meta(
         &mut self,
         project: &str,
         key: &str,
-        change: impl FnOnce(&mut Record),
-    ) -> Result<Record> {
+        change: impl FnOnce(&mut ItemMeta),
+    ) -> Result<ItemMeta> {
         self.mutate(|k, st| {
             let pi = st.project(project)?;
             let ii = st.item(pi, key)?;
-            let p = &st.projects[pi];
-            let before = k.record(p, &p.items[ii])?;
-            let mut after = before.clone();
-            change(&mut after);
-            after.updated_at = now_iso();
-            after.rev += 1;
-            let item = k.item_from_record(p, &after)?;
+            let p = &mut st.projects[pi];
             let pname = p.meta.name.clone();
-            st.projects[pi].items[ii] = item;
-            let payload = Payload {
-                before: Some(to_value(&before)),
-                after: Some(to_value(&after)),
-            };
+            let item = &mut p.items[ii];
+            let before = json!({"rev": item.rev, "meta": to_value(&item.meta)});
+            change(&mut item.meta);
+            item.meta.updated_at = now_iso();
+            item.rev += 1;
+            item.sealed_meta = None;
+            let after = json!({"rev": item.rev, "meta": to_value(&item.meta)});
+            let meta = item.meta.clone();
             k.history_entry(
                 st,
                 HUMAN,
-                "update_secret",
+                "update_meta",
                 Some(&pname),
-                Some(&after.key),
-                payload,
+                Some(&meta.key),
+                Payload {
+                    before: Some(before),
+                    after: Some(after),
+                },
                 None,
             )?;
-            Ok(after)
+            Ok(meta)
         })
     }
 
@@ -1474,6 +1501,27 @@ impl Store {
                     }
                     let restored = restore(rec(&payload.before)?, cur.rev, after.rev);
                     st.projects[pi].items[ii] = k.item_from_record(&st.projects[pi], &restored)?;
+                }
+                "update_meta" => {
+                    let (pi, ii) = current.ok_or_else(refuse)?;
+                    let field = |v: &Option<Value>, name: &str| v.as_ref().and_then(|v| v.get(name)).cloned();
+                    let item = &st.projects[pi].items[ii];
+                    let after_rev = field(&payload.after, "rev").and_then(|v| v.as_u64());
+                    if after_rev != Some(item.rev) || field(&payload.after, "meta") != Some(to_value(&item.meta)) {
+                        return Err(refuse());
+                    }
+                    let mut meta: ItemMeta = field(&payload.before, "meta")
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .ok_or_else(refuse)?;
+                    if meta.key != item.meta.key {
+                        return Err(refuse());
+                    }
+                    meta.updated_at = now_iso();
+                    meta.modified_by = HUMAN.to_owned();
+                    let item = &mut st.projects[pi].items[ii];
+                    item.meta = meta;
+                    item.rev += 1;
+                    item.sealed_meta = None;
                 }
                 "delete_secret" => {
                     let pi = pi.ok_or_else(refuse)?;
@@ -1751,12 +1799,17 @@ pub(crate) fn from_v3(
             reference: e.reference.clone(),
             reverted: e.reverted,
             payload: sealed,
+            size: history::logical_size(e),
             extra: e.extra.clone(),
         });
     }
     Ok((keys, st))
 }
 
-pub(crate) fn encode_new(keys: &Keys, st: &mut State) -> Result<Vec<u8>> {
-    encode(keys, st, None)
+pub(crate) fn encode_new(
+    keys: &Keys,
+    st: &mut State,
+    audit_head: Option<&AuditHead>,
+) -> Result<Vec<u8>> {
+    encode(keys, st, audit_head)
 }

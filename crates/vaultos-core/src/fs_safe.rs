@@ -52,24 +52,32 @@ pub fn regular_file(file: &Path, optional: bool, max: u64) -> Result<Option<fs::
     Ok(Some(meta))
 }
 
-/// One version of a file, known without reading it: device, inode, size and modification
-/// time. Every save renames a new file over the vault, so a save by any process changes it.
+/// One version of a file, known without reading it: device, inode, size, and modification
+/// and change times. Every save renames a new file over the vault, so a save by any process
+/// changes it; an in-place rewrite changes the change time, which no program can set back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileId {
     dev: u64,
     ino: u64,
     len: u64,
     mtime: (i64, i64),
+    ctime: (i64, i64),
 }
 
 impl FileId {
+    /// `None` when the file system keeps whole-second times (both nanosecond parts are
+    /// zero): two writes within a second could look the same, so callers compare contents.
     #[cfg(unix)]
     pub(crate) fn of(m: &fs::Metadata) -> Option<FileId> {
+        if m.mtime_nsec() == 0 && m.ctime_nsec() == 0 {
+            return None;
+        }
         Some(FileId {
             dev: m.dev(),
             ino: m.ino(),
             len: m.len(),
             mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
         })
     }
 
@@ -134,10 +142,7 @@ pub fn atomic_write(file: &Path, bytes: &[u8]) -> Result<()> {
         drop(f);
         regular_file(file, true, u64::MAX)?;
         fs::rename(&tmp, file).map_err(Error::io("cannot replace the vault file"))?;
-        if let Ok(d) = File::open(dir) {
-            let _ = d.sync_all();
-        }
-        Ok(())
+        sync_dir(dir)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -145,11 +150,34 @@ pub fn atomic_write(file: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-/// A pid lock file. Dropping it removes the file if it still names this process.
+/// Flushes a directory, so a file just created or renamed in it survives a power loss. File
+/// systems that cannot sync a directory (they report it as unsupported) are accepted; any
+/// other failure is an error, because the caller would otherwise report a save that may not
+/// last.
+pub fn sync_dir(dir: &Path) -> Result<()> {
+    let d = File::open(dir).map_err(Error::io("cannot open a directory to flush it"))?;
+    match d.sync_all() {
+        Ok(()) => Ok(()),
+        #[cfg(unix)]
+        Err(e) if matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP)) => Ok(()),
+        Err(e) => Err(Error::Io {
+            context: "cannot flush a directory to disk",
+            source: e,
+        }),
+    }
+}
+
+/// A held lock: the pid file the JavaScript app understands, and (on Unix) an exclusive
+/// `flock` on a companion file that is never deleted. The kernel drops the `flock` when the
+/// process exits, so two Rust processes can never both take over a stale pid file.
+/// Dropping it removes the pid file if it still names this process, then releases the
+/// `flock`.
 #[derive(Debug)]
 pub struct LockFile {
     path: PathBuf,
     pid: String,
+    #[cfg(unix)]
+    _guard: File,
 }
 
 impl Drop for LockFile {
@@ -160,7 +188,7 @@ impl Drop for LockFile {
     }
 }
 
-fn pid_alive(pid: i32) -> bool {
+pub(crate) fn pid_alive(pid: i32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: kill with signal 0 only checks whether the process exists.
@@ -174,9 +202,39 @@ fn pid_alive(pid: i32) -> bool {
     }
 }
 
+/// Takes the exclusive `flock` on `dir/.NAME.flock` without waiting.
+#[cfg(unix)]
+fn flock_guard(dir: &Path, name: &str) -> Result<File> {
+    use std::os::fd::AsRawFd;
+    let path = dir.join(format!(".{name}.flock"));
+    regular_file(&path, true, 0)?;
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true);
+    opts.mode(0o600);
+    let f = opts
+        .open(&path)
+        .map_err(Error::io("cannot open a lock file"))?;
+    // SAFETY: flock on a descriptor this function owns; no memory is involved.
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = std::io::Error::last_os_error();
+        return Err(if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Error::Busy
+        } else {
+            Error::Io {
+                context: "cannot take a lock",
+                source: e,
+            }
+        });
+    }
+    Ok(f)
+}
+
 /// Claims `dir/name` the way `session.js` does: create-exclusive with our pid, and take over
-/// only a lock whose process no longer exists.
+/// only a lock whose process no longer exists. The takeover happens while holding the
+/// `flock`, so only a JavaScript process could race it.
 pub fn claim(dir: &Path, name: &str) -> Result<LockFile> {
+    #[cfg(unix)]
+    let guard = flock_guard(dir, name)?;
     let path = dir.join(name);
     let pid = std::process::id().to_string();
     for _ in 0..2 {
@@ -186,9 +244,15 @@ pub fn claim(dir: &Path, name: &str) -> Result<LockFile> {
         opts.mode(0o600);
         match opts.open(&path) {
             Ok(mut f) => {
-                f.write_all(pid.as_bytes())
+                let lock = LockFile {
+                    path,
+                    pid,
+                    #[cfg(unix)]
+                    _guard: guard,
+                };
+                f.write_all(lock.pid.as_bytes())
                     .map_err(Error::io("cannot write a lock file"))?;
-                return Ok(LockFile { path, pid });
+                return Ok(lock);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let held = read_regular(&path, 128)?;
@@ -263,5 +327,18 @@ mod tests {
         // A lock left by a process that no longer exists is taken over.
         fs::write(d.path().join("write.lock"), "999999999").unwrap();
         let _again = claim(d.path(), "write.lock").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_pid_file_is_taken_over_by_one_process_only() {
+        let d = tempfile::tempdir().unwrap();
+        let held = claim(d.path(), "write.lock").unwrap();
+        // The pid file disappears (as if its owner died and someone removed it), but the
+        // flock still excludes a second Rust claimant.
+        fs::write(d.path().join("write.lock"), "999999999").unwrap();
+        assert!(matches!(claim(d.path(), "write.lock"), Err(Error::Busy)));
+        drop(held);
+        assert!(claim(d.path(), "write.lock").is_ok());
     }
 }

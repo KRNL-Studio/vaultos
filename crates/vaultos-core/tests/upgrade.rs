@@ -38,6 +38,8 @@ fn files(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        // Lock companions (`.write.lock.flock`) are created once and kept.
+        .filter(|n| !n.starts_with('.'))
         .collect();
     v.sort();
     v
@@ -62,8 +64,9 @@ fn upgrade_keeps_everything_and_a_backup() {
         "the backup is the untouched v3 file"
     );
     assert_eq!(
-        std::fs::read_to_string(d.path().join("audit-v3.log")).unwrap(),
-        "{\"synthetic\":\"v3 activity line\"}\n"
+        std::fs::read_to_string(d.path().join("audit.log")).unwrap(),
+        "{\"synthetic\":\"v3 activity line\"}\n",
+        "the v3 activity log stays with the v3 backup"
     );
 
     let mut s = Store::new(d.path()).unwrap();
@@ -115,6 +118,11 @@ fn upgrade_keeps_everything_and_a_backup() {
     let (report, entries) = s.verify_audit().unwrap();
     assert!(report.entries >= 1);
     assert_eq!(entries[0].action, "upgrade_v4");
+    assert_eq!(
+        report.anchored,
+        Some(true),
+        "the new vault records the upgrade entry"
+    );
     assert!(matches!(
         upgrade(d.path(), &pw(), None, KdfParams::FLOOR),
         Err(Error::Invalid(_))

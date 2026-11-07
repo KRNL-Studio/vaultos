@@ -5,7 +5,7 @@
 use crate::crypto::Sealed;
 use crate::error::Result;
 use crate::format::{aad, open_json, seal_json};
-use crate::model::Extra;
+use crate::model::{Extra, HistoryEntryV3};
 use crate::secret::Key32;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,6 +30,10 @@ pub struct Entry {
     pub reverted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<Sealed>,
+    /// The entry's size as the JavaScript app measures it (its JSON with the before and
+    /// after records in the clear), so the size cap keeps what that app would keep.
+    #[serde(default)]
+    pub size: u64,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -59,23 +63,39 @@ pub fn open_payload(vk: &Key32, vault_id: &str, e: &Entry) -> Result<Payload> {
     }
 }
 
-/// Drops the oldest entries past 2,000 or past 1 MiB of stored entries, as `store.js` does.
-pub fn trim(entries: &mut Vec<Entry>) {
-    if entries.len() > MAX_ENTRIES {
-        let drop = entries.len() - MAX_ENTRIES;
-        entries.drain(..drop);
-    }
-    let sizes: Vec<usize> = entries
-        .iter()
-        .map(|e| serde_json::to_vec(e).map_or(0, |v| v.len() + 1))
-        .collect();
-    let mut total: usize = sizes.iter().sum();
-    let mut drop = 0;
-    while total > MAX_BYTES && drop + 1 < entries.len() {
-        total -= sizes[drop];
+/// The size `store.js` counts for an entry: its JSON with the payload in the clear.
+pub fn logical_size(e: &HistoryEntryV3) -> u64 {
+    serde_json::to_vec(e).map_or(0, |v| v.len() as u64)
+}
+
+/// How many of the oldest entries `store.js` would drop: those past 2,000, then while the
+/// list's JSON exceeds 1 MiB, always keeping the newest.
+pub fn trim_count(sizes: &[u64]) -> usize {
+    let mut drop = sizes.len().saturating_sub(MAX_ENTRIES);
+    // The JSON of the list: brackets, entries and the commas between them.
+    let mut total: u64 = 1 + sizes[drop..].iter().map(|s| s + 1).sum::<u64>();
+    while total > MAX_BYTES as u64 && drop + 1 < sizes.len() {
+        total -= sizes[drop] + 1;
         drop += 1;
     }
+    drop
+}
+
+/// Drops the oldest entries as `store.js` does (see `trim_count`).
+pub fn trim(entries: &mut Vec<Entry>) {
+    let sizes: Vec<u64> = entries.iter().map(Entry::counted_size).collect();
+    let drop = trim_count(&sizes);
     entries.drain(..drop);
+}
+
+impl Entry {
+    /// The recorded logical size, or for an entry without one, its stored size.
+    pub fn counted_size(&self) -> u64 {
+        if self.size > 0 {
+            return self.size;
+        }
+        serde_json::to_vec(self).map_or(0, |v| v.len() as u64)
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +113,7 @@ mod tests {
             reference: None,
             reverted: false,
             payload,
+            size: 0,
             extra: Extra::new(),
         }
     }
@@ -114,5 +135,22 @@ mod tests {
             format!("{:016x}", 4),
             "the newest entry is kept"
         );
+    }
+
+    #[test]
+    fn the_size_rule_matches_the_javascript_app() {
+        // store.js: JSON.stringify(history) over 1 MiB drops the oldest; the newest stays.
+        assert_eq!(trim_count(&[]), 0);
+        assert_eq!(trim_count(&[10, 20]), 0);
+        let half = (MAX_BYTES as u64) / 2;
+        // "[" + a + "," + b + "]" is exactly 1 MiB: kept. One byte more: the oldest goes.
+        assert_eq!(trim_count(&[half, half - 3]), 0);
+        assert_eq!(trim_count(&[half, half - 2]), 1);
+        assert_eq!(
+            trim_count(&[MAX_BYTES as u64 * 3]),
+            0,
+            "never drops the newest"
+        );
+        assert_eq!(trim_count(&vec![1; MAX_ENTRIES + 7]), 7);
     }
 }
