@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Rust core: `crates/vaultos-core` implements vault format v4, which the app does not use yet. It has Argon2id key derivation, an optional per-vault Secret Key, a Vault Key with one key per project, and item metadata and secrets sealed separately with XChaCha20-Poly1305. The whole file is authenticated, and a signed, hash-chained audit log is anchored in the vault. The store keeps `store.js`'s ownership, delegation, approval, history, Undo, stale-write and lock-file rules. Upgrading from v3 is explicit and one-way, and keeps a backup of the v3 file. CI runs rustfmt, clippy, the tests and cargo-deny on Linux and macOS; `fuzz/` has cargo-fuzz targets for the parsers.
 - Storage: history is capped at 1 MB as well as 2,000 entries, dropping the oldest first, so large values no longer grow the vault without limit. Revert still works for the entries kept.
 - Sync: the vault copies a pull writes to `backups/` are pruned to the newest 20 plus any from the last 30 days. Other files in `backups/` are left alone.
 - Keychain: an unlock with remembering on rewrites the stored password only when it is missing or different, instead of on every unlock.

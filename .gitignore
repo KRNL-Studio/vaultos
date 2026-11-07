@@ -21,3 +21,4 @@ playwright-report/
 .installed-at
 coverage/
 work/
+/target/

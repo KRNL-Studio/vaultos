@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/vaultos-core"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.3.0-preview.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rohit3a/vaultos"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+print_stdout = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+
+# Argon2 and the AEADs are far too slow unoptimised for tests that unlock a vault.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3
