@@ -241,6 +241,39 @@
     }
   },
   {
+    "name": "request_access",
+    "description": "Ask the human for temporary scopes on one project, for 1 to 60 minutes (default 15). The human confirms in the VaultOS app (Touch ID or its dialog), so ask only when the user's task needs it and say why in reason. The grant covers that project only and ends early if the vault locks. If refused, do not ask again in a loop: tell the user what access you need.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["read", "add", "edit:own", "edit:delegated", "delete:own", "inject", "run", "reveal"]
+          }
+        },
+        "minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "reason": {
+          "type": "string",
+          "description": "What the access is for, shown to the human"
+        }
+      },
+      "required": [
+        "project",
+        "scopes",
+        "reason"
+      ]
+    }
+  },
+  {
     "name": "whoami",
     "description": "Report which identity this bridge is authenticated as and which scopes it holds. Use this when a write is refused, to see whether this agent is enrolled at all.",
     "inputSchema": {

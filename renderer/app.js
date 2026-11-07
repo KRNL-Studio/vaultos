@@ -1502,10 +1502,28 @@ async function renderAgents() {
     if (revision !== renderVersion) return;
     const allScopes = await window.vault.allScopes();
     if (revision !== renderVersion) return;
+    const grants = await window.vault.accessGrants();
+    if (revision !== renderVersion) return;
     for (const a of list) {
         const card = el(`<div class="secret card">\n      <div class="head"><span class="key">${esc(a.name)}</span><span class="pname">${a.revoked ? "revoked" : "active"}</span></div>\n      <div class="badges">${a.scopes.map(x => `<span class="badge ${x === "reveal" ? "exp-amber" : "perm"}">${esc(x)}</span>`).join("")}${a.allProjects ? `<span class="badge allaccess">all projects</span>` : ""}${a.anyRoot ? `<span class="badge allaccess">any folder</span>` : ""}</div>\n      ${(a.runCommands || []).length ? `<div class="note">Runs with secrets: ${a.runCommands.map(c => `<span class="mono">${esc(c)}</span>`).join(", ")}</div>` : ""}<div class="note"><span class="mono">${esc(a.ref)}</span> · enrolled ${esc((a.enrolledAt || "").slice(0, 10))}${a.lastSeenAt ? ` · last seen ${esc(a.lastSeenAt.slice(0, 16).replace("T", " "))}` : " · never used"}</div>\n      <div class="val" data-tok style="display:none"></div>\n      <div class="actions"></div></div>`);
         const actions = card.querySelector(".actions");
         const tok = card.querySelector("[data-tok]");
+        // Temporary access the human confirmed when the agent asked: in memory only.
+        const mine = grants.filter(g => g.agentId === a.id);
+        if (mine.length) {
+            const temp = el(`<div class="note"></div>`);
+            temp.textContent = "Temporary access: " + mine.map(g => `${g.scopes.join(", ")} on ${g.project} until ${new Date(g.expiresAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit"
+            })}`).join("; ");
+            const end = el(`<button class="iconbtn">End temporary access</button>`);
+            end.onclick = async () => {
+                await window.vault.endAccess(a.id);
+                render();
+            };
+            card.insertBefore(temp, actions);
+            actions.appendChild(end);
+        }
         const revealScope = el(`<button class="iconbtn">${a.scopes.includes("reveal") ? "Revoke reveal" : "Grant reveal"}</button>`);
         revealScope.onclick = async () => {
             const next = a.scopes.includes("reveal") ? a.scopes.filter(x => x !== "reveal") : [ ...a.scopes, "reveal" ];

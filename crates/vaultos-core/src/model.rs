@@ -485,6 +485,11 @@ pub fn now_iso() -> String {
     iso(time::OffsetDateTime::now_utc())
 }
 
+/// The time `d` from now, as [`now_iso`] writes it.
+pub fn iso_after(d: std::time::Duration) -> String {
+    iso(time::OffsetDateTime::now_utc() + d)
+}
+
 pub fn iso(t: time::OffsetDateTime) -> String {
     let t = t.to_offset(time::UtcOffset::UTC);
     format!(

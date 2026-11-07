@@ -4,6 +4,7 @@
 //! `daemon.json`. Browsers cannot reach a Unix socket; requests carrying browser headers are
 //! refused anyway.
 
+use crate::access::{self, Access, Grant};
 use crate::api::{self, Reply, Request, MAX_BODY};
 use crate::autosync::AutoSync;
 use crate::human;
@@ -75,6 +76,7 @@ pub(crate) struct Shared {
     /// One confirmation sheet at a time; others are refused rather than queued.
     pub(crate) confirming: AtomicBool,
     pub(crate) ssh: SshAgent,
+    pub(crate) access: Access,
     pub(crate) runtime: tokio::runtime::Handle,
 }
 
@@ -196,6 +198,23 @@ impl Handle {
     pub fn ssh_agent_socket(&self) -> Option<PathBuf> {
         ssh_agent::socket(&self.0)
     }
+
+    /// How the app asks the human about an agent's request for just-in-time access (see
+    /// [`crate::access`]). Without one, such requests are refused.
+    pub fn set_access_confirm(&self, confirm: Option<Confirm>) {
+        self.0.access.set_confirm(confirm);
+    }
+
+    /// The just-in-time grants in force.
+    pub fn access_grants(&self) -> Vec<Grant> {
+        let locks = self.0.with_store(|s| s.lock_count());
+        self.0.access.live(locks)
+    }
+
+    /// Ends an agent's grants: all of them, or one project's. Returns how many ended.
+    pub fn end_access(&self, agent_id: &str, project_id: Option<&str>) -> usize {
+        self.0.access.end(agent_id, project_id)
+    }
 }
 
 /// Runs until `/shutdown`, SIGTERM or SIGINT. Returns once the socket and session file are
@@ -243,6 +262,7 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
         confirm: cfg.confirm.clone(),
         confirming: AtomicBool::new(false),
         ssh: SshAgent::default(),
+        access: Access::default(),
         runtime: tokio::runtime::Handle::current(),
     });
 
@@ -421,6 +441,12 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
         }
         return human_values(shared, body, pid).await;
     }
+    if method == "POST" && target == "/access/request" {
+        let Some(token) = agent_token else {
+            return Reply::error(403, "Only an enrolled agent can request access");
+        };
+        return access::request(shared, token, body, pid).await;
+    }
     let method_changes = method != "GET";
     let request = Request {
         method,
@@ -429,10 +455,13 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
         approver,
         content_type,
         body,
+        grants: Vec::new(),
     };
     let s = shared.clone();
     let reply = tokio::task::spawn_blocking(move || {
+        let mut request = request;
         s.with_store(|store| {
+            request.grants = s.access.live(store.lock_count());
             let reply = api::owner(store, &request).unwrap_or_else(|| api::handle(store, &request));
             if request.target == "/unlock" && reply.status == 401 {
                 // Held with the store, so guesses are one a second however many clients try.

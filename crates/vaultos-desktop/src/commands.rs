@@ -134,6 +134,8 @@ fn changes(channel: &str) -> bool {
             | "trash"
             | "generate"
             | "generateSshKey"
+            | "accessGrants"
+            | "endAccess"
             | "strength"
             | "otp"
             | "copyOtp"
@@ -405,6 +407,8 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
         "emptyTrash" => items::empty_trash(app).await,
         "generate" => items::generate(a.get(0)),
         "generateSshKey" => items::generate_ssh_key(&a.str(0, "comment")?),
+        "accessGrants" => Ok(json!(app.access_grants())),
+        "endAccess" => Ok(json!({ "ended": app.end_access(&a.str(0, "agent")?) })),
         "strength" => items::strength(&a.str(0, "password")?),
         "otp" => items::otp(app, a.str(0, "project")?, a.str(1, "key")?).await,
         "copyOtp" => items::copy_otp(app, a.str(0, "project")?, a.str(1, "key")?).await,

@@ -128,6 +128,16 @@ fn call(client: &Client, name: &str, a: &JsonObject) -> Result<Value, String> {
             Some(pick(&[("project", "project"), ("key", "key")])),
         ),
         "whoami" => send("GET", "/whoami", None),
+        "request_access" => send(
+            "POST",
+            "/access/request",
+            Some(pick(&[
+                ("project", "project"),
+                ("scopes", "scopes"),
+                ("minutes", "minutes"),
+                ("reason", "reason"),
+            ])),
+        ),
         "run_with_secrets" => {
             let timeout = match a.get("timeout_seconds") {
                 None | Some(Value::Null) => DEFAULT_TIMEOUT,

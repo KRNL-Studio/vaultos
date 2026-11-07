@@ -2,6 +2,7 @@
 //! peer's user id, the size of the body and the owner's session token; everything here runs
 //! with the store locked. Agent permissions are enforced here, never in clients.
 
+use crate::access::Grant;
 use serde_json::{json, Map, Value};
 use vaultos_core::agents::Agent;
 use vaultos_core::env::{self, Format};
@@ -21,6 +22,8 @@ pub struct Request {
     pub approver: Option<String>,
     pub content_type: Option<String>,
     pub body: Vec<u8>,
+    /// Just-in-time grants in force (see [`crate::access`]).
+    pub grants: Vec<Grant>,
 }
 
 /// Tokens and the body (which can carry a value) are never printed.
@@ -243,7 +246,7 @@ pub fn handle(store: &mut Store, req: &Request) -> Reply {
     };
     let result = match &agent {
         None => relay_decision(store, req.approver.as_deref().unwrap_or(""), &body),
-        Some(a) => route(store, a, req, &body),
+        Some(a) => route(store, a, req, &body, &req.grants),
     };
     match result {
         Ok(v) => Reply::ok(v),
@@ -270,23 +273,49 @@ fn relay_decision(store: &mut Store, presented: &str, body: &Map<String, Value>)
     to_json(&store.relay_decision(presented, project, key, approve)?)
 }
 
-/// One request, as `api.js` `route` handles it.
+/// One request, as `api.js` `route` handles it. A just-in-time grant adds its scopes on
+/// its project only: everywhere else the agent has exactly what the human enrolled it with.
 struct Ctx<'a> {
     agent: &'a Agent,
     actor: String,
+    grants: Vec<&'a Grant>,
+    /// Projects this request created, which the store has already granted this agent.
+    created: std::cell::RefCell<Vec<String>>,
 }
 
 impl Ctx<'_> {
+    /// The agent has `name` somewhere: enrolled with it, or granted it on some project.
     fn scope(&self, name: &str) -> Result<()> {
-        if self.agent.has_scope(name) {
+        if self.agent.has_scope(name)
+            || self
+                .grants
+                .iter()
+                .any(|g| g.scopes.iter().any(|s| s == name))
+        {
             Ok(())
         } else {
             Err(deny(format!("This agent does not have the {name} scope")))
         }
     }
 
-    fn allowed(&self, id: Option<&str>) -> bool {
-        id.is_some_and(|id| self.agent.allowed_project(id))
+    fn can(&self, id: &str, scope: &str) -> bool {
+        (self.agent.has_scope(scope)
+            && (self.agent.allowed_project(id) || self.created.borrow().iter().any(|c| c == id)))
+            || self.grants.iter().any(|g| g.allows(id, scope))
+    }
+
+    /// The agent has `name` on this project.
+    fn scope_in(&self, name: &str, id: &str) -> Result<()> {
+        self.scope(name)?;
+        if self.can(id, name) {
+            Ok(())
+        } else {
+            Err(deny(format!("This agent does not have the {name} scope")))
+        }
+    }
+
+    fn allowed(&self, id: Option<&str>, scope: &str) -> bool {
+        id.is_some_and(|id| self.can(id, scope))
     }
 
     /// The project's id and name, if it exists and this agent may use it. Unknown and
@@ -297,9 +326,27 @@ impl Ctx<'_> {
             None => None,
         };
         match found {
-            Some((id, name)) if self.agent.allowed_project(&id) => Ok((id, name)),
+            Some((id, name))
+                if self.agent.allowed_project(&id)
+                    || self.grants.iter().any(|g| g.project_id == id) =>
+            {
+                Ok((id, name))
+            }
             _ => Err(deny("Project is not approved for this agent")),
         }
+    }
+
+    /// [`Ctx::project`] for one scope, checked as before grants existed: the scope first.
+    fn project_for(
+        &self,
+        store: &Store,
+        name: Option<&str>,
+        scope: &str,
+    ) -> Result<(String, String)> {
+        self.scope(scope)?;
+        let (id, name) = self.project(store, name)?;
+        self.scope_in(scope, &id)?;
+        Ok((id, name))
     }
 
     fn file(&self, store: &Store, target: Option<&Value>) -> Result<std::path::PathBuf> {
@@ -309,26 +356,31 @@ impl Ctx<'_> {
         self.agent.file_target(target, store.data_dir())
     }
 
-    /// Creates a project and grants it to this agent in one save.
+    /// Creates a project and grants it to this agent in one save. Only an agent enrolled with
+    /// the add scope may: a just-in-time grant covers its own project, never new ones.
     fn create_project(&self, store: &mut Store, name: Option<&Value>) -> Result<(String, String)> {
-        self.scope("add")?;
+        if !self.agent.has_scope("add") {
+            return Err(deny("This agent does not have the add scope"));
+        }
         let name = name
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("Invalid project name"))?;
         let agent_id = self.agent.id.clone();
         let actor = self.actor.clone();
-        store.batch(|s| {
+        let (id, name) = store.batch(|s| {
             let (id, name) = s.create_project(name, &actor)?;
             s.grant_project(&agent_id, &id)?;
             Ok((id, name))
-        })
+        })?;
+        self.created.borrow_mut().push(id.clone());
+        Ok((id, name))
     }
 
     fn write_secret(&self, store: &mut Store, project: &str, fields: &Fields) -> Result<Value> {
         match store.find_item(project, &fields.key)? {
-            None => self.scope("add")?,
-            Some(item) if item.owner == self.actor => self.scope("edit:own")?,
-            Some(_) => self.scope("edit:delegated")?,
+            None => self.scope_in("add", project)?,
+            Some(item) if item.owner == self.actor => self.scope_in("edit:own", project)?,
+            Some(_) => self.scope_in("edit:delegated", project)?,
         }
         to_json(&store.set_item(project, fields, &self.actor)?)
     }
@@ -339,10 +391,13 @@ fn route(
     agent: &Agent,
     req: &Request,
     body: &Map<String, Value>,
+    grants: &[Grant],
 ) -> Result<Value> {
     let cx = Ctx {
         agent,
         actor: agent_ref(&agent.id),
+        grants: grants.iter().filter(|g| g.agent_id == agent.id).collect(),
+        created: std::cell::RefCell::default(),
     };
     let (path, query) = req.target.split_once('?').unwrap_or((&req.target, ""));
     let m = req.method.as_str();
@@ -357,12 +412,16 @@ fn route(
                 "allProjects": agent.all_projects,
                 "anyRoot": agent.any_root,
                 "runCommands": agent.run_commands,
+                "grants": cx.grants,
             }))
         }
         ("GET", "/projects") => {
             cx.scope("read")?;
             let all = store.list_projects()?;
-            let mine: Vec<_> = all.iter().filter(|p| cx.allowed(Some(&p.id))).collect();
+            let mine: Vec<_> = all
+                .iter()
+                .filter(|p| cx.allowed(Some(&p.id), "read"))
+                .collect();
             return to_json(&mine);
         }
         ("POST", "/projects") => {
@@ -379,7 +438,7 @@ fn route(
                     | vaultos_core::store::SearchHit::Secret { project, .. } => project,
                 };
                 let id = store.find_project(name)?.map(|(id, _)| id);
-                if cx.allowed(id.as_deref()) {
+                if cx.allowed(id.as_deref(), "read") {
                     out.push(hit);
                 }
             }
@@ -390,15 +449,15 @@ fn route(
             let mut out = Vec::new();
             for p in store.pending_approvals()? {
                 let id = store.find_project(&p.project)?.map(|(id, _)| id);
-                if cx.allowed(id.as_deref()) {
+                if cx.allowed(id.as_deref(), "read") {
                     out.push(p);
                 }
             }
             return to_json(&out);
         }
         ("POST", "/reveal") => {
-            cx.scope("reveal")?;
-            let (id, _) = cx.project(store, body.get("project").and_then(Value::as_str))?;
+            let project = body.get("project").and_then(Value::as_str);
+            let (id, _) = cx.project_for(store, project, "reveal")?;
             let key = text(body, "key", "key name")?;
             let r = store.reveal(&id, key, &cx.actor)?;
             return Ok(json!({
@@ -416,7 +475,7 @@ fn route(
             let all = store.fingerprints()?;
             let mine: Vec<_> = all
                 .iter()
-                .filter(|f| cx.allowed(Some(&f.project_id)))
+                .filter(|f| cx.allowed(Some(&f.project_id), "reveal"))
                 .collect();
             return to_json(&mine);
         }
@@ -435,7 +494,7 @@ fn route(
         let (id, _) = cx.project(store, Some(&decode(p)?))?;
         match (m, key) {
             ("GET", None) => {
-                cx.scope("read")?;
+                cx.scope_in("read", &id)?;
                 // Archived items are kept out of agents' way, as out of inject.
                 let mut items = store.list_items(&id)?;
                 if vaultos_core::model::is_agent(&cx.actor) {
@@ -445,7 +504,7 @@ fn route(
             }
             ("POST", None) => return cx.write_secret(store, &id, &fields_from(body)?),
             ("DELETE", Some(k)) if !k.is_empty() => {
-                cx.scope("delete:own")?;
+                cx.scope_in("delete:own", &id)?;
                 let key = store.delete_item(&id, &decode(k)?, &cx.actor)?;
                 return Ok(json!({ "ok": true, "key": key }));
             }
@@ -472,8 +531,7 @@ fn key_list(body: &Map<String, Value>) -> Result<Option<Vec<String>>> {
 /// caller (the MCP bridge or `vaultos-agent run`) starts in the given folder with its
 /// output masked. Recorded with the matching allowed command, not the full arguments.
 fn run_env(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
-    cx.scope("run")?;
-    let (id, _) = cx.project(store, body.get("project").and_then(Value::as_str))?;
+    let (id, _) = cx.project_for(store, body.get("project").and_then(Value::as_str), "run")?;
     let argv: Vec<String> = body
         .get("command")
         .and_then(Value::as_array)
@@ -500,8 +558,7 @@ fn run_env(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result
 }
 
 fn inject(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
-    cx.scope("inject")?;
-    let (id, _) = cx.project(store, body.get("project").and_then(Value::as_str))?;
+    let (id, _) = cx.project_for(store, body.get("project").and_then(Value::as_str), "inject")?;
     let keys = key_list(body)?;
     let merge = match body.get("merge") {
         None => true,

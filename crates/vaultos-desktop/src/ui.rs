@@ -561,13 +561,14 @@ pub async fn choose_folder(app: &AppHandle) -> Result<Value, String> {
     Ok(json!(real.to_string_lossy()))
 }
 
-/// The SSH agent's confirmation where Touch ID is not available: the app's own dialog, as
-/// ssh-askpass asks for `ssh-add -c` keys. Blocks; never call it on the main thread.
-pub fn ask_allow(app: &AppHandle, reason: &str) -> bool {
+/// The SSH agent's and access requests' confirmation where Touch ID is not available: the
+/// app's own dialog, as ssh-askpass asks for `ssh-add -c` keys. Blocks; never call it on
+/// the main thread.
+pub fn ask_allow(app: &AppHandle, title: &str, reason: &str) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     app.dialog()
         .message(format!("VaultOS is trying to {reason}."))
-        .title("Allow this signature?")
+        .title(title)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Allow".into(),

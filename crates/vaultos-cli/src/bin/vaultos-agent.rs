@@ -40,6 +40,21 @@ enum Command {
     Status,
     /// This agent's identity and grants
     Whoami,
+    /// Ask the human for temporary scopes on one project; they confirm in the app
+    RequestAccess {
+        #[arg(long)]
+        project: String,
+        /// A scope to ask for (repeatable): read, add, edit:own, edit:delegated, delete:own,
+        /// inject, run or reveal
+        #[arg(long = "scope", required = true)]
+        scopes: Vec<String>,
+        /// 1 to 60 (default 15)
+        #[arg(long)]
+        minutes: Option<u64>,
+        /// What the access is for, shown to the human
+        #[arg(long)]
+        reason: String,
+    },
     /// Approved projects
     Projects,
     /// Key names and metadata
@@ -112,6 +127,15 @@ fn run(command: Command, client: &Client) -> Result<()> {
     match command {
         Command::Status => emit(&client.status()),
         Command::Whoami => emit(&get("/whoami")?),
+        Command::RequestAccess {
+            project,
+            scopes,
+            minutes,
+            reason,
+        } => {
+            let body = json!({ "project": project, "scopes": scopes, "minutes": minutes, "reason": reason });
+            emit(&client.request("POST", "/access/request", Some(&body))?)
+        }
         Command::Projects => emit(&get("/projects")?),
         Command::Keys { project } => emit(&get(&format!("/projects/{}/secrets", enc(&project)))?),
         Command::Search { text } => emit(&get(&format!("/search?q={}", enc(&text.join(" "))))?),

@@ -168,16 +168,30 @@ impl App {
             h.stop_ssh_agent();
             return;
         }
+        if let Err(e) = h.start_ssh_agent(self.ask_human("Allow this signature?")) {
+            *error = e.to_string();
+        }
+    }
+
+    /// Touch ID, or this app's dialog (titled `title`) where Touch ID is not available.
+    fn ask_human(&self, title: &'static str) -> Confirm {
         let tauri = self.tauri.get().cloned();
-        let confirm = Confirm(Arc::new(move |reason: &str| {
+        Confirm(Arc::new(move |reason: &str| {
             if platform::touch_id_available() {
                 return Some(platform::touch_id_prompt(reason));
             }
-            tauri.as_ref().map(|t| crate::ui::ask_allow(t, reason))
-        }));
-        if let Err(e) = h.start_ssh_agent(confirm) {
-            *error = e.to_string();
-        }
+            tauri
+                .as_ref()
+                .map(|t| crate::ui::ask_allow(t, title, reason))
+        }))
+    }
+
+    pub fn access_grants(&self) -> Vec<vaultos_daemon::access::Grant> {
+        self.handle().map(|h| h.access_grants()).unwrap_or_default()
+    }
+
+    pub fn end_access(&self, agent_id: &str) -> usize {
+        self.handle().map_or(0, |h| h.end_access(agent_id, None))
     }
 
     pub fn ssh_socket(&self) -> Option<PathBuf> {
@@ -426,6 +440,7 @@ impl App {
         match ready_rx.await {
             Ok(h) => {
                 *lock(&self.server) = Some((id, h.clone()));
+                h.set_access_confirm(Some(self.ask_human("Allow this agent's access?")));
                 self.apply_ssh_agent();
                 Ok(h)
             }
