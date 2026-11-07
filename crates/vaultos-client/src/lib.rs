@@ -1,4 +1,4 @@
-//! Talking to `vaultosd`, ported from `agent-client.js`: find the daemon through
+//! Talking to the vault's owner (`vaultosd`, or the app serving it): find it through
 //! `daemon.json`, discover this agent's token, and turn the daemon's replies into errors an
 //! agent can act on (locked, not running, no token, refused). Used by `vaultos-agent`, the
 //! MCP bridge and the human CLI.
@@ -277,7 +277,7 @@ impl Client {
         Err(ClientError::new(Code::NotRunning, messages::NOT_RUNNING))
     }
 
-    /// `agent-client.js` `status`: whether the daemon runs and is unlocked, never an error.
+    /// `status`: whether the owner runs and is unlocked, never an error.
     pub fn status(&self) -> Value {
         let (_, st) = match self.ensure_up() {
             Ok(up) => up,

@@ -1,4 +1,5 @@
-//! Upgrading a vault written by the JavaScript app (`scripts/make-rust-fixtures.mjs`).
+//! Upgrading a vault written by the 0.2 JavaScript app (fixtures in `tests/fixtures`,
+//! recorded from it).
 
 #![allow(clippy::unwrap_used, reason = "test helpers")]
 

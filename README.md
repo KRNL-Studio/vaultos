@@ -27,15 +27,15 @@ Injection reduces accidental disclosure in tool transcripts. **It does not stop 
 2. In the download folder, run `shasum -a 256 -c <download-name>.zip.sha256` and confirm `OK`. This checks file integrity; it does not authenticate a publisher independently of GitHub.
 3. Extract **VaultOS.app** and put it in a folder of your choice. It can coexist with other vault applications.
 4. Try opening it. If macOS blocks the unidentified developer, follow Apple's [per-app Open Anyway instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**, only after you have verified and decided to trust the download. Managed Macs may disallow this. Do not disable Gatekeeper globally.
-5. Create a new vault using a unique passphrase of at least 12 characters. There is no password reset or recovery service.
+5. Create a new vault using a unique passphrase of at least 12 characters. Optionally add a Secret Key, which the device keeps and a stolen vault file cannot be opened without. There is no password reset or recovery service.
 
-The desktop download includes its runtime. Node.js is needed only for source development, the MCP bridge, and the recovery CLI. Git and age are needed only for optional sync.
+The app is a small native program (Rust, with the system's own web view for its pages). The MCP bridge (`vaultos-mcp`), the agent shell client (`vaultos-agent`), the recovery CLI (`vaultos`) and the headless owner (`vaultosd`) ship inside it, in `VaultOS.app/Contents/Helpers`. Git is needed only for optional sync. A vault from VaultOS 0.2 opens only to be upgraded, when you choose **Upgrade this vault**; read [Upgrading from 0.2](docs/RECOVERY.md#upgrading-from-02) first.
 
 ### First five minutes
 
 Create an **Example App** project and add a disposable credential. In **Settings → Agents**, enroll your coding tool with `read` and `inject`, select that project, and approve its project folder. Save the one-time token in a private file and follow [MCP setup](docs/AGENTS.md). Ask the agent to inject the chosen key into that folder's `.env`; check the application works without asking it to print the file.
 
-Use **Lock** when finished. While the desktop is running, Lock, system sleep, screen lock, or 15 minutes without a privileged desktop action stop the local API and clear the decrypted application state. Closing the window locks the vault the same way. On macOS VaultOS then stays in the menu bar, locked, until you reopen it, unlock Quick Access, or choose **Quit VaultOS**; turn the menu bar item off in **Settings** to quit when the window closes. If you explicitly enabled background Keychain access, the bridge can start a separate backend after the window closes. Manual lock blocks that until a human unlocks again. The separate headless backend does not monitor screen-lock events; disable background access or use Lock before closing if you need that boundary. Optional opt-in settings change this posture: a soft lock policy keeps agents served while the Mac is locked, an always-on service ([`scripts/install-service-macos.sh`](scripts/install-service-macos.sh)) takes over whenever the window is closed, autosync keeps [Git sync](docs/SYNC.md) running in the background, and on Macs with Touch ID (with background access on) **Settings → Touch ID** can unlock the window and confirm reveals, exports, approvals and agent changes with a fingerprint, falling back to the master password. Read [SECURITY.md](SECURITY.md) before enabling them.
+Use **Lock** when finished. While the desktop is running, Lock, system sleep, screen lock, or 15 minutes without a privileged desktop action stop the local API and clear the decrypted application state. Closing the window locks the vault the same way. On macOS VaultOS then stays in the menu bar, locked, until you reopen it, unlock Quick Access, or choose **Quit VaultOS**; turn the menu bar item off in **Settings** to quit when the window closes. Optional opt-in settings change this posture: background access with the always-on service ([background access](docs/AGENTS.md#background-access)) keeps agents served after the window closes, until a Lock, screen lock, sleep or idle lock blocks it; a soft lock policy keeps agents served while the Mac is locked; autosync keeps [Git sync](docs/SYNC.md) running in the background, and on Macs with Touch ID (with background access on) **Settings → Touch ID** can unlock the window and confirm reveals, exports, approvals and agent changes with a fingerprint, falling back to the master password. Read [SECURITY.md](SECURITY.md) before enabling them.
 
 ### Menu bar and Quick Access
 
@@ -43,44 +43,40 @@ The menu bar item shows whether the vault is locked, how many agent records awai
 
 ## Install on Linux
 
-Linux support is a source-built preview: no Linux release artifact is published, and the tested desktop target remains macOS. On an x64 or arm64 desktop with Node.js 22+, from a checkout:
+Linux support is a preview with less testing than macOS. The app needs the system's WebKitGTK 4.1 and, for the tray icon, libayatana-appindicator3. Releases include an x64 tarball; from a source checkout, install it with `scripts/install-linux.sh --from <download-name>.tar.gz`, which checks the `.sha256` beside it. To build instead (x64 or arm64, this machine's architecture), install Rust, Node.js 22+ and, on Debian/Ubuntu, `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev`:
 
 ```sh
-npm ci
-npm run dist:linux          # this machine's architecture; VAULTOS_ARCH=x64|arm64 overrides
+npm run dist:linux          # dist/vaultos-preview-linux-<arch> and a tar.gz
 scripts/install-linux.sh    # installs to ~/.local/opt/vaultos-preview (--prefix to change)
 ```
 
-The installer adds an app-menu entry and a launcher and does not use root. If the kernel restricts unprivileged user namespaces (Ubuntu 24.04+), Chromium's sandbox needs a root-owned setuid `chrome-sandbox`: the installer prints the exact `sudo` command, or runs it with `--harden`. Until then the launcher starts the app with `--no-sandbox` and says so on stderr.
-
-Optional password remembering uses the Secret Service through `secret-tool` (package `libsecret-tools` on Debian/Ubuntu, `libsecret` on Fedora) and a running keyring such as GNOME Keyring. Without them, background access is unavailable; there is no plaintext fallback. `--enable-service` also installs and starts a systemd user unit for this checkout's headless backend. It is never enabled by default and still unlocks only after you enable background access in Settings. Electron does not report screen-lock events on Linux, so screen lock does not lock the vault there; use **Lock**.
+The installer adds an app-menu entry and does not use root. Optional password remembering uses the Secret Service through `secret-tool` (package `libsecret-tools` on Debian/Ubuntu, `libsecret` on Fedora) and a running keyring such as GNOME Keyring. Without them, background access is unavailable; there is no plaintext fallback. `--enable-service` also installs and starts a systemd user unit that runs the installed app as the background service. It is never enabled by default and still unlocks only after you enable background access in Settings. Screen lock is read from logind, which most screen lockers update.
 
 ## Storage and recovery
 
 Preview data lives in `~/Library/Application Support/VaultOS-Preview` on macOS and `~/.config/VaultOS-Preview` (or `$XDG_CONFIG_HOME/VaultOS-Preview`) on Linux, with a separate `org.vaultos.preview` Keychain or Secret Service namespace. It does not automatically import older applications' data, tokens, sync repositories, or Keychain entries. `VAULTOS_DATA_DIR` can select an **absolute, new directory** for testing.
 
-Back up `vault.enc` and remember its password. Optional sync has separate machine keys and trust state. Read [backup, recovery, migration, and uninstall](docs/RECOVERY.md) before using real credentials.
+Back up with `vaultos backup` (or copy `vault.enc`) and keep its password, and its Secret Key if it has one. Sync keys are inside the vault; the sync index beside it is part of the backup. Read [backup, recovery, migration, and uninstall](docs/RECOVERY.md) before using real credentials.
 
 ## Run from source
 
-Use Node.js 22 or later, npm, and macOS command-line developer tools for the native helper:
+Install Rust with rustup (it fetches the toolchain pinned in `rust-toolchain.toml`), Node.js 22+ for the build and test scripts, and on macOS the command-line developer tools:
 
 ```sh
 git clone https://github.com/rohit3a/vaultos.git
 cd vaultos
-npm ci
-npm run build:native
-npm start
+npm start                # a debug build of the desktop
 ```
 
-The desktop release targets macOS; Linux builds come from `npm run dist:linux` (see above). Core tests run on both. To include the optional sync tests, install `age` (`brew install age` on macOS, or your distribution's package). Tests use temporary synthetic vaults.
+Tests use temporary synthetic vaults.
 
 ```sh
+cargo test --workspace
 npm run check
-npm run test:ui          # macOS with an interactive desktop
-npm run dist:mac         # unsigned preview for this Mac's architecture
+npm run test:desktop     # macOS with an interactive desktop
+npm run dist:mac         # unsigned app for this Mac's architecture
 VAULTOS_ARCH=x64 npm run dist:mac
-npm run dist:linux       # unsigned Linux tar.gz; also cross-builds on macOS
+npm run dist:linux       # unsigned Linux tar.gz, on Linux for its own architecture
 ```
 
 See [development and release instructions](CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), and [optional sync](docs/SYNC.md).
@@ -88,8 +84,9 @@ See [development and release instructions](CONTRIBUTING.md), [architecture](docs
 ## Give your agent the instructions
 
 Point an agent at [AGENTS.md](AGENTS.md) or ask it to read
-[skills/vaultos/SKILL.md](skills/vaultos/SKILL.md). The skill covers macOS installation,
-MCP connection, grants, daily secret operations, updates, backups, and troubleshooting.
+[skills/vaultos/SKILL.md](skills/vaultos/SKILL.md). The skill covers macOS and Linux
+installation, MCP connection, grants, daily secret operations, updates,
+backups, and troubleshooting.
 For clients supporting Agent Skills, install the complete `skills/vaultos/` folder
 using the client's skill installation mechanism; keep its `references/` directory.
 Clients supporting named skill invocation can then use `$vaultos`.

@@ -47,7 +47,7 @@ const code = await new Promise(resolve => {
     const timer = setTimeout(() => {
         console.error("Desktop flow timed out.");
         child.kill("SIGTERM");
-    }, 180000);
+    }, 600000);
     let rest = "";
     const other = [];
     child.stderr.on("data", chunk => {

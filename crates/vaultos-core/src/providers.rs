@@ -1,6 +1,5 @@
-//! Guesses a provider from a key name, as `providers.js` `match()` does. The table is
-//! `providers.json`, exported from `providers.js`; `test/rust-providers.test.js` keeps the two
-//! in step.
+//! Guesses a provider from a key name. The table is `providers.json`: the ids and key names
+//! of the desktop's provider list, which a desktop test keeps in step.
 
 use serde::Deserialize;
 use std::sync::OnceLock;

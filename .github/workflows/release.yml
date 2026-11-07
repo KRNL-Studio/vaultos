@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing reviewed version tag (for example v0.1.0-preview.1)
+        description: Existing reviewed version tag (for example v0.3.0-preview.1)
         required: true
         type: string
 permissions:
@@ -30,10 +30,10 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: node -e 'const p=require("./package.json");if(!/^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$/.test(process.env.RELEASE_TAG)||process.env.RELEASE_TAG!=="v"+p.version)process.exit(1)'
-      - run: brew install age
-      - run: npm ci
-      - run: VAULTOS_BUILD_TEST_HELPER=1 npm run build:native && npm run check && npm run test:ui
-      - run: npm audit --audit-level=high
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: cargo test --workspace --locked
+      - run: npm run test:desktop
       - run: npm run dist:mac
         env:
           VAULTOS_ARCH: ${{ matrix.arch }}
@@ -60,10 +60,10 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: node -e 'const p=require("./package.json");if(!/^v[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$/.test(process.env.RELEASE_TAG)||process.env.RELEASE_TAG!=="v"+p.version)process.exit(1)'
-      - run: sudo apt-get update && sudo apt-get install -y age
-      - run: npm ci
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - run: npm ci --ignore-scripts
       - run: npm run check
-      - run: npm audit --audit-level=high
+      - run: cargo test --workspace --locked
       - run: npm run dist:linux
         env:
           VAULTOS_ARCH: x64

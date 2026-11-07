@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
@@ -489,7 +489,7 @@ pub fn app_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         let file = SubmenuBuilder::new(app, "File")
             .item(&quick)
             .separator()
-            .item(&PredefinedMenuItem::close_window(app, None)?)
+            .close_window()
             .build()?;
         let window = SubmenuBuilder::new(app, "Window")
             .minimize()

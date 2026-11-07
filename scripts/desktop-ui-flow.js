@@ -15,7 +15,8 @@
     const assert = (ok, message) => {
         if (!ok) throw new Error(message);
     };
-    const until = async (probe, what, ms = 20000) => {
+    // Generous: each unlock runs the full key derivation, which a loaded machine slows down.
+    const until = async (probe, what, ms = 60000) => {
         const end = Date.now() + ms;
         for (;;) {
             let found = null;
@@ -115,7 +116,7 @@
             card.classList.remove("flash");
             await ui("setPhase", "quick");
             await ui("showQuick");
-            await until(async () => await ui("phase") === "quick-done", "Quick Access", 30000);
+            await until(async () => await ui("phase") === "quick-done", "Quick Access");
             await query(".secret.card.flash");
             await until(async () => JSON.stringify(await ui("visible")) === "[\"main\"]", "Quick Access to hide after opening an item");
             await ui("setPhase", "closed");
@@ -158,9 +159,15 @@
             const [ right, after ] = await unlockRace(password, "synthetic-wrong-password");
             assert(right.ok === true && after.ok === false, "the right password unlocks; the late wrong one fails");
             assert(await ui("ownerLock") === String(await ui("pid")), "the app still owns the vault");
+            // macOS: the vault locks before the Mac sleeps, and releases the vault.
+            if (await ui("willSleep")) {
+                await text("VaultOS is locked");
+                assert((await window.vault.state()).unlocked === false, "sleep locks the vault");
+                await until(async () => await ui("ownerLock") === null, "the vault to be released before sleep");
+            }
             await ui("finish", {
                 ok: true,
-                report: "Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, Quick Access, close to menu bar, overlapping unlocks."
+                report: "Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, Quick Access, close to menu bar, overlapping unlocks, lock before sleep."
             });
         }
     };

@@ -1,5 +1,5 @@
-//! The VaultOS MCP bridge over stdio: the agent tools of `mcp/server.mjs`, with the same
-//! names, descriptions and input schemas (`tools.json`). It keeps no vault state. Each call
+//! The VaultOS MCP bridge over stdio: the agent tools, with their names, descriptions and
+//! input schemas in `tools.json`. It keeps no vault state. Each call
 //! is one request to the daemon, which enforces the agent's scopes, project and folder
 //! grants and approvals. Only `reveal_secret` returns a value, and only with the reveal
 //! scope.
@@ -41,7 +41,7 @@ fn bridge_version() -> Value {
     json!({ "version": VERSION, "sha256": hash })
 }
 
-/// JavaScript truthiness, for the defaults `server.mjs` applies with `||`.
+/// JavaScript truthiness, for the defaults the 0.2 Node bridge applied with `||`.
 fn truthy(v: Option<&Value>) -> Option<&Value> {
     v.filter(|v| match v {
         Value::Null => false,
@@ -174,6 +174,24 @@ impl ServerHandler for Bridge {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> ExitCode {
     vaultos_core::hardening::harden_process();
+    let say = |text: String| {
+        use std::io::Write;
+        match writeln!(std::io::stdout().lock(), "{text}") {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        }
+    };
+    match std::env::args().nth(1).as_deref() {
+        None => {}
+        Some("--version" | "-V") => return say(format!("vaultos-mcp {VERSION}")),
+        Some("--help" | "-h") => {
+            return say("vaultos-mcp: the VaultOS MCP bridge over stdio. Run it from an MCP client; it takes no arguments. See docs/AGENTS.md.".into());
+        }
+        Some(other) => {
+            eprintln!("vault-os-mcp: unexpected argument {other}; it takes none (try --help)");
+            return ExitCode::from(2);
+        }
+    }
     let data_dir = match vaultos_core::paths::default_data_dir() {
         Ok(d) => d,
         Err(e) => {

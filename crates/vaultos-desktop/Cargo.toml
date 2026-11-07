@@ -32,7 +32,7 @@ cbc = { version = "0.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
-tauri = { version = "2.11", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri = { version = "2.11", features = ["custom-protocol", "tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2.3"
 tauri-plugin-notification = "2"

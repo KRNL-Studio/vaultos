@@ -1,5 +1,6 @@
-//! VaultOS desktop: a Tauri v2 shell over the Rust core. It reuses the HTML/JS renderer and
-//! serves the agent API in-process while the vault is unlocked. See `docs/ARCHITECTURE.md`.
+//! VaultOS desktop: a Tauri v2 shell over the Rust core around the pages in `renderer/`. It
+//! serves the agent API in-process while the vault is unlocked, and with `--service` runs
+//! without windows as the background owner. See `docs/ARCHITECTURE.md`.
 
 mod app;
 mod commands;
@@ -9,6 +10,7 @@ mod login;
 mod platform;
 mod prefs;
 mod search;
+mod service;
 mod settings;
 mod ui;
 #[cfg(feature = "ui-test")]
@@ -45,6 +47,14 @@ fn main() {
     if let Err(e) = vaultos_core::fs_safe::private_dir(&dir) {
         eprintln!("VaultOS: {e}");
         std::process::exit(2);
+    }
+    #[cfg(feature = "ui-test")]
+    if let Some(code) = uitest::keyring_flag(&dir) {
+        std::process::exit(code);
+    }
+    // Background access for a login service: no window, no toolkit.
+    if std::env::args().any(|a| a == "--service") {
+        std::process::exit(service::run(dir));
     }
     let hidden = std::env::args().any(|a| a == "--hidden");
     let state = Arc::new(App::new(dir));
@@ -89,6 +99,8 @@ fn main() {
             } else {
                 ui::main_window(app.handle())?;
             }
+            let s = state.clone();
+            platform::on_sleep(move || s.auto_lock());
             ui::watch(app.handle().clone());
             signals(app.handle().clone());
             Ok(())

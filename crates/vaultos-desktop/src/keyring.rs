@@ -11,6 +11,7 @@ use vaultos_core::SecretString;
 pub const PASSWORD: &str = "master-password";
 pub const SECRET_KEY: &str = "secret-key";
 
+#[cfg(target_os = "macos")]
 const DETAIL: &str = "Remembering the password is optional. No plaintext fallback is used.";
 
 #[derive(Debug)]
@@ -62,6 +63,21 @@ impl Keyring {
             let _ = imp::delete(&self.service, account);
         }
     }
+
+    /// What background access unlocks with: the remembered password, and the Secret Key
+    /// when the vault has one. `None` when background access is off.
+    pub fn remembered(&self) -> Option<Remembered> {
+        Some(Remembered {
+            password: self.get(PASSWORD)?,
+            secret_key: self.get(SECRET_KEY),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct Remembered {
+    pub password: SecretString,
+    pub secret_key: Option<SecretString>,
 }
 
 #[cfg(target_os = "macos")]

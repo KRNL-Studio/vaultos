@@ -31,6 +31,35 @@ pub fn script() -> Option<&'static str> {
         .as_deref()
 }
 
+/// `--ui-test-remember` (password on stdin) and `--ui-test-forget`: what turning background
+/// access on and off does to the keychain, done by this program so that the service test
+/// reads an item this program wrote, as it does for the human.
+pub fn keyring_flag(data_dir: &std::path::Path) -> Option<i32> {
+    use crate::keyring::{Keyring, PASSWORD, SECRET_KEY};
+    let keyring = Keyring::new(data_dir);
+    if std::env::args().any(|a| a == "--ui-test-remember") {
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return Some(1);
+        }
+        let password =
+            vaultos_core::SecretString::new(line.trim_end_matches(['\r', '\n']).to_owned());
+        return Some(match keyring.set(PASSWORD, &password) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("ui-test: {e}");
+                1
+            }
+        });
+    }
+    if std::env::args().any(|a| a == "--ui-test-forget") {
+        keyring.clear(PASSWORD);
+        keyring.clear(SECRET_KEY);
+        return Some(0);
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn ui_test(
     app: AppHandle,
@@ -67,6 +96,11 @@ pub async fn ui_test(
         "reopen" => {
             ui::show_main(&app, None);
             Ok(Value::Null)
+        }
+        "willSleep" => {
+            #[cfg(target_os = "macos")]
+            crate::platform::mac::post_will_sleep();
+            Ok(json!(cfg!(target_os = "macos")))
         }
         "log" => {
             eprintln!("ui-test: {}", arg.as_str().unwrap_or_default());

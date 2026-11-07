@@ -12,17 +12,20 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for build and release commands and
 [SECURITY.md](SECURITY.md) before changing authorization, persistence, encryption,
 or sync. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries.
 
-- Use Node.js 22+. Install locked dependencies with `npm ci`.
-- Run `npm run check` for code changes. Sync tests require `age`. On macOS,
-  compile the isolated test helper with
-  `VAULTOS_BUILD_TEST_HELPER=1 npm run build:native` before native tests.
+- Use the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it) and
+  Node.js 22+ for the scripts. Build with `--locked`.
+- For code changes run `cargo fmt --all --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace` and `npm run check`. On
+  macOS with an interactive desktop, `npm run test:desktop` runs the desktop flow
+  and service mode.
 - Manual app tests must use a new absolute `VAULTOS_DATA_DIR` and synthetic
   credentials. Never test against an existing user's vault, tokens, or Keychain
   items. UI tests require an interactive macOS desktop; Linux core tests do not
   establish macOS packaging or runtime compatibility.
 - Preserve the `VaultOS-Preview` data directory and `org.vaultos.preview`
   namespaces. Do not add automatic migration or enable background access by
-  default. Enforce agent permissions in the API/main process.
+  default. Enforce agent permissions in the owner's API and the desktop's Rust
+  command handlers, never only in the pages.
 - Keep secret values, live vault files, tokens, private machine paths, and
   personal configuration out of commits, test fixtures, logs, and screenshots.
 - When changing tools or setup, update the portable skill references and

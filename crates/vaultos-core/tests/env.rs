@@ -1,5 +1,5 @@
-//! The .env parser against the `dotenv` package itself: `tests/fixtures/dotenv-cases.json`
-//! holds inputs and what `dotenv.parse` returned (`scripts/make-dotenv-fixture.mjs`).
+//! The .env parser against the `dotenv` package: `tests/fixtures/dotenv-cases.json` holds
+//! inputs and what `dotenv.parse` returned for them (recorded with dotenv 18).
 
 #![allow(clippy::unwrap_used, reason = "test")]
 

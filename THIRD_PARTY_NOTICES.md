@@ -2,7 +2,6 @@
 
 VaultOS source and its original artwork are MIT licensed. Provider names identify supported credential categories; they do not imply endorsement. Third-party provider logo artwork is not bundled.
 
-- **Electron / Chromium / Node.js**: retain the runtime's accompanying `Contents/Resources/LICENSE.electron` and `Contents/Resources/LICENSES.chromium.html` in packaged distributions. Electron uses MIT and includes components with their respective licenses.
-- **PDFKit**, **dotenv**, and **Model Context Protocol TypeScript SDK**: MIT licensed. Production dependencies and transitive packages retain their license files under the packaged `node_modules`; exact versions and integrity hashes are in `package-lock.json`.
+The programs are built from Rust crates published on crates.io, including Tauri, tokio, hyper, rmcp, age, the RustCrypto crates, serde and clap. Each keeps its own licence, almost all MIT or Apache-2.0. `deny.toml` lists every licence the build accepts and the few crates under MPL-2.0 (cssparser, cssparser-macros, dtoa-short, selectors, option-ext) or BSL-1.0; `cargo deny check licenses` verifies it. Exact versions and checksums are in `Cargo.lock`, and each release attaches a CycloneDX inventory of the crates compiled into the shipped programs. The inventory is not a vulnerability-free certification.
 
-The release includes an npm CycloneDX dependency inventory. This is an inventory, not a vulnerability-free certification. Development/build tools retain their own licenses in their installed packages and are excluded from the application's production dependency tree. age and Git are optional external executables installed separately by the user.
+The app's pages run in the operating system's own web view (WKWebView on macOS, WebKitGTK on Linux), which is not bundled. Git is an optional external program installed separately by the user.

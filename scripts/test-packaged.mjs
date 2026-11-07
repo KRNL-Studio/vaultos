@@ -1,101 +1,74 @@
-import { spawn } from "node:child_process";
-
-import { mkdtempSync, rmSync, realpathSync } from "node:fs";
-
+// Smoke-tests a packaged VaultOS.app against a temporary vault with synthetic values: the
+// signature, the bundled tools and their start-up time, a CLI round trip through the bundled
+// vaultosd, and the desktop app starting and quitting cleanly.
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-
 import path from "node:path";
-
-import net from "node:net";
-
 import assert from "node:assert/strict";
+import { TOOLS } from "./rust-dist.mjs";
 
-import { chromium } from "playwright";
-
+const app = path.resolve(process.env.VAULTOS_TEST_APP || `dist/VaultOS-darwin-${process.arch}/VaultOS.app`);
+const bin = path.join(app, "Contents", "Helpers");
 const dir = mkdtempSync(path.join(realpathSync(tmpdir()), "vaultos-package-test-"));
-
-const listener = net.createServer();
-
-await new Promise(r => listener.listen(0, "127.0.0.1", r));
-
-const port = listener.address().port;
-
-await new Promise(r => listener.close(r));
-
-const executable = path.resolve(process.env.VAULTOS_TEST_APP || `dist/VaultOS-darwin-${process.arch}/VaultOS.app/Contents/MacOS/VaultOS`);
-
-const child = spawn(executable, [ `--remote-debugging-port=${port}` ], {
-    env: {
-        ...process.env,
-        VAULTOS_DATA_DIR: path.join(dir, "data")
-    },
-    stdio: "ignore"
-});
-
-let browser;
+const env = {
+    ...process.env,
+    VAULTOS_DATA_DIR: path.join(dir, "data")
+};
+const password = "synthetic-packaged-password\n";
+const run = (tool, args, input) => {
+    const r = spawnSync(path.join(bin, tool), args, {
+        env: env,
+        input: input,
+        encoding: "utf8",
+        timeout: 120000
+    });
+    assert.equal(r.status, 0, `${tool} ${args.join(" ")} failed: ${r.stderr}`);
+    return r.stdout;
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 try {
-    let up = false;
-    for (let i = 0; i < 100; i++) {
-        if (child.exitCode !== null) throw new Error("Packaged app exited before opening");
-        try {
-            const r = await fetch(`http://127.0.0.1:${port}/json/version`);
-            if (r.ok) {
-                up = true;
-                break;
-            }
-        } catch {}
-        await new Promise(r => setTimeout(r, 100));
+    execFileSync("/usr/bin/codesign", [ "--verify", "--deep", "--strict", app ]);
+    // Speed budget: a warm start of each tool, as an agent's shell or MCP client sees it.
+    for (const tool of TOOLS) {
+        run(tool, [ "--version" ]);
+        const t = performance.now();
+        run(tool, [ "--version" ]);
+        const ms = performance.now() - t;
+        console.log(`${tool} --version: ${ms.toFixed(0)} ms`);
+        assert(ms < 250, `${tool} starts too slowly`);
     }
-    assert(up, "Packaged app debugging transport timed out");
-    browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
-    const context = browser.contexts()[0];
-    let page;
-    for (let i = 0; i < 50; i++) {
-        page = context.pages().find(p => p.url().startsWith("vaultos-preview:"));
-        if (page) break;
-        await new Promise(r => setTimeout(r, 100));
+    run("vaultos", [ "--password-stdin", "init" ], password);
+    run("vaultos", [ "start" ]);
+    try {
+        run("vaultos", [ "--password-stdin", "unlock" ], password);
+        assert.equal(JSON.parse(run("vaultos", [ "status" ])).unlocked, true, "the bundled vaultosd unlocks");
+    } finally {
+        run("vaultos", [ "stop" ]);
     }
-    assert(page);
-    await page.getByText("Set up your vault", {
-        exact: true
-    }).waitFor();
-    await page.getByPlaceholder("Master password", {
-        exact: true
-    }).fill("synthetic-packaged-password");
-    await page.getByPlaceholder("Confirm password").fill("synthetic-packaged-password");
-    await page.getByRole("button", {
-        name: "Create vault",
-        exact: true
-    }).click();
-    await page.getByRole("button", {
-        name: "New project"
-    }).waitFor();
-    const settings = await page.evaluate(() => window.vault.getSettings());
-    assert(settings.keyring.secure, "Packaged native Keychain helper missing");
-    await page.getByRole("button", {
-        name: "Lock",
-        exact: true
-    }).click();
-    await page.getByRole("button", {
-        name: "Unlock",
-        exact: true
-    }).waitFor();
-    assert(await page.evaluate(async () => {
-        try {
-            await window.vault.projects();
-            return false;
-        } catch {
-            return true;
-        }
-    }));
-    console.log("Packaged app passed setup, native-helper discovery and enforced lock using synthetic data.");
+
+    const child = spawn(path.join(app, "Contents", "MacOS", "VaultOS"), [], {
+        env: env,
+        stdio: "ignore"
+    });
+    const exited = new Promise(r => child.once("exit", (code, signal) => r({
+        code: code,
+        signal: signal
+    })));
+    await sleep(3000);
+    assert.equal(child.exitCode, null, "the desktop app keeps running");
+    const rss = Number(execFileSync("/bin/ps", [ "-o", "rss=", "-p", String(child.pid) ], {
+        encoding: "utf8"
+    }).trim()) / 1024;
+    console.log(`VaultOS resident memory after start: ${rss.toFixed(0)} MiB`);
+    assert(rss < 120, "the desktop app uses too much memory at start");
+    child.kill("SIGTERM");
+    const done = await Promise.race([ exited, sleep(10000).then(() => null) ]);
+    assert(done, "the desktop app quits on SIGTERM");
+    assert.equal(done.code, 0, "the desktop app quits cleanly");
+    console.log("Packaged app passed: signature, bundled tools, CLI round trip through vaultosd, desktop start and clean quit.");
 } finally {
-    if (browser) await browser.close();
-    if (child.exitCode === null) {
-        child.kill("SIGTERM");
-        await new Promise(r => child.once("exit", r));
-    }
     rmSync(dir, {
         recursive: true,
         force: true

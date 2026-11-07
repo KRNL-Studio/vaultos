@@ -9,17 +9,25 @@ use vaultos_core::crypto::sha256;
 #[derive(Debug)]
 enum Copied {
     /// macOS: the pasteboard's change count right after our write.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Change(isize),
     /// Elsewhere: a digest of the text.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Digest([u8; 32]),
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Clipboard {
     copied: Mutex<Option<Copied>>,
     #[cfg(not(target_os = "macos"))]
     board: Mutex<Option<arboard::Clipboard>>,
+}
+
+/// Never prints what was copied.
+impl std::fmt::Debug for Clipboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Clipboard").finish_non_exhaustive()
+    }
 }
 
 impl Clipboard {
@@ -121,6 +129,15 @@ pub fn touch_id_prompt(reason: &str) -> bool {
     }
 }
 
+/// Runs `f` just before the Mac sleeps or switches to another user. Elsewhere the watch loop
+/// notices a sleep from the clock after waking.
+pub fn on_sleep(f: impl Fn() + Send + Sync + 'static) {
+    #[cfg(target_os = "macos")]
+    mac::on_sleep(f);
+    #[cfg(not(target_os = "macos"))]
+    let _ = f;
+}
+
 /// Whether the login session's screen is locked; `None` when that cannot be told.
 pub fn screen_locked() -> Option<bool> {
     #[cfg(target_os = "macos")]
@@ -130,7 +147,7 @@ pub fn screen_locked() -> Option<bool> {
 }
 
 #[cfg(target_os = "macos")]
-mod mac {
+pub(crate) mod mac {
     use block2::RcBlock;
     use core_foundation::base::TCFType;
     use core_foundation::boolean::CFBoolean;
@@ -140,10 +157,12 @@ mod mac {
     use objc2::runtime::{Bool, ProtocolObject};
     use objc2_app_kit::{
         NSPasteboard, NSPasteboardContentsOptions, NSPasteboardItem, NSPasteboardTypeString,
-        NSPasteboardWriting,
+        NSPasteboardWriting, NSWorkspace, NSWorkspaceSessionDidResignActiveNotification,
+        NSWorkspaceWillSleepNotification,
     };
-    use objc2_foundation::{NSArray, NSData, NSError, NSString};
+    use objc2_foundation::{NSArray, NSData, NSError, NSNotification, NSString};
     use objc2_local_authentication::{LAContext, LAPolicy};
+    use std::ptr::NonNull;
 
     const POLICY: LAPolicy = LAPolicy::DeviceOwnerAuthenticationWithBiometrics;
 
@@ -245,6 +264,37 @@ mod mac {
             .and_then(|v| v.downcast::<CFBoolean>())
             .is_some_and(bool::from);
         Some(locked)
+    }
+
+    pub fn on_sleep(f: impl Fn() + Send + Sync + 'static) {
+        let f = std::sync::Arc::new(f);
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: AppKit's notification names are immutable statics.
+        let names = unsafe {
+            [
+                NSWorkspaceWillSleepNotification,
+                NSWorkspaceSessionDidResignActiveNotification,
+            ]
+        };
+        for name in names {
+            let f = f.clone();
+            let block = RcBlock::new(move |_: NonNull<NSNotification>| f());
+            // SAFETY: no sender filter and no queue, so the block runs on the posting thread
+            // (the main thread); it holds only a Send + Sync closure. The observer stays for
+            // the app's lifetime.
+            let token = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+            };
+            std::mem::forget(token);
+        }
+    }
+
+    /// What macOS posts before sleeping, for the UI test.
+    #[cfg(feature = "ui-test")]
+    pub fn post_will_sleep() {
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: an AppKit notification name with no sender.
+        unsafe { center.postNotificationName_object(NSWorkspaceWillSleepNotification, None) };
     }
 }
 

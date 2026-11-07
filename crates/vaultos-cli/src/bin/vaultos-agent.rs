@@ -1,4 +1,4 @@
-//! `vaultos-agent`: VaultOS for enrolled agents, ported from `agent-cli.cjs`. Every command
+//! `vaultos-agent`: VaultOS for enrolled agents. Every command
 //! is one request to `vaultosd` with this agent's token; values are never printed.
 
 use clap::error::ErrorKind;

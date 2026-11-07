@@ -1,9 +1,8 @@
 "use strict";
 
-// The Tauri desktop's bridge: the same window.vault / window.quick surface the Electron
-// preload scripts exposed, over two Tauri commands. The Rust process checks which window
-// and page each call comes from, and whether the vault is unlocked. Without Tauri (the
-// Electron app) this file does nothing.
+// The desktop's bridge: the window.vault / window.quick surface the pages use, over two
+// Tauri commands. The Rust process checks which window and page each call comes from, and
+// whether the vault is unlocked. Outside Tauri this file does nothing.
 (() => {
     const T = window.__TAURI__;
     if (!T || !T.core) return;
@@ -27,7 +26,7 @@
     };
     const api = (command, names) => Object.fromEntries(names.map(n => [ n, (...args) => invoke(command, n, args) ]));
 
-    // Elements styled as a title bar (-webkit-app-region: drag) move the window, as in Electron.
+    // Elements styled as a title bar (-webkit-app-region: drag) move the window.
     document.addEventListener("mousedown", e => {
         if (e.button !== 0 || e.detail > 1) return;
         for (let n = e.target; n && n.nodeType === 1; n = n.parentElement) {

@@ -7,7 +7,7 @@ bridge tool names; a client may prefix them with a server namespace.
 
 | Tool | Arguments / purpose | Required scope |
 | --- | --- | --- |
-| `vault_status` | `{}`; backend/bridge version, availability and sync health (`sync.state`, `lastSyncAt`, `error`, `peerStalled`) | Not an authentication check |
+| `vault_status` | `{}`; owner/bridge version, availability and sync health (`state`, `halted`, `lastSyncAt`, `peerStalled`) | Not an authentication check |
 | `whoami` | `{}`; current identity and grants | Enrolled identity |
 | `list_projects` | `{}`; approved projects | `read` |
 | `list_secrets` | `{project}`; names and metadata, no values | `read` |
@@ -36,12 +36,11 @@ public reports. Expiry fields are reminders, not automatic provider rotation.
 
 ## Shell client
 
-Agents without MCP can run `node /absolute/path/to/vaultos/agent-cli.cjs` (the
-`vaultos-agent` bin, for the desktop app) or the Rust `vaultos-agent` binary (for
-`vaultosd`) with the same token configuration: `status`, `whoami`,
+Agents without MCP can run `vaultos-agent`, which ships next to `vaultos-mcp` in
+the app, with the same token configuration: `status`, `whoami`,
 `projects`, `keys`, `search`, `inject PROJECT FILE [--keys A,B] [--format F]
 [--replace]`, `add PROJECT KEY` (value on stdin only), `import PROJECT FILE
-[--create-project]`, `sync` and `pending`. Output never contains values. Never
+[--create-project]` and `pending`. Output never contains values. Never
 pass a value as an argument. Exit code 3 means not running and 4 means locked;
 report either to the human instead of retrying in a loop.
 
@@ -71,28 +70,29 @@ when a specific project or folder grant would do. Reissuing a token
 requires updating its private file and reconnecting the bridge. Revocation stops
 future API calls; it neither removes exported files nor revokes provider keys.
 
-The desktop's **Lock** stops its API, clears decrypted application state, attempts
-to remove the remembered password, and blocks background unlock until a human
-unlocks again. While the desktop runs, sleep, screen lock (macOS only), and 15 minutes
-without a privileged desktop action also lock it.
+The desktop's **Lock** stops its API, clears decrypted application state, removes
+the remembered password, and blocks background unlock until a human unlocks
+again. While the desktop runs, sleep, screen lock, and 15 minutes without a
+privileged desktop action also lock it. Closing the window locks it too.
 
-Closing the desktop stops its API. If the user explicitly enabled background
-access (macOS: Keychain plus the bridge's native helper; Linux: Secret Service), the
-bridge can start a separate backend, as can the optional Linux systemd unit. That headless backend **does not monitor screen lock**. Keep
-background access off, or use Lock before closing, when that boundary is needed.
-Do not enable password remembering to work around an unavailable or locked vault.
+Nothing starts the vault for an agent. Agents are served after the window closes
+only if the human turned on background access (remembered password in the
+Keychain or Secret Service) **and** installed the background service
+(`scripts/install-service-macos.sh`, or `scripts/install-linux.sh
+--enable-service`), which runs the app as `VaultOS --service`. That service **does
+not monitor screen lock**, and a full lock blocks it until a human unlocks. Do not
+enable password remembering or install the service to work around an
+unavailable or locked vault.
 
-With the Rust tools, `vaultosd` starts locked and only a human `vaultos unlock`
-opens it; there is no remembered-password unlock. `vaultos lock` and `vaultos
-stop` are the human's; `--idle-lock-minutes` is the only automatic lock, and it
-does not observe screen lock or sleep.
+For a headless vault, `vaultosd` starts locked and only a human `vaultos unlock`
+opens it. `vaultos lock` and `vaultos stop` are the human's;
+`--idle-lock-minutes` is its only automatic lock, and it does not observe screen
+lock or sleep.
 
-Two further opt-in settings weaken this boundary and are the human's decision:
-the **soft lock** policy (screen lock, sleep and idle lock only the window while
-agents keep working; Lock stays a full lock), and the always-on service installed
-by `scripts/install-service-macos.sh` (`backend.cjs --service`, which takes over
-whenever no window owns the vault). Do not enable either, or install the service,
-unless the user's task asks for it.
+The **soft lock** policy (screen lock, sleep and idle lock only the window while
+agents keep working; Lock stays a full lock) also weakens this boundary and is the
+human's decision. Do not enable it, background access or the service unless the
+user's task asks for it.
 
 On a Mac, the human may turn on optional Touch ID settings. With confirmations on,
 desktop actions such as enrolling an agent, re-issuing a token or approving keys ask
@@ -103,10 +103,10 @@ window, not agent tokens or the API.
 
 | Symptom | Action |
 | --- | --- |
-| MCP command missing / module not found | Check absolute Node and checkout paths on the target host; install locked bridge dependencies. |
+| MCP command missing | Check the absolute path to `vaultos-mcp` inside the installed app on the target host. |
 | Enroll/configure-token error | Check private token file existence/mode and configured path without reading it; ask the human to enroll/reissue if needed, then reconnect. |
-| Locked | The vault is running but locked, or a human lock blocks background start. Ask the human to unlock the correct preview desktop. |
-| Not running | Nothing answered and no backend could start or unlock in the background. Match data directories; background startup is optional. |
+| Locked | The vault is running but locked. Ask the human to unlock the correct preview app (or run `vaultos unlock` for a headless vault). |
+| Not running | Nothing owns the vault: the app is closed and no background service is serving. Match data directories; ask the human to open and unlock the app. |
 | No projects / permission denied | Inspect `whoami`; check scopes, project IDs, and canonical folder grants in the desktop. Do not switch to privileged CLI access. |
 | Keys held for approval | Use `list_pending`; human approval is needed before injection. |
 | Output path refused | Choose an ordinary file inside an approved folder, spelled as `whoami` shows the folder (symbolic links resolved, such as `/private/var` rather than `/var` on macOS). Do not weaken path validation or target the vault directory. |
@@ -115,29 +115,27 @@ window, not agent tokens or the API.
 
 ## Update, back up, and recover
 
-There is no automatic updater. Identify the installed version and source checkout,
-back up before updating, and use a published release's notes/checksums. Replace
-only the intended preview app after quitting it. For the bridge, keep local source
-changes intact; use a clean checkout for the chosen release tag if necessary and
-install from its lockfile. Rebuild the native helper if using background startup.
-Preserve the token/data paths, reconnect, and repeat identity and injection
-verification with synthetic data. Do not regenerate a working vault to fix an
-upgrade problem.
+There is no automatic updater. Identify the installed version, back up before
+updating, and use a published release's notes/checksums. Replace only the
+intended preview app after quitting it; the bridge and CLI update with it, so MCP
+entries that point into the app keep working. An installed background service
+from 0.2 runs the old Node backend and must be reinstalled for 0.3. Preserve the
+token/data paths, reconnect, and repeat identity and injection verification with
+synthetic data. Do not regenerate a working vault to fix an upgrade problem, and
+do not start the one-way upgrade of an 0.2 vault unless the human asked.
 
-From the source checkout, `node cli.cjs help` describes the recovery/admin CLI.
-For an explicitly requested backup, quit the relevant preview and run:
+`vaultos help` describes the recovery/admin CLI that ships in the app. For an
+explicitly requested backup, quit the relevant preview and run:
 
 ```sh
-node cli.cjs backup /absolute/new/dated-backup-directory
+vaultos backup /absolute/new/dated-backup-directory
 ```
 
-Use the correct `VAULTOS_DATA_DIR` when nondefault. This copies encrypted
-`vault.enc` without a password prompt. The command overwrites the destination's
-`vault.enc`, so choose a new directory. It does not include sync machine keys.
-With the Rust tools, `vaultos backup /absolute/new/dated-backup-directory` also
-copies the audit log and the sync index (the memory of which sync manifests were
-seen); the sync keys are inside the vault. No tokens are copied. Keep backups private and on encrypted storage; do not upload them to the public
-source repository.
+Use the correct `VAULTOS_DATA_DIR` when nondefault. This copies `vault.enc`, the
+audit log and the sync index (the memory of which sync manifests were seen); the
+sync keys are inside the vault. No tokens are copied. Choose a new directory for
+each snapshot. Keep backups private and on encrypted storage; do not upload them
+to the public source repository.
 
 Read [recovery instructions](https://github.com/rohit3a/vaultos/blob/main/docs/RECOVERY.md)
 before restoring, rotating passwords, migrating, or removing data. Recovery is
@@ -150,8 +148,7 @@ do not put real passwords into chat, tool arguments, or shell pipelines.
 The CLI's `agents`, `pending`, `approver` and `rotate-password` commands are the
 human's headless equivalents of desktop grants and approvals (see the connection
 guide). They need the master password, which only the human types. Never run them
-to grant your own access or approve your own records. `import-legacy` is a
-one-time human migration from the earlier vault-os fork; do not run it for them.
+to grant your own access or approve your own records.
 
 The CLI uses human authority and is not a substitute for denied MCP operations.
 In particular, CLI `inject` replaces the destination (`merge: false`), unlike the
@@ -161,9 +158,9 @@ MCP default. Do not use it for routine enrolled-agent injection.
 
 Sync is a separate opt-in task. Read
 [the sync guide](https://github.com/rohit3a/vaultos/blob/main/docs/SYNC.md) first.
-It needs Git, age, a dedicated private sync repository, and verified peer signing
+It needs Git, a dedicated private sync repository, and verified peer signing
 identities. Whole peers are trusted; sync is not per-project agent access control.
-Machine keys and replay state need encrypted backup. Do not automatically trust
+The sync index (replay state) needs encrypted backup. Do not automatically trust
 peers, push data, or accept conflicts while installing or connecting MCP.
 
 `sync status` fetches remote data and can update local sync state; it is not a
@@ -171,17 +168,17 @@ pure read. `sync plan` previews the local checkout. A successful push means Git
 received data, not that another machine applied it. Resolve the guide's trust and
 conflict checks before describing devices as synchronized.
 
-Autosync is off by default; the human enables it in Settings. `node cli.cjs sync now`
-asks the running owner for one round without a password. If `vault_status` shows a
-halted state such as `CONFLICTS_PENDING`, report it; accepting conflicts is a human
-review step in the desktop, never something to automate.
+VaultOS 0.3 uses sync format 2 (in Settings → Sync, or `vaultos sync
+init|identity|trust|status|push|pull|plan|accept-conflicts|auto|now`), which keeps
+the device's sync keys inside the vault and needs no `age` binary. It refuses an
+0.2 (format 1) repository; moving means a new, empty repository.
 
-The Rust tools use sync format 2 (`vaultos sync init|identity|trust|status|push|pull|plan|accept-conflicts|auto|now`),
-which keeps the device's sync keys inside the vault and needs no `age` binary. It
-cannot share a repository with the desktop's format 1; moving means a new, empty
-repository. `vaultos sync auto on` and `accept-conflicts` are the human's
-decisions, as above. An agent's `vault_status` shows only the sync state and
-flags; the reason for a halt is in `vaultos status` and `vaultosd.log`.
+Autosync is off by default; the human enables it in Settings or with `vaultos sync
+auto on`. `vaultos sync now` asks the running owner for one round without a
+password. If `vault_status` shows a halted state such as `CONFLICTS_PENDING`,
+report it; accepting conflicts is a human review step, never something to
+automate. An agent's `vault_status` shows only the sync state and flags; the
+reason for a halt is in `vaultos status`.
 
 For requested uninstall, disable background access or Lock, have the human turn
 off Open at login if it is on, quit the identified preview from its menu bar item

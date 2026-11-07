@@ -1,4 +1,4 @@
-//! The desktop's state and lock rules, ported from `main.js`.
+//! The desktop's state and lock rules.
 //!
 //! The app owns the vault only while it is unlocked: unlocking claims `owner.lock` by starting
 //! the daemon's server in-process (so enrolled agents keep working), and a full Lock stops it,
@@ -30,7 +30,7 @@ const GRACE: Duration = Duration::from_secs(30);
 pub const IDLE_LOCK: Duration = Duration::from_secs(15 * 60);
 const COPY_CLEAR: Duration = Duration::from_secs(30);
 pub const NEED_PASSWORD: &str = "NEED_PASSWORD";
-const LOCKED_FILE: &str = "locked";
+pub const LOCKED_FILE: &str = "locked";
 const TOUCH_ID_HINT: &str = "touch-id";
 
 pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

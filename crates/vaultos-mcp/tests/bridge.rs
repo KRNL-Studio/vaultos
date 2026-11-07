@@ -16,6 +16,24 @@ use vaultos_daemon::server::{run, Config};
 
 const PW: &str = "synthetic-bridge-password";
 
+#[test]
+fn the_bridge_reports_its_version_and_refuses_arguments() {
+    let bin = env!("CARGO_BIN_EXE_vaultos-mcp");
+    let out = Command::new(bin).arg("--version").output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap().trim(),
+        format!("vaultos-mcp {}", env!("CARGO_PKG_VERSION"))
+    );
+    // An argument left over from the 0.2 Node bridge's configuration is an error, not ignored.
+    let out = Command::new(bin)
+        .arg("/old/vaultos/mcp/server.mjs")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
 struct Mcp {
     child: Child,
     stdin: ChildStdin,
@@ -155,7 +173,7 @@ fn the_bridge_speaks_for_the_enrolled_agent() {
 
     let mut mcp = Mcp::start(&data, issued.token.expose());
 
-    // The same tools, descriptions and schemas as the Node bridge.
+    // The tools, descriptions and schemas in tools.json (those of the 0.2 Node bridge).
     let listed = mcp.rpc("tools/list", json!({}));
     let expected: Value = serde_json::from_str(include_str!("../src/tools.json")).unwrap();
     assert_eq!(listed["tools"], expected);

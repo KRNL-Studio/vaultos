@@ -1,6 +1,6 @@
 //! The v4 store: projects and items with ownership, delegation and approvals, history with
 //! Undo, the audit chain, and safe saving (stale-write detection, atomic replacement, the
-//! JavaScript app's lock files). Semantics follow `store.js`; storage is format v4.
+//! 0.2 JavaScript app's lock files). Semantics follow that app's store; storage is format v4.
 //!
 //! While unlocked, metadata is decrypted and item secrets stay sealed; `reveal` opens one.
 //! Every change is made on a copy of the state and kept only if it was saved, so a failed

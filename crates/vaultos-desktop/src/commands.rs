@@ -1,4 +1,4 @@
-//! The window's calls, as the Electron app's `vault:` and `quick:` IPC channels. A call is
+//! The window's calls, on the pages' `vault:` and `quick:` channels. A call is
 //! accepted only from its own window at its own page, so Quick Access cannot reach settings,
 //! agents or sync. Every non-public call needs the human's unlock and resets the idle timer.
 
@@ -603,7 +603,27 @@ pub fn web_address(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::web_address;
+    use super::{web_address, PROVIDERS};
+    use serde_json::{json, Value};
+
+    /// The core's key-name table (`vaultos_core::providers`) is this table's ids and keys.
+    #[test]
+    fn provider_tables_agree() {
+        let desktop: Vec<Value> = serde_json::from_str(PROVIDERS).unwrap_or_default();
+        let core: Value =
+            serde_json::from_str(include_str!("../../vaultos-core/src/providers.json"))
+                .unwrap_or_default();
+        let keys: Vec<Value> = desktop
+            .iter()
+            .map(|p| json!({ "id": p["id"], "keys": p["keys"] }))
+            .collect();
+        assert!(!keys.is_empty());
+        assert_eq!(
+            Value::Array(keys),
+            core,
+            "update crates/vaultos-core/src/providers.json"
+        );
+    }
 
     #[test]
     fn opens_only_web_addresses() {

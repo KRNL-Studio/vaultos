@@ -1,4 +1,4 @@
-//! `vaultos`: the human's command line, ported from `cli.cjs` and `admin.js`. It creates and
+//! `vaultos`: the human's command line. It creates and
 //! upgrades vaults, drives `vaultosd` (start, unlock, lock, stop), and runs recovery and
 //! admin commands directly on the vault file while it holds the vault's owner lock. It never
 //! prints secret values; tokens and Secret Keys go to private files.
