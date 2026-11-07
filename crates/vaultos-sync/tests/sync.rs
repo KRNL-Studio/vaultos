@@ -158,7 +158,7 @@ fn merges_records_and_deletions_without_disclosing_values_or_their_hashes() {
     a.push();
     b.pull();
     assert!(!b.keys("Example").contains(&"SECOND".to_owned()));
-    assert_eq!(b.store.list_trash().unwrap().len(), 1);
+    assert_eq!(b.store.list_trash("human").unwrap().len(), 1);
     a.store.purge_item("Example", "SECOND", "human").unwrap();
     a.push();
     let plan = b.pull();

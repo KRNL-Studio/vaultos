@@ -57,16 +57,28 @@ pub fn check_record(r: &Record) -> Result<()> {
                 .collect(),
         ),
     })?;
-    if r.fields.iter().any(|f| f.id.is_empty()) {
+    // Two fields with one id would merge their values; two attachments with one id would
+    // share a file, so removing one would delete the other's.
+    let mut field_ids = std::collections::HashSet::new();
+    if r.fields
+        .iter()
+        .any(|f| f.id.is_empty() || !field_ids.insert(f.id.as_str()))
+    {
         return Err(Error::invalid("Invalid field id"));
     }
     if r.attachments.len() > crate::store::MAX_ATTACHMENTS {
         return Err(Error::invalid("Too many attachments"));
     }
+    let mut attachment_ids = std::collections::HashSet::new();
     for a in &r.attachments {
         check_id(&a.id)?;
         validate::text(&a.name, "attachment name", 255, false)?;
-        if a.sha256.len() != 64 || !a.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if a.sha256.len() != 64
+            || !a.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || a.size > crate::store::MAX_ATTACHMENT_BYTES as u64
+            || !attachment_ids.insert(a.id.as_str())
+            || (!a.added_at.is_empty() && crate::model::parse_iso(&a.added_at).is_none())
+        {
             return Err(Error::invalid("Invalid attachment"));
         }
     }
@@ -75,6 +87,10 @@ pub fn check_record(r: &Record) -> Result<()> {
         ("change date", &r.secret_changed_at),
     ] {
         validate::text(v, name, 64, true)?;
+        // An unreadable trash date would hide the item and never let it be purged.
+        if !v.is_empty() && crate::model::parse_iso(v).is_none() {
+            return Err(Error::invalid(format!("Invalid {name}")));
+        }
     }
     for (name, v) in [
         ("owner", &r.owner),
@@ -157,6 +173,29 @@ impl Store {
             check_id(&r.project_id)?;
             validate::text(&r.project_name, "project name", 256, false)?;
         }
+        // An attachment id belongs to one item, here and across the pull.
+        let mut owners: std::collections::HashMap<String, String> = self
+            .state()?
+            .projects
+            .iter()
+            .flat_map(|p| &p.items)
+            .flat_map(|i| {
+                i.meta
+                    .attachments
+                    .iter()
+                    .map(|a| (a.id.clone(), i.id.clone()))
+            })
+            .collect();
+        for r in &changes.upsert {
+            for a in &r.record.attachments {
+                let owner = owners
+                    .entry(a.id.clone())
+                    .or_insert_with(|| r.record.id.clone());
+                if *owner != r.record.id {
+                    return Err(Error::invalid("Invalid attachment"));
+                }
+            }
+        }
         self.mutate(|k, st| {
             let now = now_iso();
             for inc in &changes.upsert {
@@ -205,6 +244,7 @@ impl Store {
                 p.meta.updated_at = now.clone();
                 p.sealed_meta = None;
             }
+            let mut deleted = Vec::new();
             for (reference, by) in &changes.delete {
                 if let Some((pid, rid)) = reference.split_once(':') {
                     if let Some(p) = st.projects.iter_mut().find(|p| p.id == pid) {
@@ -215,9 +255,19 @@ impl Store {
                             p.sealed_meta = None;
                         }
                     }
+                    deleted.push(rid.to_owned());
                 }
                 st.tombstone(reference.clone(), by, label(&[("via", "pull")]));
             }
+            // An item deleted elsewhere and held by no project now was purged (a move leaves
+            // a tombstone too, but its item lives on): its earlier versions here go as well,
+            // so nothing can restore what another device deleted for good.
+            deleted.retain(|id| {
+                !st.projects
+                    .iter()
+                    .any(|p| p.items.iter().any(|i| i.id == *id))
+            });
+            super::items::forget_history(k, st, &deleted, &[]);
             let mut removed = Vec::new();
             for pid in &changes.delete_projects {
                 let Some(i) = st

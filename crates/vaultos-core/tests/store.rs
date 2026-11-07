@@ -284,7 +284,7 @@ fn undo_restores_and_refuses_to_overwrite_newer_work() {
 
     s.delete_item("Example App", "K", "human").unwrap();
     assert_eq!(
-        s.list_trash().unwrap().len(),
+        s.list_trash("human").unwrap().len(),
         1,
         "deleting moves to the Trash"
     );
@@ -294,7 +294,7 @@ fn undo_restores_and_refuses_to_overwrite_newer_work() {
     s.revert(&delete.id, "human").unwrap();
     assert_eq!(value(&mut s, "K"), "synthetic-one");
     assert!(
-        s.list_trash().unwrap().is_empty(),
+        s.list_trash("human").unwrap().is_empty(),
         "Undo takes it out again"
     );
     assert!(matches!(

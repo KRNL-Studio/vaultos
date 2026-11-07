@@ -558,6 +558,8 @@ impl Ctx {
         };
         let secret_key = self.secret_key(&store)?;
         store.unlock(&password, secret_key.as_ref())?;
+        // A human unlock: what has been in the Trash for 30 days goes, as in the app.
+        let _ = store.purge_expired_trash(vaultos_core::model::HUMAN);
         Ok(Open {
             store,
             password,

@@ -306,6 +306,12 @@ impl Drop for Record {
 }
 
 impl ItemMeta {
+    /// Whether `actor` sees this item: nobody sees one in the Trash outside the Trash, and
+    /// agents never see archived ones.
+    pub fn shown_to(&self, actor: &str) -> bool {
+        self.trashed_at.is_empty() && !(self.archived && is_agent(actor))
+    }
+
     /// The item's type; a record saved before types existed is a login if it has a username
     /// or password, otherwise an API key.
     pub fn kind(&self) -> &str {

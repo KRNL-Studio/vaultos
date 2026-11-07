@@ -239,18 +239,19 @@ fn the_trash_hides_items_and_purges_them_with_their_history() {
     assert_eq!(injected.count, 0, "nothing in the Trash is injected");
     let _ = std::fs::remove_file(&target);
 
-    // Saving the key again brings it back.
-    st.set_item(
-        "Example App",
-        &Fields {
-            key: "AGENT_KEY".into(),
-            value: s("synthetic-again"),
-            ..Default::default()
-        },
-        AGENT,
-    )
-    .unwrap();
-    assert!(st.list_trash().unwrap().is_empty());
+    // An agent cannot overwrite or bring back what is in the Trash; the human's save does.
+    let again = Fields {
+        key: "AGENT_KEY".into(),
+        value: s("synthetic-again"),
+        ..Default::default()
+    };
+    assert!(matches!(
+        st.set_item("Example App", &again, AGENT),
+        Err(Error::Conflict(_))
+    ));
+    st.set_item("Example App", &again, "human").unwrap();
+    assert!(st.list_trash("human").unwrap().is_empty());
+    assert!(st.list_trash(AGENT).is_err(), "the Trash is the human's");
     st.delete_item("Example App", "AGENT_KEY", "human").unwrap();
     assert!(
         st.restore_item("Example App", "AGENT_KEY", AGENT).is_err(),
@@ -258,7 +259,7 @@ fn the_trash_hides_items_and_purges_them_with_their_history() {
     );
     assert!(st.purge_item("Example App", "AGENT_KEY", AGENT).is_err());
     assert_eq!(
-        st.purge_expired_trash().unwrap(),
+        st.purge_expired_trash("human").unwrap(),
         0,
         "fresh items stay 30 days"
     );
@@ -269,7 +270,7 @@ fn the_trash_hides_items_and_purges_them_with_their_history() {
         .any(|e| e.key.as_deref() == Some("AGENT_KEY") && e.action == "update_secret"));
 
     st.purge_item("Example App", "AGENT_KEY", "human").unwrap();
-    assert!(st.list_trash().unwrap().is_empty());
+    assert!(st.list_trash("human").unwrap().is_empty());
     assert_eq!(
         st.tombstones().unwrap().len(),
         1,
@@ -308,9 +309,186 @@ fn the_trash_hides_items_and_purges_them_with_their_history() {
     .unwrap();
     st.delete_item("Example App", "A", "human").unwrap();
     st.delete_item("Other", "B", "human").unwrap();
-    assert_eq!(st.list_trash().unwrap().len(), 2);
+    assert_eq!(st.list_trash("human").unwrap().len(), 2);
     assert_eq!(st.empty_trash("human").unwrap(), 2);
     assert_eq!(st.empty_trash("human").unwrap(), 0);
+}
+
+#[test]
+fn agents_never_see_or_change_archived_items_or_secret_fields() {
+    let d = tempfile::tempdir().unwrap();
+    let mut st = new_store(d.path());
+    login(&mut st);
+    st.set_item(
+        "Example App",
+        &Fields {
+            key: "AGENT_KEY".into(),
+            value: s("synthetic-agent"),
+            ..Default::default()
+        },
+        AGENT,
+    )
+    .unwrap();
+    let count = |st: &Store, actor: &str| st.list_projects_as(actor).unwrap()[0].secret_count;
+    assert_eq!(count(&st, AGENT), 2);
+    assert_eq!(st.pending_approvals_as(AGENT).unwrap().len(), 1);
+
+    // An agent's reveal and hash leave out concealed and one-time code fields.
+    let r = st.reveal("Example App", "Example login", AGENT).unwrap();
+    assert!(r.fields.is_empty());
+    let hash = |st: &Store| {
+        st.fingerprints(AGENT)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.key == "Example login")
+            .unwrap()
+            .hash
+    };
+    // The record's hash with secret field values left out, so they cannot be guessed at.
+    let mut record = st
+        .sync_records()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.record.key == "Example login")
+        .unwrap()
+        .record;
+    assert_ne!(hash(&st), vaultos_core::canon::record_hash(&record));
+    for f in record.fields.iter_mut().filter(|f| f.is_secret()) {
+        f.value.clear();
+    }
+    assert_eq!(hash(&st), vaultos_core::canon::record_hash(&record));
+
+    // Archived: gone from the agent's counts, approvals and hashes, and out of its reach.
+    st.set_item(
+        "Example App",
+        &Fields {
+            key: "AGENT_KEY".into(),
+            archived: Some(true),
+            ..Default::default()
+        },
+        "human",
+    )
+    .unwrap();
+    assert_eq!(count(&st, AGENT), 1);
+    assert_eq!(count(&st, "human"), 2);
+    assert!(st.pending_approvals_as(AGENT).unwrap().is_empty());
+    assert!(st
+        .fingerprints(AGENT)
+        .unwrap()
+        .iter()
+        .all(|f| f.key != "AGENT_KEY"));
+    assert!(matches!(
+        st.set_item(
+            "Example App",
+            &Fields {
+                key: "AGENT_KEY".into(),
+                value: s("synthetic-overwrite"),
+                ..Default::default()
+            },
+            AGENT,
+        ),
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        st.delete_item("Example App", "AGENT_KEY", AGENT),
+        Err(Error::NotFound(_))
+    ));
+    assert_eq!(
+        st.reveal("Example App", "AGENT_KEY", "human")
+            .unwrap()
+            .value
+            .expose(),
+        "synthetic-agent"
+    );
+}
+
+#[test]
+fn a_purge_forgets_versions_from_before_a_move() {
+    let d = tempfile::tempdir().unwrap();
+    let mut st = new_store(d.path());
+    st.create_project("Third", "human").unwrap();
+    for v in ["synthetic-one", "synthetic-two"] {
+        st.set_item(
+            "Example App",
+            &Fields {
+                key: "K".into(),
+                value: s(v),
+                ..Default::default()
+            },
+            "human",
+        )
+        .unwrap();
+    }
+    st.move_item("Example App", "K", "Other", "human").unwrap();
+    st.move_item("Other", "K", "Third", "human").unwrap();
+    st.delete_item("Third", "K", "human").unwrap();
+    st.purge_item("Third", "K", "human").unwrap();
+    let left: Vec<String> = st
+        .list_history(0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.key.as_deref() == Some("K"))
+        .map(|e| e.action)
+        .collect();
+    assert_eq!(left, ["purge_secret"]);
+}
+
+#[test]
+fn hostile_records_and_inputs_are_refused() {
+    use vaultos_core::store::SyncChanges;
+    let d = tempfile::tempdir().unwrap();
+    let mut st = new_store(d.path());
+    login(&mut st);
+    let base = st.sync_records().unwrap().remove(0);
+    let mut dup = base.clone();
+    let first = dup.record.fields[0].clone();
+    dup.record.fields.push(first);
+    let mut dated = base.clone();
+    dated.record.trashed_at = "soon".into();
+    for r in [dup, dated] {
+        let changes = SyncChanges {
+            upsert: vec![r],
+            ..Default::default()
+        };
+        assert!(st.apply_sync(&changes).is_err());
+    }
+
+    // A concealed value turned into a one-time code without a new value must be one.
+    let item = st
+        .find_item("Example App", "Example login")
+        .unwrap()
+        .unwrap();
+    let recovery = item.fields.iter().find(|f| f.label == "Recovery").unwrap();
+    // Not Base32 (0, 1, 8 and 9 are not in its alphabet), so not a one-time code key.
+    st.set_item(
+        "Example App",
+        &Fields {
+            key: "Example login".into(),
+            fields: Some(vec![field(
+                &recovery.id,
+                "Recovery",
+                "concealed",
+                s("synthetic-0189"),
+            )]),
+            ..Default::default()
+        },
+        "human",
+    )
+    .unwrap();
+    let turned = st.set_item(
+        "Example App",
+        &Fields {
+            key: "Example login".into(),
+            fields: Some(vec![field(&recovery.id, "Recovery", "otp", None)]),
+            ..Default::default()
+        },
+        "human",
+    );
+    assert!(turned.is_err());
+
+    assert!(vaultos_core::totp::Totp::parse("ééééééééé:é").is_err());
+    let rows = ",\n".repeat(30_000);
+    assert!(import::parse(Format::Csv, rows.as_bytes()).is_err());
 }
 
 #[test]
@@ -422,7 +600,7 @@ fn versions_can_be_listed_and_restored() {
         "human",
     )
     .unwrap();
-    let versions = st.item_history("Example App", "K").unwrap();
+    let versions = st.item_history("Example App", "K", "human").unwrap();
     assert_eq!(versions.len(), 3);
     assert!(versions.iter().all(|v| v.restorable));
     let first = versions.last().unwrap().entry.id.clone();

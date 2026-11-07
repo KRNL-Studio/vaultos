@@ -156,10 +156,20 @@ impl Store {
         let mut old = Vec::new();
         let written = |list: &[Attachment]| list.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
         for a in &item.meta.attachments {
-            // One that is not on this device keeps its entry, unreadable here as before.
-            let Ok(sealed) = self.read_attachment(a) else {
-                fresh.push(a.clone());
-                continue;
+            // Each file is sealed for its project and item, so one this device cannot read
+            // would be unreadable everywhere after the move: refuse instead.
+            let sealed = match self.read_attachment(a) {
+                Ok(s) => s,
+                Err(e) => {
+                    self.drop_attachment_files(&written(&fresh));
+                    return Err(match e {
+                        Error::NotFound(_) => Error::Conflict(format!(
+                            "The attachment \"{}\" is not on this device. Move the item on the device that has it, or remove the attachment first.",
+                            a.name
+                        )),
+                        other => other,
+                    });
+                }
             };
             let plain = open_raw(
                 &src.pk,
@@ -190,7 +200,8 @@ impl Store {
 
     // ── Trash ───────────────────────────────────────────────────────────────────────────
 
-    pub fn list_trash(&self) -> Result<Vec<TrashedItem>> {
+    pub fn list_trash(&self, actor: &str) -> Result<Vec<TrashedItem>> {
+        forbidden_unless_human(actor, "listing the Trash")?;
         let st = self.state()?;
         Ok(st
             .projects
@@ -248,10 +259,11 @@ impl Store {
         self.purge_where(actor, |_, i| !i.meta.trashed_at.is_empty())
     }
 
-    /// Purges what has been in the Trash for [`TRASH_DAYS`] days. The app calls it after a
-    /// human unlock; nothing is saved when nothing is due.
-    pub fn purge_expired_trash(&mut self) -> Result<usize> {
-        self.purge_where(HUMAN, |_, i| {
+    /// Purges what has been in the Trash for [`TRASH_DAYS`] days. The app, `vaultosd` and
+    /// the CLI call it after a human unlock; nothing is saved when nothing is due.
+    pub fn purge_expired_trash(&mut self, actor: &str) -> Result<usize> {
+        forbidden_unless_human(actor, "emptying the Trash")?;
+        self.purge_where(actor, |_, i| {
             days_since(&i.meta.trashed_at).is_some_and(|d| d >= TRASH_DAYS)
         })
     }
@@ -283,14 +295,10 @@ impl Store {
                 }
             }
             // The values went with the item; so does every earlier version of it.
-            st.history.retain(|e| {
-                !gone.iter().any(|(_, pname, _, key)| {
-                    e.key.as_deref() == Some(key.as_str())
-                        && (e.project.as_deref() == Some(pname.as_str())
-                            || e.reference.as_deref() == Some(pname.as_str()))
-                })
-            });
-            st.sealed_history = None;
+            let ids: Vec<String> = gone.iter().map(|g| g.2.clone()).collect();
+            let names: Vec<(String, String)> =
+                gone.iter().map(|g| (g.1.clone(), g.3.clone())).collect();
+            forget_history(k, st, &ids, &names);
             for (pid, pname, id, key) in &gone {
                 st.tombstone(
                     format!("{pid}:{id}"),
@@ -385,7 +393,8 @@ impl Store {
                 None,
             )
         });
-        if saved.is_err() {
+        // After Unconfirmed the item names the file; keep it.
+        if matches!(&saved, Err(e) if !matches!(e, Error::Unconfirmed(_))) {
             self.drop_attachment_files(&[id]);
         }
         saved.map(|_| att)
@@ -472,7 +481,8 @@ impl Store {
     // ── Per-item history ────────────────────────────────────────────────────────────────
 
     /// The changes to one item, newest first, including from before a move.
-    pub fn item_history(&self, project: &str, key: &str) -> Result<Vec<ItemVersion>> {
+    pub fn item_history(&self, project: &str, key: &str, actor: &str) -> Result<Vec<ItemVersion>> {
+        forbidden_unless_human(actor, "reading an item's versions")?;
         let st = self.state()?;
         let pi = st.project(project)?;
         let pname = st.projects[pi].meta.name.as_str();
@@ -899,9 +909,40 @@ fn imported_record(it: &Imported, key: &str, now: &str) -> Result<Record> {
     r.username.clone_from(&it.username);
     r.email.clone_from(&it.email);
     r.url.clone_from(&it.url);
-    apply_typed(&mut r, &Record::default(), &input);
+    apply_typed(&mut r, &Record::default(), &input)?;
     if secret_changed(&Record::default(), &r) {
         r.secret_changed_at = now.to_owned();
     }
     Ok(r)
+}
+
+/// Drops every history entry about a purged item: those whose records carry one of `ids`
+/// (an item keeps its id when it moves), and those naming one of the `(project, key)` pairs
+/// without records.
+pub(super) fn forget_history(k: &Keys, st: &mut State, ids: &[String], names: &[(String, String)]) {
+    if ids.is_empty() && names.is_empty() {
+        return;
+    }
+    let names_it = |e: &history::Entry| {
+        names.iter().any(|(project, key)| {
+            e.key.as_deref() == Some(key.as_str())
+                && (e.project.as_deref() == Some(project.as_str())
+                    || e.reference.as_deref() == Some(project.as_str()))
+        })
+    };
+    let carries_id = |e: &history::Entry| {
+        e.payload.is_some()
+            && history::open_payload(&k.vk, &k.vault_id, e).is_ok_and(|p| {
+                [p.before, p.after].iter().flatten().any(|r| {
+                    r.get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| ids.iter().any(|g| g == id))
+                })
+            })
+    };
+    let before = st.history.len();
+    st.history.retain(|e| !names_it(e) && !carries_id(e));
+    if st.history.len() != before {
+        st.sealed_history = None;
+    }
 }
