@@ -471,6 +471,34 @@ fn reveals_are_signed_into_a_chain_the_vault_anchors() {
 }
 
 #[test]
+fn a_log_that_is_sound_again_when_saving_is_continued_not_reset() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = new_store(d.path());
+    s.audit("probe", "one", "human").unwrap();
+    s.set_item("Example App", &field("K", "synthetic-k"), "human")
+        .unwrap(); // anchors entry 1
+    s.lock();
+    let log = d.path().join("audit-v4.log");
+    let good = std::fs::read(&log).unwrap();
+    std::fs::write(&log, b"").unwrap();
+    s.unlock(&pw(PW), None).unwrap();
+    assert!(s.audit_problem().is_some());
+    // The log is back before anything is written: it is continued, not set aside.
+    std::fs::write(&log, &good).unwrap();
+    s.audit("probe", "two", "human").unwrap();
+    let aside = std::fs::read_dir(d.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("set-aside"))
+        .count();
+    assert_eq!(aside, 0);
+    let (report, entries) = s.verify_audit().unwrap();
+    assert_eq!(report.anchored, Some(true));
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].detail, "two");
+}
+
+#[test]
 fn two_sessions_on_one_damaged_log_reset_it_once() {
     let d = tempfile::tempdir().unwrap();
     let mut a = new_store(d.path());

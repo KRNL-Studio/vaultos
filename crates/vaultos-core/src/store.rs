@@ -681,18 +681,24 @@ impl Store {
         let opened_at = now_iso();
         let anchor = state.meta.audit_head.take();
         // Under the log's lock, so an append in progress elsewhere is not read half-written.
-        let log_lock = audit::lock(&self.data_dir);
-        let (head, problem) = match audit::verify_with(
-            &self.data_dir,
-            &keys.vault_id,
-            &keys.audit_public,
-            anchor.as_ref(),
-            Signatures::AfterAnchor,
-        ) {
-            Ok((report, _)) => (report.head, None),
-            Err(e) => (None, Some(e.to_string())),
+        // Without the lock the log is not trusted yet: the next save or entry checks it again
+        // under the lock (`audit::reset`), and continues it if it is sound.
+        let (head, problem) = match audit::lock(&self.data_dir) {
+            Err(e) => (
+                None,
+                Some(format!("the log could not be locked to check it: {e}")),
+            ),
+            Ok(_log) => match audit::verify_with(
+                &self.data_dir,
+                &keys.vault_id,
+                &keys.audit_public,
+                anchor.as_ref(),
+                Signatures::AfterAnchor,
+            ) {
+                Ok((report, _)) => (report.head, None),
+                Err(e) => (None, Some(e.to_string())),
+            },
         };
-        drop(log_lock);
         self.disk_hash = Some(sha256_hex(bytes));
         self.disk_id = id;
         self.pending = None;

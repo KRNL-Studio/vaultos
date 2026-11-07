@@ -108,19 +108,13 @@ function takeOver(file, held) {
         current = fs.readFileSync(aside, "utf8");
     } catch {}
     if (current !== held) {
-        // Put the live lock back. It is never deleted unless it is back in place: if a newer
-        // lock already took its name, or it cannot be restored, it stays aside.
+        // Put the live lock back with a link, which never replaces a file. It is never deleted
+        // unless it is back in place: if the link fails, it stays aside.
         let restored = false;
         try {
             fs.linkSync(aside, file);
             restored = true;
-        } catch (e) {
-            if (e.code !== "EEXIST" && !fs.existsSync(file)) {
-                try {
-                    fs.renameSync(aside, file);
-                } catch {}
-            }
-        }
+        } catch {}
         if (restored) fs.unlinkSync(aside);
         throw new Error("Another VaultOS process owns this vault");
     }
