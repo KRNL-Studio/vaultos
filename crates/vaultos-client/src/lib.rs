@@ -413,9 +413,12 @@ mod tests {
                     .map(|(_, v)| (*v).to_owned())
             }
         };
-        let t = discover_token(env(&[("VAULTOS_AGENT_TOKEN", " synthetic-agent-token ")]), d)
-            .ok()
-            .flatten();
+        let t = discover_token(
+            env(&[("VAULTOS_AGENT_TOKEN", " synthetic-agent-token ")]),
+            d,
+        )
+        .ok()
+        .flatten();
         assert_eq!(
             t.map(|(t, s)| (t.expose().to_owned(), s)),
             Some(("synthetic-agent-token".into(), "VAULTOS_AGENT_TOKEN"))
