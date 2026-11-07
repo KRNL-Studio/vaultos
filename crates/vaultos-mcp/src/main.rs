@@ -187,8 +187,9 @@ async fn main() -> ExitCode {
         Some("--help" | "-h") => {
             return say("vaultos-mcp: the VaultOS MCP bridge over stdio. Run it from an MCP client; it takes no arguments. See docs/AGENTS.md.".into());
         }
-        Some(other) => {
-            eprintln!("vault-os-mcp: unexpected argument {other}; it takes none (try --help)");
+        // Not echoed: a mistaken argument may be a token, and MCP hosts keep stderr in logs.
+        Some(_) => {
+            eprintln!("vault-os-mcp: unexpected argument; it takes none (try --help)");
             return ExitCode::from(2);
         }
     }

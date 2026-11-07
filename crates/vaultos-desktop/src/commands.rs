@@ -108,6 +108,10 @@ pub async fn vault(
     if r.is_ok() && changes(&channel) {
         app.changed();
     }
+    // A Lock while this call ran: the page has cleared, so it gets nothing from inside.
+    if r.is_ok() && channel != "lock" && !app.human_unlocked() {
+        return Err("Vault is locked".into());
+    }
     r
 }
 
@@ -268,7 +272,7 @@ async fn set_settings(app: &Arc<App>, patch: &Value) -> Reply {
                 .map_err(|_| "Unlock with the master password again first")?;
             app.keyring.set(keyring::PASSWORD, &pw)?;
         }
-        Some(_) => app.keyring.clear(keyring::PASSWORD),
+        Some(_) => app.keyring.clear(keyring::PASSWORD)?,
         None => {}
     }
     store(app, move |s| s.update_settings(normalized, HUMAN)).await?;
@@ -294,7 +298,7 @@ async fn change_password(app: &Arc<App>, a: &Args) -> Reply {
     })
     .await?;
     app.set_password(new_s.clone());
-    app.keyring.clear(keyring::PASSWORD);
+    let _ = app.keyring.clear(keyring::PASSWORD);
     let remember = store(app, |s| Ok(settings::remember(s.settings()?))).await?;
     let updated = remember && app.keyring.set(keyring::PASSWORD, &new_s).is_ok();
     let mut ring = app.keyring.describe();

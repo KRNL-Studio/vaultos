@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use vaultos_core::fs_safe::claim;
 use vaultos_core::{Error, SecretKey, Store};
-use vaultos_daemon::server::{run_embedded, Config};
+use vaultos_daemon::server::{run_embedded, Config, Handle};
 
 const POLL: Duration = Duration::from_secs(2);
 const MAX_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -26,6 +26,9 @@ const HANDOVER_DELAY: Duration = Duration::from_secs(10);
 /// remembered password that no longer opens the vault) exits 0, so neither launchd nor
 /// systemd restarts the service in a loop; the log says why. Unexpected failures exit 1.
 const GIVE_UP: i32 = 0;
+
+const MANUAL_LOCK: &str = "a manual lock needs a human unlock in the app";
+const OFF: &str = "background access is off (no remembered password). Turn it on in Settings, unlock once, then restart the service.";
 
 fn log(message: &str) {
     eprintln!("VaultOS service: {message}");
@@ -47,7 +50,7 @@ fn check(data_dir: &Path) -> Ready {
         Err(_) => return Ready::Owned,
     }
     if data_dir.join(crate::app::LOCKED_FILE).exists() {
-        return Ready::Blocked("a manual lock needs a human unlock in the app");
+        return Ready::Blocked(MANUAL_LOCK);
     }
     match keyring.remembered() {
         Some(r) => Ready::Start(r),
@@ -122,7 +125,7 @@ async fn serve_forever(data_dir: PathBuf) -> i32 {
                 ("waiting for the remembered password".into(), POLL)
             }
             Ready::NoPassword => {
-                log("background access is off (no remembered password). Turn it on in Settings, unlock once, then restart the service.");
+                log(OFF);
                 return GIVE_UP;
             }
             Ready::Start(remembered) => {
@@ -133,6 +136,10 @@ async fn serve_forever(data_dir: PathBuf) -> i32 {
                     // long enough for it to.
                     Served::HandedOver => {
                         ("the window took over; standing by".into(), HANDOVER_DELAY)
+                    }
+                    Served::Blocked(why) => {
+                        wait = (wait * 2).min(MAX_WAIT);
+                        (format!("waiting to unlock: {why}"), wait)
                     }
                     Served::Relocked => {
                         log("the vault locked; checking again");
@@ -162,7 +169,52 @@ async fn serve_forever(data_dir: PathBuf) -> i32 {
     }
 }
 
+/// Why the service did not open the vault once it owned it.
+enum Refused {
+    /// A Lock wrote its block while the keychain was being read.
+    Locked,
+    /// The vault's own settings no longer remember the password: a stale keychain entry.
+    Off,
+    Core(Error),
+}
+
+/// Unlocks the vault this process now owns, checking again what `check` saw before it did:
+/// the manual lock block, and that the vault's encrypted settings still remember the password.
+fn open_owned(
+    h: &Handle,
+    data_dir: &Path,
+    remembered: &keyring::Remembered,
+) -> Result<(), Refused> {
+    if data_dir.join(crate::app::LOCKED_FILE).exists() {
+        return Err(Refused::Locked);
+    }
+    // Only the key the header names: one replaced or removed since it was stored is ignored.
+    let key = match h.with_store(|s| s.secret_key_id()).map_err(Refused::Core)? {
+        None => None,
+        Some(id) => Some(
+            remembered
+                .secret_key
+                .as_ref()
+                .and_then(|k| SecretKey::parse(k.expose().trim()).ok())
+                .filter(|k| k.id() == id)
+                .ok_or(Refused::Core(Error::SecretKeyRequired))?,
+        ),
+    };
+    h.with_store(|s| s.unlock(&remembered.password, key.as_ref()))
+        .map_err(Refused::Core)?;
+    let on = h
+        .with_store(|s| Ok::<_, Error>(crate::settings::remember(s.settings()?)))
+        .unwrap_or(false);
+    if !on {
+        h.with_store(Store::lock);
+        let _ = Keyring::new(data_dir).clear(keyring::PASSWORD);
+        return Err(Refused::Off);
+    }
+    Ok(())
+}
+
 enum Served {
+    Blocked(&'static str),
     HandedOver,
     Relocked,
     Signal,
@@ -176,6 +228,7 @@ async fn serve_once(
     term: &mut tokio::signal::unix::Signal,
     int: &mut tokio::signal::unix::Signal,
 ) -> Served {
+    let cfg_dir = data_dir.to_path_buf();
     let cfg = Config {
         data_dir: data_dir.to_path_buf(),
         idle_lock: None,
@@ -188,17 +241,9 @@ async fn serve_once(
         let _ = handle_tx.send(h.clone());
         // The key derivation is slow; unlock beside the accept loop, which answers "locked"
         // until it is done.
+        let dir = cfg_dir.clone();
         tokio::task::spawn_blocking(move || {
-            let key = match remembered
-                .secret_key
-                .as_ref()
-                .map(|k| SecretKey::parse(k.expose().trim()))
-            {
-                Some(Err(e)) => Err(e),
-                Some(Ok(k)) => Ok(Some(k)),
-                None => Ok(None),
-            };
-            let r = key.and_then(|k| h.with_store(|s| s.unlock(&remembered.password, k.as_ref())));
+            let r = open_owned(&h, &dir, &remembered);
             if r.is_err() {
                 h.shutdown();
             }
@@ -213,20 +258,24 @@ async fn serve_once(
     };
     let refused = match unlocked_rx.await {
         Ok(Ok(())) => None,
-        Ok(Err(Error::Unlock | Error::SecretKeyRequired | Error::SecretKeyFormat(_))) => Some(
+        Ok(Err(Refused::Locked)) => Some(Served::Blocked(MANUAL_LOCK)),
+        Ok(Err(Refused::Off)) => Some(Served::CannotUnlock(OFF.to_owned())),
+        Ok(Err(Refused::Core(
+            Error::Unlock | Error::SecretKeyRequired | Error::SecretKeyFormat(_),
+        ))) => Some(Served::CannotUnlock(
             "the remembered password or Secret Key did not open the vault. Unlock in the app to remember the current ones.".to_owned(),
-        ),
-        Ok(Err(Error::NeedsUpgrade)) => {
-            Some("this vault was made by an earlier VaultOS. Open the app to upgrade it.".to_owned())
-        }
-        Ok(Err(e)) => Some(format!("cannot unlock: {e}")),
-        Err(_) => Some("the unlock did not finish".to_owned()),
+        )),
+        Ok(Err(Refused::Core(Error::NeedsUpgrade))) => Some(Served::CannotUnlock(
+            "this vault was made by an earlier VaultOS. Open the app to upgrade it.".to_owned(),
+        )),
+        Ok(Err(Refused::Core(e))) => Some(Served::CannotUnlock(format!("cannot unlock: {e}"))),
+        Err(_) => Some(Served::CannotUnlock("the unlock did not finish".to_owned())),
     };
     let mut server = server;
-    if let Some(why) = refused {
+    if let Some(served) = refused {
         handle.shutdown();
         let _ = (&mut server).await;
-        return Served::CannotUnlock(why);
+        return served;
     }
     log("unlocked; serving agents");
     let mut tick = tokio::time::interval(POLL);
