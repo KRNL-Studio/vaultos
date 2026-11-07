@@ -23,6 +23,73 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({
     '"': "&quot;"
 }[c]));
 
+// Outcomes (copied, saved, errors that are not in a form) for screen readers, through a polite
+// live region outside #app so a re-render does not cut it off.
+function announce(text) {
+    const live = document.getElementById("announcer");
+    if (!live) return;
+    live.textContent = "";
+    setTimeout(() => {
+        live.textContent = text;
+    }, 60);
+}
+
+// A field with a label that stays visible while typing; the placeholder is only an example.
+let fieldIds = 0;
+
+function labeled(text, control, input = control) {
+    const wrap = el(`<div class="field"><label class="label"></label></div>`);
+    const label = wrap.querySelector("label");
+    label.textContent = text;
+    input.id ||= `field-${++fieldIds}`;
+    label.htmlFor = input.id;
+    wrap.appendChild(control);
+    return wrap;
+}
+
+// A modal dialog: named by its title, the window behind it inert, Tab kept inside, Escape
+// cancelling, and focus back where it was when it closes. Returns the function that closes it.
+function openModal(modal, onCancel) {
+    const opener = document.activeElement;
+    const title = modal.querySelector(".card-title");
+    if (title) {
+        title.id ||= `dialog-title-${++fieldIds}`;
+        modal.setAttribute("aria-labelledby", title.id);
+        modal.removeAttribute("aria-label");
+    }
+    modal.addEventListener("keydown", e => {
+        if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            onCancel();
+        } else if (e.key === "Tab") {
+            const stops = [ ...modal.querySelectorAll("button, input, select, textarea, [tabindex]") ].filter(n => !n.disabled && n.tabIndex >= 0 && n.getClientRects().length);
+            if (!stops.length) return;
+            const first = stops[0], last = stops[stops.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
+    });
+    $app.inert = true;
+    document.body.appendChild(modal);
+    return () => {
+        modal.remove();
+        if (!document.querySelector(".modal")) $app.inert = false;
+        if (opener && opener.isConnected && typeof opener.focus === "function") opener.focus();
+    };
+}
+
+// A toggle chip: its look and its pressed state together.
+function press(chip, on) {
+    chip.classList.toggle("sel", on);
+    chip.setAttribute("aria-pressed", String(on));
+}
+
 const providerById = id => PROVIDERS.find(p => p.id === id) || PROVIDERS.find(p => p.id === "custom");
 
 let AGENTS = [];
@@ -43,7 +110,7 @@ const initialOf = name => (String(name || "").trim().match(/[\p{L}\p{N}]/u) || [
 
 // A titled card. Returns its body.
 function panel(parent, title, {tag: tag = ""} = {}) {
-    const card = el(`<section class="card"><div class="card-head"><h3 class="card-title"></h3>${tag ? `<span class="pname"></span>` : ""}</div><div class="card-body"></div></section>`);
+    const card = el(`<section class="card"><div class="card-head"><h2 class="card-title"></h2>${tag ? `<span class="pname"></span>` : ""}</div><div class="card-body"></div></section>`);
     card.querySelector(".card-title").textContent = title;
     if (tag) card.querySelector(".pname").textContent = tag;
     parent.appendChild(card);
@@ -82,11 +149,12 @@ async function boot() {
 // A field for a stored password: concealed until the human chooses Show.
 function concealedRow(input) {
     const row = el(`<div class="concealed"></div>`);
-    const toggle = el(`<button type="button" class="iconbtn">Show</button>`);
+    const toggle = el(`<button type="button" class="iconbtn" aria-pressed="false">Show</button>`);
     toggle.onclick = () => {
         const show = input.type === "password";
         input.type = show ? "text" : "password";
         toggle.textContent = show ? "Hide" : "Show";
+        toggle.setAttribute("aria-pressed", String(show));
     };
     row.appendChild(input);
     row.appendChild(toggle);
@@ -144,7 +212,7 @@ async function refreshAgents() {
 function topbar({crumb: crumb} = {}) {
     const bar = el(`<div class="topbar"></div>`);
     if (crumb) {
-        const c = el(`<span class="crumb">‹ ${esc(crumb.label)}</span>`);
+        const c = el(`<span class="crumb" aria-label="Back to ${esc(crumb.label)}"><span aria-hidden="true">‹ </span>${esc(crumb.label)}</span>`);
         c.onclick = crumb.onClick;
         bar.appendChild(c);
     }
@@ -153,7 +221,7 @@ function topbar({crumb: crumb} = {}) {
     const find = el(`<button class="iconbtn" title="Search (${modKey()}K)" aria-label="Search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>`);
     find.onclick = () => openSearch();
     bar.appendChild(find);
-    const gear = el(`<button class="iconbtn gear" title="Settings"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>`);
+    const gear = el(`<button class="iconbtn gear" title="Settings" aria-label="Settings"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>`);
     gear.onclick = () => {
         view = {
             name: "settings"
@@ -173,8 +241,11 @@ function topbar({crumb: crumb} = {}) {
     return bar;
 }
 
+let focusHeading = false;
+
 function render() {
     renderVersion++;
+    focusHeading = true;
     $app.innerHTML = "";
     const fn = {
         loading: renderLoading,
@@ -226,7 +297,7 @@ function renderSetup() {
     pw2.addEventListener("keydown", e => {
         if (e.key === "Enter") btn.click();
     });
-    [ pw, pw2, err, btn ].forEach(n => wrap.appendChild(n));
+    [ labeled("Master password", pw), labeled("Confirm password", pw2), err, btn ].forEach(n => wrap.appendChild(n));
     $app.appendChild(wrap);
     pw.focus();
 }
@@ -244,7 +315,8 @@ async function renderUnlock() {
     // A vault with a Secret Key needs it once on each device; the app then keeps it in the
     // keychain. The earlier app's vaults are upgraded only when the human chooses to.
     const key = el(`<input type="password" placeholder="Secret Key (VK1-…)" autocomplete="off" spellcheck="false" />`);
-    key.style.display = st.needsSecretKey ? "" : "none";
+    const keyRow = labeled("Secret Key", key);
+    keyRow.style.display = st.needsSecretKey ? "" : "none";
     const err = el(`<div class="err"></div>`);
     const btn = el(`<button class="btn primary">Unlock</button>`);
     const upgrade = el(`<button class="btn ghost">Upgrade this vault</button>`);
@@ -254,7 +326,7 @@ async function renderUnlock() {
     const refused = r => {
         err.textContent = r.error;
         if (r.needsSecretKey) {
-            key.style.display = "";
+            keyRow.style.display = "";
             key.focus();
             return;
         }
@@ -285,7 +357,7 @@ async function renderUnlock() {
     for (const n of [ pw, key ]) n.addEventListener("keydown", e => {
         if (e.key === "Enter") btn.click();
     });
-    [ pw, key, err, btn, upgrade, upgradeNote ].forEach(n => wrap.appendChild(n));
+    [ labeled("Master password", pw), keyRow, err, btn, upgrade, upgradeNote ].forEach(n => wrap.appendChild(n));
     if (TOUCH_ID.ready) {
         const touch = el(`<button class="btn ghost">Unlock with Touch ID</button>`);
         touch.onclick = async () => {
@@ -330,7 +402,7 @@ async function browsersPanel(page) {
     box.appendChild(el(`<p class="note">The VaultOS extension fills and saves website logins in Chrome, Brave, Edge, Arc, Helium, Vivaldi and Chromium. It talks only to this app, through a helper the browser starts, and offers a login only on its own site (HTTPS, or http on localhost). Pairing shows a code in the extension and here; confirm only when they match.</p>`));
     const hosts = b.hosts.length ? b.hosts.map(h => `${esc(h.browser)} ${h.installed ? "(set up)" : "(not set up)"}`).join(", ") : "none found";
     box.appendChild(el(`<p class="note">Browsers: ${hosts}</p>`));
-    const status = el(`<p class="note"></p>`);
+    const status = el(`<p class="note" role="status"></p>`);
     const actions = el(`<div class="actions"></div>`);
     const setUp = el(`<button type="button" class="btn ghost sm">Set up browsers</button>`);
     setUp.disabled = !b.hosts.length;
@@ -392,13 +464,17 @@ async function human(name, ...args) {
 
 function askPassword(why) {
     return new Promise(resolve => {
-        const modal = el(`<div class="modal" role="dialog" aria-modal="true"><div class="box card"><div class="card-head"><h3 class="card-title">Confirm it's you</h3></div><div class="card-body"><div class="note"></div><input type="password" placeholder="Master password" /><div class="err"></div><div class="row2"><button class="btn ghost">Cancel</button><button class="btn primary">Confirm</button></div></div></div></div>`);
-        modal.querySelector(".note").textContent = why;
+        const modal = el(`<div class="modal" role="dialog" aria-modal="true"><div class="box card"><div class="card-head"><h2 class="card-title">Confirm it's you</h2></div><div class="card-body"><div class="note"></div><label class="label" for="confirm-password">Master password</label><input id="confirm-password" type="password" placeholder="Master password" /><div class="err" role="alert"></div><div class="row2"><button class="btn ghost">Cancel</button><button class="btn primary">Confirm</button></div></div></div></div>`);
+        const why_ = modal.querySelector(".note");
+        why_.textContent = why;
+        why_.id = "confirm-why";
+        modal.setAttribute("aria-describedby", why_.id);
         const input = modal.querySelector("input"), err = modal.querySelector(".err");
         const [cancel, ok] = modal.querySelectorAll("button");
+        let close = () => {};
         const done = result => {
             input.value = "";
-            modal.remove();
+            close();
             resolve(result);
         };
         cancel.onclick = () => done(false);
@@ -417,9 +493,8 @@ function askPassword(why) {
         };
         input.addEventListener("keydown", e => {
             if (e.key === "Enter") ok.click();
-            if (e.key === "Escape") cancel.click();
         });
-        document.body.appendChild(modal);
+        close = openModal(modal, () => done(false));
         input.focus();
     });
 }
@@ -446,7 +521,7 @@ async function renderProjects() {
         tools.appendChild(b);
     }
     scroll.appendChild(tools);
-    scroll.appendChild(el(`<div class="section"><span class="label">Projects</span><span class="label">${projects.length}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Projects</h1><span class="label">${projects.length}</span></div>`));
     const pending = await window.vault.pending();
     if (revision !== renderVersion) return;
     if (pending.length) {
@@ -527,7 +602,7 @@ async function renderProjects() {
         scroll.appendChild(el(`<div class="empty"><div class="big">No projects yet</div><p>Create one, then add its API keys. To let an agent use them, enrol it under Settings, then Agents. Reveal is off by default.</p></div>`));
     }
     for (const p of projects) {
-        const row = el(`<div class="row">\n      <span class="tile" aria-hidden="true">${esc(initialOf(p.name))}</span>\n      <div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.secretCount} ${p.secretCount === 1 ? "key" : "keys"}</div></div>\n      <div class="chev">›</div></div>`);
+        const row = el(`<div class="row">\n      <span class="tile" aria-hidden="true">${esc(initialOf(p.name))}</span>\n      <div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.secretCount} ${p.secretCount === 1 ? "key" : "keys"}</div></div>\n      <div class="chev" aria-hidden="true">›</div></div>`);
         row.onclick = () => {
             view = {
                 name: "project",
@@ -540,7 +615,9 @@ async function renderProjects() {
     $app.appendChild(scroll);
 }
 
-const modKey = () => document.documentElement.dataset.platform === "mac" ? "⌘" : "Ctrl+";
+const isMacPlatform = () => document.documentElement.dataset.platform === "mac";
+
+const modKey = () => isMacPlatform() ? "⌘" : "Ctrl+";
 
 function openSearch() {
     if (!isUnlockedView()) return;
@@ -560,10 +637,12 @@ function openSearch() {
 // Search across every project. The query lives in `view` so a re-render keeps it; while it
 // is non-empty the project list is hidden and ranked results show instead.
 function searchPanel(scroll, revision) {
-    const box = el(`<div class="searchbox"><input type="search" placeholder="Search keys, projects, usernames, websites" aria-label="Search all keys" aria-controls="search-results" /><kbd></kbd></div>`);
+    const box = el(`<div class="searchbox"><input type="search" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-haspopup="listbox" placeholder="Search keys, projects, usernames, websites" aria-label="Search all keys" aria-controls="search-results" aria-describedby="search-hint" /><kbd aria-hidden="true"></kbd><span class="sr-only" id="search-hint"></span></div>`);
     box.querySelector("kbd").textContent = `${modKey()}K`;
+    box.querySelector("#search-hint").textContent = `Up and down arrows choose a result, Return opens it, ${modKey()}Return copies its value.`;
     const input = box.querySelector("input");
     const results = el(`<div class="results" id="search-results" role="listbox" aria-label="Search results"></div>`);
+    const none = el(`<div class="empty" role="status"></div>`);
     let found = [], sel = 0, token = 0;
     const open = item => {
         view = {
@@ -576,28 +655,40 @@ function searchPanel(scroll, revision) {
     const mark = () => {
         [ ...results.children ].forEach((row, i) => row.setAttribute("aria-selected", String(i === sel)));
         const row = results.children[sel];
-        if (row) row.scrollIntoView({
-            block: "nearest"
-        });
+        if (row) {
+            input.setAttribute("aria-activedescendant", row.id);
+            row.scrollIntoView({
+                block: "nearest"
+            });
+        } else input.removeAttribute("aria-activedescendant");
+    };
+    const copySelected = async item => {
+        await human("copy", item.project, item.key);
+        announce(`Copied ${item.key}`);
     };
     const draw = () => {
         results.textContent = "";
+        none.textContent = "";
+        input.setAttribute("aria-expanded", String(found.length > 0));
         if (!found.length) {
-            const empty = el(`<div class="empty"><p></p></div>`);
-            empty.querySelector("p").textContent = `No keys match "${input.value.trim()}". Try a project, username or website.`;
-            results.appendChild(empty);
+            input.removeAttribute("aria-activedescendant");
+            none.textContent = `No keys match "${input.value.trim()}". Try a project, username or website.`;
             return;
         }
+        none.textContent = `${found.length} ${found.length === 1 ? "result" : "results"}`;
         found.forEach((item, i) => {
             const row = el(`<div class="row result" role="option" tabindex="-1"><span class="tile" aria-hidden="true"></span><div class="grow"><div class="name mono"></div><div class="sub"></div></div></div>`);
+            row.id = `search-result-${i}`;
             row.querySelector(".tile").textContent = initialOf(item.key);
             row.querySelector(".name").textContent = item.key;
             row.querySelector(".sub").textContent = [ item.project, item.username || item.email, item.host ].filter(Boolean).join(" · ");
             if (item.hasValue) {
-                const copy = el(`<button class="iconbtn">Copy</button>`);
+                // Inside an option a button would not be reachable, so the keyboard copies with
+                // ⌘⏎ (described on the search field) and this one is for the pointer.
+                const copy = el(`<button class="iconbtn" tabindex="-1" aria-hidden="true">Copy</button>`);
                 copy.onclick = async e => {
                     e.stopPropagation();
-                    await human("copy", item.project, item.key);
+                    await copySelected(item);
                     copy.textContent = "Copied";
                     copy.classList.add("copied");
                     setTimeout(() => {
@@ -626,7 +717,10 @@ function searchPanel(scroll, revision) {
         const t = ++token, query = input.value;
         if (!active) {
             results.textContent = "";
+            none.textContent = "";
             found = [];
+            input.setAttribute("aria-expanded", "false");
+            input.removeAttribute("aria-activedescendant");
             return;
         }
         const r = await window.vault.search(query);
@@ -641,6 +735,9 @@ function searchPanel(scroll, revision) {
             e.preventDefault();
             sel = (sel + (e.key === "ArrowDown" ? 1 : -1) + found.length) % found.length;
             mark();
+        } else if (e.key === "Enter" && found[sel] && (isMacPlatform() ? e.metaKey : e.ctrlKey)) {
+            e.preventDefault();
+            if (found[sel].hasValue) copySelected(found[sel]);
         } else if (e.key === "Enter" && found[sel]) {
             e.preventDefault();
             open(found[sel]);
@@ -654,6 +751,7 @@ function searchPanel(scroll, revision) {
     });
     scroll.appendChild(box);
     scroll.appendChild(results);
+    scroll.appendChild(none);
     input.value = view.query || "";
     if (input.value) run();
     if (view.focusSearch) {
@@ -686,7 +784,7 @@ async function renderProject() {
     if (revision !== renderVersion) return;
     const archivedCount = all.filter(s => s.archived).length;
     const secrets = all.filter(s => !!view.showArchived === !!s.archived).sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
-    scroll.appendChild(el(`<div class="section"><span class="label">${esc(project)}${view.showArchived ? " · Archived" : ""}</span><span class="label">${secrets.length} ${secrets.length === 1 ? "item" : "items"}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">${esc(project)}${view.showArchived ? " · Archived" : ""}</h1><span class="label">${secrets.length} ${secrets.length === 1 ? "item" : "items"}</span></div>`));
     const actionRow = el(`<div class="actionrow"></div>`);
     const add = el(`<button class="btn primary"><span aria-hidden="true">+</span> Add key</button>`);
     add.onclick = () => {
@@ -744,7 +842,7 @@ async function renderProject() {
         actionRow.appendChild(arch);
     }
     scroll.appendChild(actionRow);
-    const importStatus = el(`<div class="note import-status" style="margin:-4px 2px 8px"></div>`);
+    const importStatus = el(`<div class="note import-status" role="status" style="margin:-4px 2px 8px"></div>`);
     scroll.appendChild(importStatus);
     const expErr = el(`<div class="err" style="margin-top:-8px"></div>`);
     scroll.appendChild(expErr);
@@ -770,15 +868,18 @@ async function renderProject() {
         const card = el(`<div class="secret card">\n      <div class="head">${prov.svg}<span class="key mono">${esc(s.key)}</span><span class="pname">${esc(prov.name)}</span></div>\n      ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}\n      ${sub ? `<div class="note">${sub}</div>` : ""}\n      ${s.note ? `<div class="note">${esc(s.note)}</div>` : ""}\n      <div class="val" data-val style="display:none"></div>\n      <div class="actions"></div></div>`);
         card.dataset.key = s.key;
         const valEl = card.querySelector("[data-val]");
+        valEl.id = `value-${++fieldIds}`;
         const ownActions = [];
         const actions = card.querySelector(".actions");
-        const showBtn = el(`<button class="iconbtn">Reveal</button>`);
+        const showBtn = el(`<button class="iconbtn" aria-expanded="false">Reveal</button>`);
+        showBtn.setAttribute("aria-controls", valEl.id);
         let shown = false;
         showBtn.onclick = async () => {
             if (shown) {
                 valEl.textContent = "";
                 valEl.style.display = "none";
                 showBtn.textContent = "Reveal";
+                showBtn.setAttribute("aria-expanded", "false");
                 shown = false;
                 return;
             }
@@ -789,12 +890,14 @@ async function renderProject() {
             valEl.textContent = lines.join("\n");
             valEl.style.display = "block";
             showBtn.textContent = "Hide";
+            showBtn.setAttribute("aria-expanded", "true");
             shown = true;
         };
         const copyBtn = el(`<button class="iconbtn">Copy</button>`);
         copyBtn.onclick = async () => {
             await human("copy", project, s.key);
             if (revision !== renderVersion) return;
+            announce(`Copied ${s.key}`);
             copyBtn.textContent = "Copied";
             copyBtn.classList.add("copied");
             setTimeout(() => {
@@ -916,7 +1019,7 @@ function renderProviderPicker(project) {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label">Add to ${esc(project)}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Add to ${esc(project)}</h1></div>`));
     scroll.appendChild(el(`<div class="note" style="margin:-4px 2px 12px">Which service is this for?</div>`));
     const grid = el(`<div class="picker-grid"></div>`);
     for (const p of PROVIDERS) {
@@ -976,7 +1079,7 @@ async function renderSecret() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label" style="display:flex;align-items:center;gap:7px">${prov.svg}${esc(prov.name)}</span><span class="label">${editing ? "Edit" : "New"}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label" style="display:flex;align-items:center;gap:7px">${prov.svg}${esc(prov.name)}</h1><span class="label">${editing ? "Edit" : "New"}</span></div>`));
     if (prov.type === "password") buildPasswordForm(scroll, project, prov, editing, current); else if (prov.type === "custom") buildCustomForm(scroll, project, prov, editing, current); else buildKeysForm(scroll, project, prov, editing, current);
     if (editing) itemTail(scroll, project, editing, current);
     $app.appendChild(scroll);
@@ -1017,7 +1120,7 @@ function accountFields(current) {
     const email = el(`<input type="text" placeholder="Email" value="${esc(current ? current.email : "")}" />`);
     const pass = el(`<input type="password" placeholder="Account password" autocomplete="off" value="${esc(current ? current.password : "")}" />`);
     const url = el(`<input type="text" placeholder="URL" value="${esc(current ? current.url : "")}" />`);
-    [ user, email, passwordRow(pass), url ].forEach(n => box.appendChild(n));
+    [ labeled("Username", user), labeled("Email", email), labeled("Account password", passwordRow(pass), pass), labeled("URL", url) ].forEach(n => box.appendChild(n));
     return {
         nodes: [ head, box ],
         get: () => ({
@@ -1031,10 +1134,10 @@ function accountFields(current) {
 
 function metaFields(prov, current) {
     const permBlock = fieldBlock("Permission level" + OPTIONAL);
-    const permGrid = el(`<div class="provider-grid"></div>`);
+    const permGrid = el(`<div class="provider-grid" role="group" aria-label="Permission levels"></div>`);
     const permInput = el(`<input type="text" placeholder="e.g. service_role (full)" value="${esc(current ? current.permission : "")}" style="margin-top:8px" />`);
     for (const lvl of prov.permissions || []) {
-        const chip = el(`<div class="pchip"><span>${esc(lvl)}</span></div>`);
+        const chip = el(`<button type="button" class="pchip" aria-label="Set permission to ${esc(lvl)}"><span>${esc(lvl)}</span></button>`);
         chip.onclick = () => {
             permInput.value = lvl;
         };
@@ -1043,13 +1146,13 @@ function metaFields(prov, current) {
     permBlock.appendChild(permGrid);
     permBlock.appendChild(permInput);
     const expBlock = fieldBlock("Expires" + OPTIONAL);
-    const expGrid = el(`<div class="provider-grid"></div>`);
+    const expGrid = el(`<div class="provider-grid" role="group" aria-label="Expires"></div>`);
     const dateInput = el(`<input type="date" style="margin-top:8px;display:none" />`);
     let expiresAt = current && current.expiresAt ? current.expiresAt : "";
     const presets = [ [ "No expiry", 0 ], [ "24 hours", 1 ], [ "7 days", 7 ], [ "30 days", 30 ], [ "90 days", 90 ], [ "Custom…", -1 ] ];
-    const setActive = label => [ ...expGrid.children ].forEach(c => c.classList.toggle("sel", c.dataset.label === label));
+    const setActive = label => [ ...expGrid.children ].forEach(c => press(c, c.dataset.label === label));
     for (const [label, days] of presets) {
-        const chip = el(`<div class="pchip" data-label="${esc(label)}"><span>${esc(label)}</span></div>`);
+        const chip = el(`<button type="button" class="pchip" aria-pressed="false" data-label="${esc(label)}"><span>${esc(label)}</span></button>`);
         chip.onclick = () => {
             if (days === 0) {
                 expiresAt = "";
@@ -1086,7 +1189,7 @@ function metaFields(prov, current) {
 
 function buildKeysForm(scroll, project, prov, editing, current) {
     const whichField = fieldBlock("Which key");
-    const opts = el(`<div class="provider-grid"></div>`);
+    const opts = el(`<div class="provider-grid" role="group" aria-label="Which key"></div>`);
     whichField.appendChild(opts);
     const keyField = fieldBlock('Key name <span class="optional">(the env variable)</span>');
     const keyInput = el(`<input type="text" placeholder="${esc(prov.fields[0] ? prov.fields[0].key : "API_KEY")}" value="${esc(current ? current.key : "")}" />`);
@@ -1094,7 +1197,8 @@ function buildKeysForm(scroll, project, prov, editing, current) {
     function paintOpts() {
         opts.innerHTML = "";
         for (const f of prov.fields) {
-            const chip = el(`<div class="pchip ${f.key === keyInput.value ? "sel" : ""}" title="${esc(f.key)}"><span>${esc(f.label)}</span></div>`);
+            const chip = el(`<button type="button" class="pchip" title="${esc(f.key)}"><span>${esc(f.label)}</span></button>`);
+            press(chip, f.key === keyInput.value);
             chip.onclick = () => {
                 keyInput.value = f.key;
                 paintOpts();
@@ -1261,7 +1365,7 @@ async function renderSettings() {
     }));
     const page = el(`<div class="scroll"></div>`);
     let scroll = page;
-    page.appendChild(el(`<div class="section"><span class="label">Settings</span></div>`));
+    page.appendChild(el(`<div class="section"><h1 class="label">Settings</h1></div>`));
     const s = await window.vault.getSettings();
     if (revision !== renderVersion) return;
     scroll = panel(page, "Export password");
@@ -1454,6 +1558,7 @@ git config --global commit.gpgsign true`;
             return;
         }
         err.textContent = "";
+        announce("Settings saved");
         save.textContent = "Saved ✓";
         save.classList.add("copied");
         setTimeout(() => {
@@ -1477,7 +1582,7 @@ git config --global commit.gpgsign true`;
     const pwNew = el(`<input type="password" placeholder="New password" />`);
     const pwNew2 = el(`<input type="password" placeholder="Confirm new password" />`);
     const pwErr = el(`<div class="err"></div>`);
-    const pwOut = el(`<div class="val" style="display:none"></div>`);
+    const pwOut = el(`<div class="val" role="status" style="display:none"></div>`);
     const pwBtn = el(`<button class="btn ghost">Change master password</button>`);
     pwBtn.onclick = async () => {
         pwErr.textContent = "";
@@ -1508,7 +1613,7 @@ git config --global commit.gpgsign true`;
         }
         pwBtn.textContent = "Change master password";
     };
-    for (const n of [ pwOld, pwNew, pwNew2 ]) scroll.appendChild(n);
+    for (const [ n, text ] of [ [ pwOld, "Current password" ], [ pwNew, "New password" ], [ pwNew2, "Confirm new password" ] ]) scroll.appendChild(labeled(text, n));
     scroll.appendChild(pwErr);
     scroll.appendChild(pwBtn);
     scroll.appendChild(pwOut);
@@ -1556,7 +1661,7 @@ async function renderAgents() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label">Agents</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Agents</h1></div>`));
     scroll.appendChild(el(`<div class="note" style="margin:0 2px 14px">Any AI tool can be enrolled: Claude Code, Codex, Cursor, a script. Each gets its own token and its own scopes. Approve specific projects and folders. Agents can add keys only with the add scope; editing your keys also requires delegation and its matching scope.</div>`));
     const list = await window.vault.agents();
     if (revision !== renderVersion) return;
@@ -1652,13 +1757,14 @@ async function renderAgents() {
     const nameIn = el(`<input type="text" placeholder="claude-code, codex, cursor…" />`);
     field.appendChild(nameIn);
     enrol.appendChild(field);
-    const scopeWrap = el(`<div class="badges" style="margin:0 2px 12px"></div>`);
+    const scopeWrap = el(`<div class="badges" role="group" aria-label="Scopes" style="margin:0 2px 12px"></div>`);
     const chosen = new Set([ "read", "inject" ]);
     for (const sc of allScopes) {
-        const b = el(`<button type="button" class="badge ${chosen.has(sc) ? "perm" : ""}">${esc(sc)}</button>`);
+        const b = el(`<button type="button" class="badge scope">${esc(sc)}</button>`);
+        b.setAttribute("aria-pressed", String(chosen.has(sc)));
         b.onclick = () => {
             chosen.has(sc) ? chosen.delete(sc) : chosen.add(sc);
-            b.className = `badge ${chosen.has(sc) ? "perm" : ""}`;
+            b.setAttribute("aria-pressed", String(chosen.has(sc)));
         };
         scopeWrap.appendChild(b);
     }
@@ -1705,7 +1811,7 @@ async function renderDelegate() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label">${esc(secret)}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">${esc(secret)}</h1></div>`));
     scroll.appendChild(el(`<div class="note" style="margin:0 2px 14px">Delegating lets an agent rotate or update this key. It stays yours and stays here; you can take it back at any time.</div>`));
     const all = await window.vault.secrets(project);
     if (revision !== renderVersion) return;
@@ -1812,15 +1918,17 @@ async function renderSync() {
             }
         }
     }));
-    const scroll = el('<div class="scroll"><h2>Encrypted sync</h2><p class="note">Optional. Uses your dedicated Git repository and age. Follow docs/SYNC.md to configure transport and verify each peer identity through a trusted channel.</p></div>');
+    const scroll = el('<div class="scroll"><h1 class="pageh">Encrypted sync</h1><p class="note">Optional. Uses your dedicated Git repository and age. Follow docs/SYNC.md to configure transport and verify each peer identity through a trusted channel.</p></div>');
     $app.appendChild(scroll);
     const output = el('<pre class="val" style="white-space:pre-wrap"></pre>');
     const run = async fn => {
         try {
             const result = await fn();
             if (revision === renderVersion) output.textContent = JSON.stringify(result, null, 2);
+            announce("Done; the result is below.");
         } catch (e) {
             if (revision === renderVersion) output.textContent = e.message;
+            announce(e.message);
         }
     };
     const label = el('<input placeholder="Machine label (public in sync repository)" />');
@@ -1848,10 +1956,10 @@ async function renderSync() {
     const machineRow = el('<div class="btnrow"></div>');
     machineRow.appendChild(init);
     machineRow.appendChild(identity);
-    thisMachine.appendChild(label);
+    thisMachine.appendChild(labeled("Machine label", label));
     thisMachine.appendChild(machineRow);
     const peers = group("Peers");
-    for (const n of [ peer, trust ]) peers.appendChild(n);
+    for (const n of [ labeled("Peer identity", peer), trust ]) peers.appendChild(n);
     const records = group("Move records");
     const moveRow = el('<div class="btnrow halves"></div>');
     moveRow.appendChild(push);
@@ -2017,6 +2125,18 @@ const within = (node, sel) => [ ...node.matches(sel) ? [ node ] : [], ...node.qu
 
 new MutationObserver(mutations => {
     const added = mutations.flatMap(m => [ ...m.addedNodes ]).filter(n => n.nodeType === 1);
+    for (const e of added.flatMap(n => within(n, ".err:not([role])"))) e.setAttribute("role", "alert");
+    const heading = added.flatMap(n => within(n, "h1"))[0];
+    if (heading) {
+        document.title = `${heading.textContent.trim()} — VaultOS`;
+        if (focusHeading) {
+            focusHeading = false;
+            heading.tabIndex = -1;
+            if (!$app.contains(document.activeElement) || document.activeElement === $app) heading.focus({
+                preventScroll: true
+            });
+        }
+    }
     for (const input of added.flatMap(n => within(n, "input:not([aria-label]),textarea:not([aria-label]),select:not([aria-label])"))) if (!input.closest("label")) input.setAttribute("aria-label", input.closest(".field")?.querySelector(".label")?.textContent || input.placeholder || input.type);
     for (const row of added.flatMap(n => within(n, ".row:not([tabindex]),.pcard:not([tabindex]),.crumb:not([tabindex])"))) {
         row.tabIndex = 0;

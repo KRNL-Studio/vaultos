@@ -59,11 +59,11 @@ function strengthMeter(input) {
 
 // The generator: a recipe in, a value out; "Use" puts it in the field.
 function openGenerator(target) {
-    const modal = el(`<div class="modal" role="dialog" aria-modal="true" aria-label="Password generator"><div class="box card wide"><div class="card-head"><h3 class="card-title">Generate</h3></div><div class="card-body">
-      <div class="provider-grid gen-kinds"></div>
+    const modal = el(`<div class="modal" role="dialog" aria-modal="true" aria-label="Password generator"><div class="box card wide"><div class="card-head"><h2 class="card-title">Generate a password</h2></div><div class="card-body">
+      <div class="provider-grid gen-kinds" role="radiogroup" aria-label="Kind"></div>
       <div class="gen-opts"></div>
-      <div class="val mono gen-out"></div>
-      <div class="note gen-bits"></div>
+      <div class="val mono gen-out" aria-label="Generated value"></div>
+      <div class="note gen-bits" role="status"></div>
       <div class="row2"><button class="btn ghost">Cancel</button><button class="btn ghost">Again</button><button class="btn primary">Use</button></div></div></div></div>`);
     const recipe = {
         kind: "random",
@@ -80,10 +80,11 @@ function openGenerator(target) {
     const out = modal.querySelector(".gen-out"), bits = modal.querySelector(".gen-bits");
     const [ cancel, again, use ] = modal.querySelectorAll(".row2 button");
     let value = "";
+    let closeModal = () => {};
     const close = () => {
         value = "";
         out.textContent = "";
-        modal.remove();
+        closeModal();
     };
     const toggle = (name, label) => {
         const row = el(`<label class="chkrow"><input type="checkbox" class="chk" /> <span></span></label>`);
@@ -123,19 +124,36 @@ function openGenerator(target) {
             opts.append(slider("length", "Digits", 4, 12));
         }
     };
+    // One tab stop for the group; the arrow keys move between kinds and choose.
+    const mark = id => [ ...kinds.children ].forEach(c => {
+        const on = c.dataset.kind === id;
+        c.classList.toggle("sel", on);
+        c.setAttribute("aria-checked", String(on));
+        c.tabIndex = on ? 0 : -1;
+    });
+    const choose = id => {
+        recipe.kind = id;
+        if (id === "pin") recipe.length = 6; else if (recipe.length < 8) recipe.length = 24;
+        mark(id);
+        paintOpts();
+        generate();
+    };
     for (const [ id, label ] of [ [ "random", "Random" ], [ "passphrase", "Passphrase" ], [ "pin", "PIN" ] ]) {
-        const chip = el(`<div class="pchip" role="button" tabindex="0"><span></span></div>`);
+        const chip = el(`<button type="button" class="pchip" role="radio" aria-checked="false"><span></span></button>`);
         chip.querySelector("span").textContent = label;
         chip.dataset.kind = id;
-        chip.onclick = () => {
-            recipe.kind = id;
-            if (id === "pin") recipe.length = 6; else if (recipe.length < 8) recipe.length = 24;
-            [ ...kinds.children ].forEach(c => c.classList.toggle("sel", c.dataset.kind === id));
-            paintOpts();
-            generate();
-        };
+        chip.onclick = () => choose(id);
         kinds.appendChild(chip);
     }
+    kinds.addEventListener("keydown", e => {
+        const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+        if (!step) return;
+        e.preventDefault();
+        const all = [ ...kinds.children ];
+        const next = all[(all.findIndex(c => c.dataset.kind === recipe.kind) + step + all.length) % all.length];
+        choose(next.dataset.kind);
+        next.focus();
+    });
     const body = () => recipe.kind === "random" ? {
         kind: "random",
         length: recipe.length,
@@ -176,13 +194,10 @@ function openGenerator(target) {
         close();
         target.focus();
     };
-    modal.addEventListener("keydown", e => {
-        if (e.key === "Escape") close();
-    });
-    kinds.firstElementChild.classList.add("sel");
+    mark(recipe.kind);
     paintOpts();
-    document.body.appendChild(modal);
-    use.focus();
+    closeModal = openModal(modal, close);
+    kinds.firstElementChild.focus();
     generate();
 }
 
@@ -213,11 +228,15 @@ function itemExtras(prov, current) {
     const rows = el(`<div class="cfields"></div>`);
     const secrets = new Map((current && current.secretFields || []).map(f => [ f.id, f.value ]));
     const addRow = f => {
-        const row = el(`<div class="cfield"><input type="text" placeholder="Label" /><span class="kindsel"></span><span class="valslot"></span><button type="button" class="iconbtn danger" aria-label="Remove field">Remove</button></div>`);
+        const n = rows.children.length + 1;
+        const row = el(`<div class="cfield"><input type="text" placeholder="Label" /><span class="kindsel"></span><span class="valslot"></span><button type="button" class="iconbtn danger">Remove</button></div>`);
         row.dataset.id = f.id || "";
         const label = row.querySelector("input");
         label.value = f.label || "";
+        label.setAttribute("aria-label", `Field ${n} label`);
+        row.querySelector("button.danger").setAttribute("aria-label", `Remove field ${n}`);
         const k = selectOf(FIELD_KINDS, f.kind || "text");
+        k.setAttribute("aria-label", `Field ${n} type`);
         row.querySelector(".kindsel").appendChild(k);
         const slot = row.querySelector(".valslot");
         let input = null;
@@ -228,6 +247,7 @@ function itemExtras(prov, current) {
             input.placeholder = k.value === "otp" ? "otpauth:// link or setup key" : "Value";
             input.type = isSecretField(k.value) ? "password" : k.value === "date" ? "date" : "text";
             input.autocomplete = "off";
+            input.setAttribute("aria-label", `Field ${n} value`);
             input.value = prior;
             slot.appendChild(isSecretField(k.value) ? concealedRow(input) : input);
         };
@@ -287,7 +307,10 @@ function itemTail(scroll, project, key, current) {
             msg.textContent = "";
             try {
                 const r = await human("saveAttachment", project, key, a.id);
-                if (r.ok) save.textContent = "Saved";
+                if (r.ok) {
+                    save.textContent = "Saved";
+                    announce(`Saved ${a.name}`);
+                }
             } catch (e) {
                 msg.textContent = cleanError(e);
             }
@@ -343,17 +366,22 @@ function otpButton(project, key, revision) {
     const wrap = el(`<span class="otp"></span>`);
     const btn = el(`<button class="iconbtn" title="Show the one-time code">Code</button>`);
     const code = el(`<span class="otpcode mono" hidden></span>`);
+    const left_ = el(`<span class="otpleft" role="timer" aria-live="off" hidden></span>`);
     let timer = null, digits = "", left = 0, periods = 0;
     const stop = () => {
         clearTimeout(timer);
         digits = "";
         code.hidden = true;
         code.textContent = "";
+        left_.hidden = true;
+        left_.textContent = "";
         btn.textContent = "Code";
     };
     const paint = () => {
         const half = Math.ceil(digits.length / 2);
-        code.textContent = `${digits.slice(0, half)} ${digits.slice(half)} · ${left}s`;
+        code.textContent = `${digits.slice(0, half)} ${digits.slice(half)}`;
+        left_.textContent = `${left}s`;
+        left_.setAttribute("aria-label", `${left} seconds left`);
     };
     const tick = () => {
         if (revision !== renderVersion || !document.body.contains(wrap)) return stop();
@@ -371,13 +399,15 @@ function otpButton(project, key, revision) {
             left = r.remaining;
             periods++;
             paint();
-            code.hidden = false;
+            code.hidden = left_.hidden = false;
             btn.textContent = "Copy code";
+            if (periods === 1) announce(`One-time code shown, ${left} seconds left`);
             timer = setTimeout(tick, 1000);
         } catch (e) {
             stop();
             code.hidden = false;
             code.textContent = cleanError(e);
+            announce(cleanError(e));
         }
     };
     btn.onclick = async () => {
@@ -386,6 +416,7 @@ function otpButton(project, key, revision) {
             return fetchCode();
         }
         await window.vault.copyOtp(project, key);
+        announce("Code copied");
         btn.textContent = "Copied";
         btn.classList.add("copied");
         setTimeout(() => {
@@ -393,7 +424,7 @@ function otpButton(project, key, revision) {
             if (!code.hidden) btn.textContent = "Copy code";
         }, 1200);
     };
-    wrap.append(btn, code);
+    wrap.append(btn, code, left_);
     return wrap;
 }
 
@@ -417,7 +448,7 @@ async function renderTrash() {
     const scroll = el(`<div class="scroll"></div>`);
     const items = await window.vault.trash();
     if (revision !== renderVersion) return;
-    scroll.appendChild(el(`<div class="section"><span class="label">Trash</span><span class="label">${items.length}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Trash</h1><span class="label">${items.length}</span></div>`));
     scroll.appendChild(el(`<p class="note" style="margin:-4px 2px 12px">Agents cannot see items in the Trash. They are deleted for good after 30 days.</p>`));
     const err = el(`<div class="err"></div>`);
     if (items.length) {
@@ -499,7 +530,7 @@ async function renderWatchtower() {
     const scroll = el(`<div class="scroll"></div>`);
     const findings = await window.vault.watchtower();
     if (revision !== renderVersion) return;
-    scroll.appendChild(el(`<div class="section"><span class="label">Watchtower</span><span class="label">${findings.length} ${findings.length === 1 ? "issue" : "issues"}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Watchtower</h1><span class="label">${findings.length} ${findings.length === 1 ? "issue" : "issues"}</span></div>`));
     const open = f => {
         view = {
             name: "secret",
@@ -509,7 +540,7 @@ async function renderWatchtower() {
         render();
     };
     const row = (f, detail) => {
-        const r = el(`<div class="row"><div class="grow"><div class="name mono"></div><div class="sub"></div></div><div class="chev">›</div></div>`);
+        const r = el(`<div class="row"><div class="grow"><div class="name mono"></div><div class="sub"></div></div><div class="chev" aria-hidden="true">›</div></div>`);
         r.querySelector(".name").textContent = f.key;
         r.querySelector(".sub").textContent = [ f.project, detail ].filter(Boolean).join(" · ");
         r.onclick = () => open(f);
@@ -528,7 +559,7 @@ async function renderWatchtower() {
     const breach = panel(scroll, "Breached passwords");
     breach.appendChild(el(`<div class="note">Checks your passwords against Have I Been Pwned. Only the first 5 characters of each password's SHA-1 hash leave this device; nothing runs until you choose Check.</div>`));
     const check = el(`<button class="btn sm">Check now</button>`);
-    const out = el(`<div></div>`);
+    const out = el(`<div role="status"></div>`);
     check.onclick = async () => {
         check.disabled = true;
         check.textContent = "Checking…";
@@ -549,7 +580,7 @@ async function renderWatchtower() {
     leaks.appendChild(el(`<div class="note">Looks for your vault's values in a folder's files (.git and node_modules are skipped). Nothing leaves this device. For staged changes and Git history, use <span class="mono">vaultos scan --staged</span> or <span class="mono">--history</span> with a saved index.</div>`));
     const scanBtn = el(`<button class="btn sm">Scan a folder…</button>`);
     const saveIndex = el(`<button class="btn ghost sm">Save index for vaultos scan</button>`);
-    const found = el(`<div></div>`);
+    const found = el(`<div role="status"></div>`);
     scanBtn.onclick = async () => {
         scanBtn.disabled = true;
         scanBtn.textContent = "Scanning…";
@@ -611,7 +642,7 @@ async function renderVersions() {
     const scroll = el(`<div class="scroll"></div>`);
     const entries = await window.vault.itemHistory(project, key);
     if (revision !== renderVersion) return;
-    scroll.appendChild(el(`<div class="section"><span class="label mono"></span><span class="label">Versions</span></div>`)).querySelector(".label").textContent = key;
+    scroll.appendChild(el(`<div class="section"><h1 class="label mono"></h1><span class="label">Versions</span></div>`)).querySelector(".label").textContent = key;
     scroll.appendChild(el(`<p class="note" style="margin:-4px 2px 12px">Restoring a version keeps the current owner, delegation and attachments, and can be undone.</p>`));
     const err = el(`<div class="err"></div>`);
     scroll.appendChild(err);

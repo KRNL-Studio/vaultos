@@ -25,7 +25,15 @@ function mode(name) {
     list.hidden = name !== "search";
     $("hints").hidden = name !== "search";
     q.disabled = name !== "search";
+    $("none").hidden = name !== "search";
     $("state").textContent = name === "locked" ? "Locked" : "VaultOS";
+    if (name !== "search") listShown(false);
+}
+
+// The combobox says whether its list has anything to choose from.
+function listShown(open) {
+    q.setAttribute("aria-expanded", String(open));
+    if (!open) q.removeAttribute("aria-activedescendant");
 }
 
 function forget() {
@@ -43,12 +51,12 @@ const initialOf = name => (String(name || "").trim().match(/[\p{L}\p{N}]/u) || [
 function renderList() {
     list.textContent = "";
     if (!items.length) {
-        const li = document.createElement("li");
-        li.className = "empty";
-        li.textContent = q.value.trim() ? "No matches. Try a project, username or website." : "Nothing here yet. Add keys in VaultOS.";
-        list.append(li);
+        listShown(false);
+        $("none").textContent = q.value.trim() ? "No matches. Try a project, username or website." : "Nothing here yet. Add keys in VaultOS.";
         return;
     }
+    $("none").textContent = "";
+    listShown(true);
     items.forEach((item, i) => {
         const li = document.createElement("li");
         li.setAttribute("role", "option");
@@ -56,6 +64,7 @@ function renderList() {
         li.setAttribute("aria-selected", String(i === selected));
         const tile = document.createElement("span");
         tile.className = "tile";
+        tile.setAttribute("aria-hidden", "true");
         tile.textContent = initialOf(item.key);
         const mid = document.createElement("div");
         mid.style.minWidth = "0";
@@ -143,10 +152,6 @@ $("confirm-cancel").addEventListener("click", () => confirmResolve && confirmRes
 
 $("confirm-pw").addEventListener("keydown", e => {
     if (e.key === "Enter") $("confirm-ok").click();
-    if (e.key === "Escape") {
-        e.preventDefault();
-        $("confirm-cancel").click();
-    }
 });
 
 async function act(kind) {
@@ -193,17 +198,13 @@ q.addEventListener("keydown", e => {
     } else if (mod && e.key.toLowerCase() === "c" && q.selectionStart === q.selectionEnd) {
         e.preventDefault();
         act("username");
-    } else if (e.key === "Escape") {
-        e.preventDefault();
-        if (q.value) {
-            q.value = "";
-            runSearch();
-        } else window.quick.hide();
     }
 });
 
 document.addEventListener("keydown", e => {
-    if (e.key === "Escape" && !unlocked && $("confirm").hidden) window.quick.hide();
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    if (!$("confirm").hidden) $("confirm-cancel").click(); else window.quick.hide();
 });
 
 async function unlockWith(fn) {
