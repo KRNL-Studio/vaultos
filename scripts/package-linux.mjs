@@ -37,8 +37,8 @@ const archive = path.resolve("dist", `VaultOS-${v}-linux-${arch}-unsigned.tar.gz
 execFileSync("tar", [ "-czf", archive, "-C", path.dirname(folder), path.basename(folder) ], {
     stdio: "inherit"
 });
-budget(path.basename(folder), folder, 80);
-budget(path.basename(archive), archive, 30);
+budget(path.basename(folder), folder, 28);
+budget(path.basename(archive), archive, 10);
 checksum(archive);
 sbom(triple, archive.replace(/\.tar\.gz$/, ".cdx.json"));
 console.log("Built " + archive);
