@@ -10,6 +10,7 @@ The process that owns the unlocked vault serves agents on a private Unix socket:
 | --- | --- | --- |
 | `vaultos-mcp`, the stdio MCP bridge | `/Applications/VaultOS.app/Contents/Helpers/vaultos-mcp` | `~/.local/opt/vaultos-preview/vaultos-mcp` |
 | `vaultos-agent`, the shell client | `/Applications/VaultOS.app/Contents/Helpers/vaultos-agent` | `~/.local/opt/vaultos-preview/vaultos-agent` |
+| `vaultos-ssh-sign`, Git's SSH signing program | `/Applications/VaultOS.app/Contents/Helpers/vaultos-ssh-sign` | `~/.local/opt/vaultos-preview/vaultos-ssh-sign` |
 
 Use the path where you actually put the app. Neither program needs Node.js, keeps vault state or starts anything: each call is one request to the owner, which enforces the agent's scopes, project and folder grants and approvals.
 
@@ -49,6 +50,7 @@ Client configuration locations vary. Use your client's documented MCP settings. 
 | `edit:own` | Update that agent's records |
 | `edit:delegated` | Update records explicitly delegated to it |
 | `delete:own` | Move that agent's records to the Trash |
+| `run` | Start one of the commands the human allowed with an approved project's values in its environment; the agent gets the masked output, not the values |
 | `reveal` | Return raw secret values and content fingerprints |
 
 Agents cannot enroll, widen scopes or folders, approve their own records, adopt human-owned records, change settings, or undo human history via the API or MCP. Revoke a token in the desktop to stop future API calls. Revocation does not erase files or values already disclosed.
@@ -56,6 +58,16 @@ Agents cannot enroll, widen scopes or folders, approve their own records, adopt 
 `import_env` accepts `createProject: true`. It creates the project only when no project with that name exists, requires the same `add` scope as `create_project`, and validates the source path first. An existing project that is not approved for the agent is still refused.
 
 `set_secret` takes optional `kind` (`login`, `api_key`, `note`, `ssh_key`, `database`, `server` or `certificate`) and `tags`. `delete_secret` moves the record to the Trash, where the human can restore it for 30 days. Items the human archives or moves to the Trash are absent for agents: listing, search, injection and reveal leave them out. Custom fields of kind concealed or one-time code are never sent to agents, even with `reveal`; favorites, attachments, versions, Watchtower and imports from other password managers are desktop and `vaultos` features.
+
+### Running commands with secrets
+
+The `run` scope lets an agent use secrets without receiving them. The human grants it with a list of allowed commands, each a program and optionally its first arguments, in Settings → Agents (Commands…) or with `vaultos agents grant NAME --scopes read,run --run-command "npm test" --run-command "cargo run"`. `run_with_secrets` takes `{project, command, cwd, keys?, timeout_seconds?}`: `command` is an argument list that must begin, word for word, with an allowed entry, `cwd` must be inside an approved folder, and `timeout_seconds` is 1 to 600 (default 120). The bridge starts the command with the project's approved values in its environment (keys awaiting approval are left out and listed in `heldForApproval`), and returns its exit code and up to 64 KB of stdout and stderr with every value replaced by `<concealed by VaultOS>`. `vaultos-agent run PROJECT [--keys A,B] -- COMMAND` does the same in the current folder and streams the masked output. `whoami` lists the allowed commands as `runCommands`.
+
+The allowed program does see the values, so choose entries that cannot be steered into printing or sending them: `sh -c`, `node -e` or `python` with any arguments are close to granting `reveal`. Masking catches exact values, not encoded or transformed ones.
+
+### Just-in-time access
+
+An agent that needs more than it was enrolled with can ask instead of failing: `request_access` takes `{project, scopes, minutes?, reason}` (minutes 1 to 60, default 15), or `vaultos-agent request-access --project P --scope reveal --minutes 10 --reason "check the staging key"`. The app asks the human with Touch ID or a dialog that shows the agent, scopes, project, minutes and reason. A grant covers that project only, lives in the owner's memory and ends when it expires, when the vault locks, or when the human chooses End temporary access in Settings → Agents; `whoami` lists it under `grants`. A refused request returns 403, and the same agent must wait a minute before asking again (429). The background service and `vaultosd` cannot ask anyone and return 503. A grant never lets an agent create projects, and allowed run commands still come only from enrollment.
 
 ### All-access grants
 
@@ -74,6 +86,8 @@ vaultos-agent search TEXT
 vaultos-agent inject PROJECT /absolute/project/.env --keys A,B --format dotenv
 printf %s "$VALUE" | vaultos-agent add PROJECT KEY --note "optional"
 vaultos-agent import PROJECT /absolute/project/.env [--create-project]
+vaultos-agent run PROJECT [--keys A,B] -- npm test           # run scope; output is masked
+vaultos-agent request-access --project PROJECT --scope read --reason "why"
 ```
 
 Output is JSON and never contains values. `add` reads the value from stdin only and refuses one passed as an argument. `--replace` turns off merging. Sync is an owner action, so agents cannot request a round. Exit codes: 2 usage, 3 not running, 4 locked, 5 token problem.
@@ -98,7 +112,15 @@ vaultos inject PROJECT /absolute/project/.env        # replaces the file
 vaultos import-items PROJECT /absolute/export.1pux   # or a Bitwarden .json or a .csv export
 vaultos otp PROJECT KEY                              # prints the item's current one-time code
 vaultos generate                                     # or --words 5, --pin --length 6, --no-symbols
+vaultos agents grant NAME --scopes read,run --run-command "npm test"   # --no-run-commands removes them
+vaultos read "vault://Example App/DB_URL"            # or vault://PROJECT/ITEM/FIELD
+vaultos render config.tmpl -o config.yml             # fills {{ vault://… }} into a new 0600 file
+vaultos run --project "Example App" -- npm start     # also --env-file F with vault:// values; output masked
+vaultos scan --update-index                          # then: vaultos scan [PATHS] | --staged | --history [--names]
+vaultos ssh keys                                     # public keys the app's SSH agent offers; ssh socket prints its path
 ```
+
+`read`, `render`, `run` and `scan --update-index` or `--names` open the vault themselves when nothing owns it; while the app owns it they ask it, and the app confirms each request with Touch ID (or the CLI asks for the master password). For a pre-commit hook, put `vaultos scan --staged` in `.git/hooks/pre-commit`: it exits 1 when a staged file contains one of the vault's values and needs no password, only the saved index.
 
 `enroll` writes a fresh token to the file (mode 0600, parent created 0700) and never prints it; enrolling an existing name reissues its token and invalidates the old one. `grant` replaces only the dimensions you name. To use the per-agent default, write the token to `<data directory>/agents/NAME.token` and set `VAULTOS_AGENT=NAME`. `rotate-password` uses the same recoverable rotation as the desktop; with `--password-stdin` the second line is the new password. `vaultos backup` copies `vault.enc`, the audit log and the sync index, never tokens or other credentials. `vaultos inject` uses human authority and replaces its target; agents use `vaultos-agent inject`, which merges. Run `vaultos help COMMAND` for each command's options. Sync commands are in [the sync guide](SYNC.md).
 

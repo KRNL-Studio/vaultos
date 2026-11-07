@@ -20,6 +20,20 @@ bridge tool names; a client may prefix them with a server namespace.
 | `delete_secret` | `{project,key}`; move this agent's record to the Trash (the human can restore it for 30 days) | `delete:own` |
 | `reveal_secret` | `{project,key}`; returns a raw value to the client/model | `reveal` |
 | `compare` | `{}`; secret-derived fingerprints for approved projects | `reveal` |
+| `run_with_secrets` | `{project,command,cwd,keys?,timeout_seconds?}`; starts an allowed command in an approved folder with the project's values and returns its masked output | `run` and an allowed command |
+| `request_access` | `{project,scopes,minutes?,reason}`; asks the human for temporary scopes on one project (1-60 minutes) | Enrolled identity; the human confirms |
+
+Prefer `run_with_secrets` to `inject_secrets` when the task is to run a command:
+the values never reach a file or the conversation. Only commands in `whoami`'s
+`runCommands` can run; ask the human to add one rather than wrapping a command in
+`sh -c`. Never try to print, encode or exfiltrate values through an allowed
+command: masking is a guard against accidents, and doing so breaks the human's trust
+in the grant.
+
+Use `request_access` only when the user's task needs access you lack, with a
+reason the human can judge; one request, then tell the user if it is refused.
+Granted scopes cover that project for the minutes granted and end when the vault
+locks. Do not ask repeatedly or for more scopes or time than the task needs.
 
 Existing projects must be approved for this agent. `edit:delegated` additionally
 requires explicit record delegation; scope alone does not grant ownership.
@@ -43,7 +57,8 @@ Agents without MCP can run `vaultos-agent`, which ships next to `vaultos-mcp` in
 the app, with the same token configuration: `status`, `whoami`,
 `projects`, `keys`, `search`, `inject PROJECT FILE [--keys A,B] [--format F]
 [--replace]`, `add PROJECT KEY` (value on stdin only), `import PROJECT FILE
-[--create-project]` and `pending`. Output never contains values. Never
+[--create-project]`, `pending`, `run PROJECT [--keys A,B] -- COMMAND` (run scope;
+masked output) and `request-access --project P --scope S --reason R [--minutes N]`. Output never contains values. Never
 pass a value as an argument. Exit code 3 means not running and 4 means locked;
 report either to the human instead of retrying in a loop.
 

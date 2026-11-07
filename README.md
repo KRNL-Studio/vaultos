@@ -17,6 +17,8 @@ VaultOS is a local desktop vault with an MCP bridge. Organize credentials by pro
 - **Protect existing credentials.** Human-owned entries require explicit delegation before an agent can edit them. Agent-created credentials start awaiting approval for injection.
 - **Local by default.** No account, hosted vault service, telemetry, or automatic cloud upload. Password remembering is optional and uses macOS Keychain or the Linux Secret Service, without a plaintext fallback.
 - **Practical daily tools.** A menu bar item, a Quick Access panel (⇧⌘Space) to find and copy a key from any app, search across every project, expiry metadata, short-lived clipboard copies, encrypted PDF export, password rotation, encrypted backups, and guarded undo.
+- **Secrets for programs, not prompts.** `vault://` references with `vaultos read`, `render` and `run` (output masked); a `run` scope so an agent can start an allowed command with secrets it never sees; and `vaultos scan` to catch the vault's values in files, staged changes and Git history.
+- **SSH keys and commit signing.** An opt-in SSH agent serves your Ed25519 keys to ssh and Git, asking for Touch ID before each new program signs, and agents can ask for time-boxed access that you confirm.
 - **A full password manager too.** Logins, API keys, notes, SSH keys, databases, servers and certificates with tags, favorites and custom fields; one-time codes; a password and passphrase generator; a Trash and archive; per-item versions; encrypted attachments; Watchtower for weak, reused, old and expiring secrets with an opt-in breach check; and import from 1Password, Bitwarden and CSV.
 - **Optional encrypted sync.** Use a separate Git repository with age encryption, pinned peer signing identities, tamper checks, and explicit conflict acceptance.
 
@@ -30,7 +32,7 @@ Injection reduces accidental disclosure in tool transcripts. **It does not stop 
 4. Try opening it. If macOS blocks the unidentified developer, follow Apple's [per-app Open Anyway instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**, only after you have verified and decided to trust the download. Managed Macs may disallow this. Do not disable Gatekeeper globally.
 5. Create a new vault using a unique passphrase of at least 12 characters. Optionally add a Secret Key, which the device keeps and a stolen vault file cannot be opened without. There is no password reset or recovery service.
 
-The app is a small native program (Rust, with the system's own web view for its pages). The MCP bridge (`vaultos-mcp`), the agent shell client (`vaultos-agent`), the recovery CLI (`vaultos`) and the headless owner (`vaultosd`) ship inside it, in `VaultOS.app/Contents/Helpers`. Git is needed only for optional sync. A vault from VaultOS 0.2 opens only to be upgraded, when you choose **Upgrade this vault**; read [Upgrading from 0.2](docs/RECOVERY.md#upgrading-from-02) first.
+The app is a small native program (Rust, with the system's own web view for its pages). The MCP bridge (`vaultos-mcp`), the agent shell client (`vaultos-agent`), the CLI (`vaultos`), the headless owner (`vaultosd`) and the Git signing helper (`vaultos-ssh-sign`) ship inside it, in `VaultOS.app/Contents/Helpers`. Git is needed only for optional sync. A vault from VaultOS 0.2 opens only to be upgraded, when you choose **Upgrade this vault**; read [Upgrading from 0.2](docs/RECOVERY.md#upgrading-from-02) first.
 
 ### First five minutes
 
@@ -41,6 +43,12 @@ Use **Lock** when finished. While the desktop is running, Lock, system sleep, sc
 ### Menu bar and Quick Access
 
 The menu bar item shows whether the vault is locked, how many agent records await approval, and sync health, and opens Quick Access, the window, Lock and Settings. Press **⇧⌘Space** anywhere to open Quick Access: type part of a key, project, username or website, then **⏎** copies the value, **⌘C** the username, **⌘O** opens the website and **⌘⏎** shows the key in VaultOS. Quick Access never receives values; the main process copies them. In the window, **⌘K** searches every project. **Settings → Menu bar & Quick Access** changes the shortcut, turns the menu bar item off, opens VaultOS at login (in the menu bar, locked) and turns on notifications for pending approvals and expiring keys. On Linux the tray icon is off by default (**Settings → Tray & Quick Access**), works only where the desktop shows tray icons, and the shortcut is **Ctrl+Shift+Space**.
+
+### Secrets for programs and SSH
+
+`vaultos run --project "Example App" -- npm start` starts a program with that project's values in its environment and masks them in its output; `vaultos read "vault://Example App/DB_URL"` prints one value and `vaultos render config.tmpl -o config.yml` fills a template. While the app is unlocked each of these asks for Touch ID. `vaultos scan --staged` in a pre-commit hook stops a commit that contains one of your values (`vaultos scan --update-index` once first).
+
+Turn on **Settings → SSH agent** to use SSH key items with ssh and Git. The panel shows the `IdentityAgent` line for `~/.ssh/config` and the Git settings for signing commits with `vaultos-ssh-sign`. See [SECURITY.md](SECURITY.md#boundaries-and-limitations) for what an approval covers.
 
 ## Install on Linux
 
