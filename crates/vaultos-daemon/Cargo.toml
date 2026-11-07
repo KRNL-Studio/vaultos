@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 vaultos-core = { path = "../vaultos-core" }
+vaultos-client = { path = "../vaultos-client" }
 vaultos-sync = { path = "../vaultos-sync" }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
@@ -29,7 +30,7 @@ percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "signal", "macros", "sync"] }
+zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3"
-vaultos-client = { path = "../vaultos-client" }

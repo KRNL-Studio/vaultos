@@ -19,7 +19,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use serde_json::Value;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::net::UnixListener;
@@ -28,12 +28,17 @@ use vaultos_core::crypto::{ct_eq, hex, random_array};
 use vaultos_core::fs_safe::{claim, LockFile};
 use vaultos_core::session::{prepare_socket_dir, socket_path, Session};
 use vaultos_core::{Error, Store};
+use zeroize::Zeroizing;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const GUARD_INTERVAL: Duration = Duration::from_secs(10);
 const FAILED_UNLOCK_DELAY: Duration = Duration::from_secs(1);
-/// The longest a connection is served: a manual sync round is the slowest request.
-const ROUND_LIMIT: Duration = Duration::from_secs(150);
+/// The longest a connection is served: an agent's command may run for ten minutes.
+const CONNECTION_LIMIT: Duration = Duration::from_secs(api::RUN_MAX_TIMEOUT + 30);
+/// Agents' commands running at once; more are refused.
+const MAX_RUNS: usize = 4;
+/// The stdout and stderr kept of each, masked.
+const MAX_RUN_OUTPUT: usize = 64 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -78,6 +83,7 @@ pub(crate) struct Shared {
     pub(crate) ssh: SshAgent,
     pub(crate) access: Access,
     pub(crate) runtime: tokio::runtime::Handle,
+    runs: AtomicUsize,
 }
 
 /// Never prints the session token.
@@ -264,6 +270,7 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
         ssh: SshAgent::default(),
         access: Access::default(),
         runtime: tokio::runtime::Handle::current(),
+        runs: AtomicUsize::new(0),
     });
 
     let guard = tokio::spawn(guard_loop(shared.clone(), cfg.idle_lock));
@@ -336,8 +343,7 @@ async fn accept_loop(
                 .header_read_timeout(Duration::from_secs(10))
                 .max_buf_size(16 * 1024)
                 .serve_connection(TokioIo::new(stream), service);
-            // Sync rounds may take up to two minutes; nothing else comes close.
-            let _ = tokio::time::timeout(ROUND_LIMIT, conn).await;
+            let _ = tokio::time::timeout(CONNECTION_LIMIT, conn).await;
         });
     }
 }
@@ -362,9 +368,10 @@ async fn respond(
     req: hyper::Request<Incoming>,
     pid: Option<i32>,
 ) -> hyper::Response<Full<Bytes>> {
-    let reply = route(shared, req, pid).await;
-    let body = serde_json::to_vec(&reply.body).unwrap_or_default();
-    let mut res = hyper::Response::new(Full::new(Bytes::from(body)));
+    let mut reply = route(shared, req, pid).await;
+    let body = encode(&reply.body);
+    vaultos_core::secret::scrub_json(&mut reply.body);
+    let mut res = hyper::Response::new(Full::new(Bytes::from_owner(Wiped(body))));
     *res.status_mut() = hyper::StatusCode::from_u16(reply.status)
         .unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
     let h = res.headers_mut();
@@ -375,6 +382,34 @@ async fn respond(
         HeaderValue::from_static("nosniff"),
     );
     res
+}
+
+/// A reply's bytes, zeroed when hyper is done with them: replies can carry values.
+struct Wiped(Zeroizing<Vec<u8>>);
+
+impl AsRef<[u8]> for Wiped {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The reply as JSON, in a buffer sized up front so growing it leaves no copies behind.
+fn encode(v: &Value) -> Zeroizing<Vec<u8>> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut n = Count(0);
+    let _ = serde_json::to_writer(&mut n, v);
+    let mut out = Zeroizing::new(Vec::with_capacity(n.0));
+    let _ = serde_json::to_writer(&mut *out, v);
+    out
 }
 
 async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i32>) -> Reply {
@@ -452,6 +487,7 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
         return access::request(shared, token, body, pid).await;
     }
     let method_changes = method != "GET";
+    let run = method == "POST" && target == "/run";
     let request = Request {
         method,
         target,
@@ -461,6 +497,9 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
         body,
         grants: Vec::new(),
     };
+    if run {
+        return run_command(shared, request).await;
+    }
     let s = shared.clone();
     let reply = tokio::task::spawn_blocking(move || {
         let mut request = request;
@@ -483,6 +522,91 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
         }
     }
     reply
+}
+
+/// A place among the [`MAX_RUNS`] commands running, given back when dropped.
+struct RunSlot(Arc<Shared>);
+
+impl RunSlot {
+    fn take(shared: &Arc<Shared>) -> Option<Self> {
+        let slot = Self(shared.clone());
+        (shared.runs.fetch_add(1, Ordering::SeqCst) < MAX_RUNS).then_some(slot)
+    }
+}
+
+impl Drop for RunSlot {
+    fn drop(&mut self) {
+        self.0.runs.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Raised when the request is dropped unanswered (the server stopping, or the connection
+/// ending), which stops the command.
+struct Abandon(Arc<AtomicBool>);
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// `POST /run`: the run scope. The plan is checked and the values read under the store
+/// (`api::run_plan`); this process then starts the command without holding it, and the
+/// agent gets the exit code and masked output, never the values. The command is stopped at
+/// its timeout or when this request is dropped.
+async fn run_command(shared: Arc<Shared>, mut request: Request) -> Reply {
+    if request.agent_token.is_none() {
+        return Reply::error(403, "An enrolled, active agent token is required");
+    }
+    let Some(slot) = RunSlot::take(&shared) else {
+        return Reply::error(
+            429,
+            "Four commands are already running; try again when one finishes",
+        );
+    };
+    let s = shared.clone();
+    let plan = tokio::task::spawn_blocking(move || {
+        s.with_store(|store| {
+            request.grants = s.access.live(store.lock_count());
+            api::run_plan(store, &request)
+        })
+    })
+    .await;
+    let plan = match plan {
+        Ok(Ok(p)) => p,
+        Ok(Err(r)) => return r,
+        Err(_) => return Reply::error(500, "Internal error"),
+    };
+    shared.touch();
+    let api::RunPlan {
+        program,
+        timeout,
+        project,
+        held_for_approval,
+    } = plan;
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let _abandon = Abandon(abandoned.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        vaultos_client::run::capture_until(&program, timeout, MAX_RUN_OUTPUT, &|| {
+            abandoned.load(Ordering::SeqCst)
+        })
+    })
+    .await;
+    shared.touch();
+    match out {
+        Ok(Ok(c)) => Reply::ok(serde_json::json!({
+            "project": project,
+            "exitCode": c.exit_code,
+            "timedOut": c.timed_out,
+            "truncated": c.truncated,
+            "stdout": c.stdout,
+            "stderr": c.stderr,
+            "heldForApproval": held_for_approval,
+        })),
+        Ok(Err(e)) => Reply::error(400, format!("The command could not be started: {e}")),
+        Err(_) => Reply::error(500, "Internal error"),
+    }
 }
 
 async fn read_body(req: hyper::Request<Incoming>) -> Result<Vec<u8>, Reply> {

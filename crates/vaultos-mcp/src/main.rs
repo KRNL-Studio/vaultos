@@ -2,8 +2,8 @@
 //! input schemas in `tools.json`. It keeps no vault state. Each call
 //! is one request to the daemon, which enforces the agent's scopes, project and folder
 //! grants and approvals. Only `reveal_secret` returns a value, and only with the reveal
-//! scope. `run_with_secrets` starts an allowed command here with a project's values in its
-//! environment and returns its output with those values masked.
+//! scope. `run_with_secrets` asks the owner to start an allowed command with a project's
+//! values in its environment; the bridge gets back its output with those values masked.
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
@@ -18,8 +18,6 @@ use std::sync::{Arc, OnceLock};
 use vaultos_client::{enc, Client};
 
 const TOOLS: &str = include_str!("tools.json");
-/// The most of each output stream `run_with_secrets` returns.
-const MAX_OUTPUT: usize = 64 * 1024;
 const DEFAULT_TIMEOUT: u64 = 120;
 const MAX_TIMEOUT: u64 = 600;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -146,14 +144,22 @@ fn call(client: &Client, name: &str, a: &JsonObject) -> Result<Value, String> {
                     .filter(|t| (1..=MAX_TIMEOUT).contains(t))
                     .ok_or("timeout_seconds must be 1 to 600")?,
             };
-            let body = pick(&[
+            let mut body = pick(&[
                 ("project", "project"),
                 ("command", "command"),
                 ("cwd", "cwd"),
                 ("keys", "keys"),
             ]);
-            let reply = send("POST", "/run/env", Some(body))?;
-            run_with_secrets(a, &reply, std::time::Duration::from_secs(timeout))
+            body.insert("timeout_seconds".into(), json!(timeout));
+            if let Ok(path) = std::env::var("PATH") {
+                body.insert("path".into(), json!(path));
+            }
+            // The owner replies when the command ends: at most the timeout, plus the time
+            // it takes to stop it and collect its output.
+            let wait = std::time::Duration::from_secs(timeout + 60);
+            client
+                .request_within("POST", "/run", Some(&Value::Object(body)), wait)
+                .map_err(|e| e.message)
         }
         "compare" => send("GET", "/compare", None),
         "list_pending" => send("GET", "/pending", None),
@@ -167,51 +173,6 @@ fn call(client: &Client, name: &str, a: &JsonObject) -> Result<Value, String> {
         }
         _ => Err(format!("unknown tool: {name}")),
     }
-}
-
-/// Starts the command the daemon approved, with the values it returned.
-fn run_with_secrets(
-    a: &JsonObject,
-    reply: &Value,
-    timeout: std::time::Duration,
-) -> Result<Value, String> {
-    use vaultos_client::run::{capture, Program};
-    use zeroize::Zeroizing;
-    let argv = a
-        .get("command")
-        .and_then(Value::as_array)
-        .map(|c| c.iter().filter_map(Value::as_str).map(Into::into).collect())
-        .unwrap_or_default();
-    let env = reply["values"]
-        .as_array()
-        .map(|v| {
-            v.iter()
-                .map(|p| {
-                    (
-                        p["key"].as_str().unwrap_or_default().to_owned(),
-                        Zeroizing::new(p["value"].as_str().unwrap_or_default().to_owned()),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let program = Program {
-        argv,
-        cwd: reply["cwd"].as_str().map(Into::into),
-        env,
-        plain: Vec::new(),
-    };
-    let out = capture(&program, timeout, MAX_OUTPUT)
-        .map_err(|e| format!("The command could not be started: {e}"))?;
-    Ok(json!({
-        "project": reply["project"],
-        "exitCode": out.exit_code,
-        "timedOut": out.timed_out,
-        "truncated": out.truncated,
-        "stdout": out.stdout,
-        "stderr": out.stderr,
-        "heldForApproval": reply["heldForApproval"],
-    }))
 }
 
 impl ServerHandler for Bridge {

@@ -100,13 +100,17 @@ enum Command {
     Sync,
     /// Agent-created keys awaiting human approval
     Pending,
-    /// Run an allowed command here with a project's values in its environment, masked in
-    /// its output (run scope)
+    /// Have the owner run an allowed command here with a project's values in its
+    /// environment, and print its output with them masked (run scope)
     Run {
         project: String,
         /// Only these keys (comma-separated)
         #[arg(long, value_name = "A,B")]
         keys: Option<String>,
+        /// Stop the command after this long (1 to 600)
+        #[arg(long, value_name = "SECONDS", default_value_t = 600,
+              value_parser = clap::value_parser!(u64).range(1..=600))]
+        timeout_seconds: u64,
         /// The command and its arguments, after --
         #[arg(last = true, required = true, value_name = "COMMAND")]
         command: Vec<String>,
@@ -240,9 +244,10 @@ fn run(command: Command, client: &Client) -> Result<()> {
         Command::Run {
             project,
             keys,
+            timeout_seconds,
             command,
         } => {
-            use vaultos_client::run::{stream, Program};
+            use std::io::Write;
             let keys = keys.map(|k| {
                 k.split(',')
                     .map(str::trim)
@@ -250,42 +255,36 @@ fn run(command: Command, client: &Client) -> Result<()> {
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
             });
-            let body = json!({
+            let mut body = json!({
                 "project": project,
                 "command": command,
                 "cwd": absolute(std::path::Path::new("."))?,
                 "keys": keys,
+                "timeout_seconds": timeout_seconds,
             });
-            let r = client.request("POST", "/run/env", Some(&body))?;
+            if let Ok(path) = std::env::var("PATH") {
+                body["path"] = json!(path);
+            }
+            let wait = std::time::Duration::from_secs(timeout_seconds + 60);
+            let r = client.request_within("POST", "/run", Some(&body), wait)?;
             if let Some(held) = r["heldForApproval"].as_array().filter(|h| !h.is_empty()) {
                 let names: Vec<&str> = held.iter().filter_map(Value::as_str).collect();
                 eprintln!("vaultos-agent: left out keys awaiting approval: {}", names.join(", "));
             }
-            let env = r["values"]
-                .as_array()
-                .map(|v| {
-                    v.iter()
-                        .map(|p| {
-                            let value = p["value"].as_str().unwrap_or_default().to_owned();
-                            (
-                                p["key"].as_str().unwrap_or_default().to_owned(),
-                                zeroize::Zeroizing::new(value),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let program = Program {
-                argv: command.into_iter().map(Into::into).collect(),
-                cwd: r["cwd"].as_str().map(Into::into),
-                env,
-                plain: Vec::new(),
-            };
-            match stream(&program, true)
-                .map_err(|e| Fail::new(format!("cannot run the command: {e}")))?
-            {
-                0 => Ok(()),
-                c => Err(Fail::quiet(u8::try_from(c).unwrap_or(1))),
+            let text = |k: &str| r[k].as_str().unwrap_or_default().as_bytes().to_vec();
+            let _ = std::io::stdout().write_all(&text("stdout"));
+            let _ = std::io::stderr().write_all(&text("stderr"));
+            if r["truncated"] == json!(true) {
+                eprintln!("vaultos-agent: output past 64 KB per stream was left out");
+            }
+            if r["timedOut"] == json!(true) {
+                eprintln!("vaultos-agent: the command was stopped after {timeout_seconds} seconds");
+                return Err(Fail::quiet(124));
+            }
+            match r["exitCode"].as_i64() {
+                Some(0) => Ok(()),
+                Some(c) => Err(Fail::quiet(u8::try_from(c).unwrap_or(1))),
+                None => Err(Fail::quiet(1)),
             }
         }
         Command::Sync => match client.request("POST", "/sync", None) {

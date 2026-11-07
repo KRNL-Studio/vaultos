@@ -57,8 +57,8 @@ Agents without MCP can run `vaultos-agent`, which ships next to `vaultos-mcp` in
 the app, with the same token configuration: `status`, `whoami`,
 `projects`, `keys`, `search`, `inject PROJECT FILE [--keys A,B] [--format F]
 [--replace]`, `add PROJECT KEY` (value on stdin only), `import PROJECT FILE
-[--create-project]`, `pending`, `run PROJECT [--keys A,B] -- COMMAND` (run scope;
-masked output) and `request-access --project P --scope S --reason R [--minutes N]`. Output never contains values. Never
+[--create-project]`, `pending`, `run PROJECT [--keys A,B] [--timeout-seconds N] -- COMMAND` (run scope; the owner runs
+it and prints masked output when it ends) and `request-access --project P --scope S --reason R [--minutes N]`. Output never contains values. Never
 pass a value as an argument. Exit code 3 means not running and 4 means locked;
 report either to the human instead of retrying in a loop.
 

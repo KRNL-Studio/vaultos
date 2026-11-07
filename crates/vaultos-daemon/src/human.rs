@@ -122,33 +122,41 @@ impl Ask {
         })
     }
 
-    /// The Touch ID sheet's reason, completing "VaultOS is trying to …".
+    /// The Touch ID sheet's reason, completing "VaultOS is trying to …": everything the
+    /// request asks for, since one confirmation covers all of it.
     pub fn reason(&self, who: &Peer) -> String {
-        if self.refs.is_empty() && self.env.is_none() {
-            let what = if self.leak_index {
-                "index your values for leak scanning"
-            } else {
-                "name the items behind leak findings"
+        let mut parts = Vec::new();
+        if !self.refs.is_empty() || self.env.is_some() {
+            let mut projects: Vec<&str> = self.refs.iter().map(|r| r.project.as_str()).collect();
+            if let Some((p, _)) = &self.env {
+                projects.push(p);
+            }
+            projects.sort_unstable();
+            projects.dedup();
+            let what = match (self.refs.len(), &self.env) {
+                (0, Some(_)) => "secrets".to_owned(),
+                (1, None) => "1 secret".to_owned(),
+                (n, None) => format!("{n} secrets"),
+                (n, Some(_)) => format!("{n} secrets and a project's values"),
             };
-            return format!("{what}, for {}", who.shown());
+            parts.push(format!(
+                "give {what} from {} to {}",
+                clean(&projects.join(", ")),
+                who.shown()
+            ));
         }
-        let mut projects: Vec<&str> = self.refs.iter().map(|r| r.project.as_str()).collect();
-        if let Some((p, _)) = &self.env {
-            projects.push(p);
+        if self.leak_index {
+            parts.push("index your values for leak scanning".to_owned());
         }
-        projects.sort_unstable();
-        projects.dedup();
-        let what = match (self.refs.len(), &self.env) {
-            (0, Some(_)) => "secrets".to_owned(),
-            (1, None) => "1 secret".to_owned(),
-            (n, None) => format!("{n} secrets"),
-            (n, Some(_)) => format!("{n} secrets and a project's values"),
-        };
-        let mut r = format!(
-            "give {what} from {} to {}",
-            clean(&projects.join(", ")),
-            who.shown()
-        );
+        match self.names.len() {
+            0 => {}
+            1 => parts.push("name the item behind 1 leak finding".to_owned()),
+            n => parts.push(format!("name the items behind {n} leak findings")),
+        }
+        let mut r = parts.join(", and ");
+        if self.refs.is_empty() && self.env.is_none() {
+            r.push_str(&format!(", for {}", who.shown()));
+        }
         if !self.purpose.is_empty() {
             r.push_str(&format!(" for “{}”", self.purpose));
         }
@@ -306,6 +314,20 @@ mod tests {
         assert_eq!(
             env.reason(&Peer::default()),
             "give secrets from Example App to a program"
+        );
+        // One confirmation covers the whole request, so the prompt names all of it.
+        let all = Ask::parse(
+            br#"{"refs":["vault://Example App/DB_URL"],"leakIndex":true,"names":[{"projectId":"p","itemId":"i","field":"value"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            all.reason(&who),
+            "give 1 secret from Example App to /usr/local/bin/vaultos (pid 42), and index your values for leak scanning, and name the item behind 1 leak finding"
+        );
+        let scan = Ask::parse(br#"{"leakIndex":true}"#).unwrap();
+        assert_eq!(
+            scan.reason(&who),
+            "index your values for leak scanning, for /usr/local/bin/vaultos (pid 42)"
         );
         for bad in [
             &br#"{}"#[..],

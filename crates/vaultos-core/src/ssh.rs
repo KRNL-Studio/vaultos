@@ -56,9 +56,10 @@ impl SshKey {
             .strip_prefix(PEM_BEGIN)
             .and_then(|b| b.strip_suffix(PEM_END))
             .ok_or_else(bad)?;
-        let text: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut text = Zeroizing::new(String::with_capacity(body.len()));
+        text.extend(body.chars().filter(|c| !c.is_whitespace()));
         let bytes = Zeroizing::new(
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, text)
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, text.as_bytes())
                 .map_err(|_| bad())?,
         );
         let mut r = Reader(bytes.strip_prefix(MAGIC).ok_or_else(bad)?);
@@ -183,7 +184,7 @@ pub fn parse_public_line(line: &str) -> Option<Vec<u8>> {
 }
 
 fn armor(begin: &str, bytes: &[u8], end: &str) -> String {
-    let text = b64(bytes);
+    let text = Zeroizing::new(b64(bytes));
     let mut out = String::with_capacity(text.len() + text.len() / 70 + begin.len() + end.len() + 4);
     out.push_str(begin);
     out.push('\n');

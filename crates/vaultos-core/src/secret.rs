@@ -51,6 +51,17 @@ impl fmt::Debug for Key32 {
     }
 }
 
+/// Overwrites every string in `v`, a reply or request that may carry values, before it is
+/// dropped. Object keys are names, not values, and are kept.
+pub fn scrub_json(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(a) => a.iter_mut().for_each(scrub_json),
+        serde_json::Value::Object(m) => m.values_mut().for_each(scrub_json),
+        _ => {}
+    }
+}
+
 /// A variable-length secret (a password, a decrypted value). Zeroed on drop.
 #[derive(Clone, Default, Zeroize, ZeroizeOnDrop, PartialEq, Eq)]
 pub struct SecretString(String);

@@ -67,12 +67,33 @@ pub fn request(
     out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
     out.extend_from_slice(body);
     stream.write_all(&out).map_err(HttpError::Io)?;
-    let mut raw = Zeroizing::new(Vec::new());
-    stream
-        .take(MAX_RESPONSE)
-        .read_to_end(&mut raw)
-        .map_err(HttpError::Io)?;
+    let raw = read_limited(&mut stream, MAX_RESPONSE).map_err(HttpError::Io)?;
     parse(&raw)
+}
+
+/// Reads to the end, keeping at most `limit` bytes. The buffer grows by copying into a new
+/// one and zeroing the old, so no partial copy of a reply (which can carry values) is left
+/// in freed memory.
+fn read_limited(r: &mut impl Read, limit: u64) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut out = Zeroizing::new(Vec::with_capacity(16 * 1024));
+    let mut buf = Zeroizing::new([0u8; 8192]);
+    while out.len() < limit {
+        let n = match r.read(&mut buf[..]) {
+            Ok(0) => break,
+            Ok(n) => n.min(limit - out.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if out.len() + n > out.capacity() {
+            let mut bigger =
+                Zeroizing::new(Vec::with_capacity((out.capacity() * 2).max(out.len() + n)));
+            bigger.extend_from_slice(&out);
+            out = bigger;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(out)
 }
 
 fn parse(raw: &[u8]) -> Result<Response, HttpError> {

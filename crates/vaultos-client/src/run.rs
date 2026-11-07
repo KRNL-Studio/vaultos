@@ -165,6 +165,16 @@ pub fn capture(
     timeout: Duration,
     max_output: usize,
 ) -> std::io::Result<Captured> {
+    capture_until(program, timeout, max_output, &|| false)
+}
+
+/// As [`capture`], also stopping the program as at the timeout once `stop` returns true.
+pub fn capture_until(
+    program: &Program,
+    timeout: Duration,
+    max_output: usize,
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<Captured> {
     use std::os::unix::process::CommandExt;
     let mut cmd = program.command()?;
     cmd.stdin(Stdio::null())
@@ -206,7 +216,7 @@ pub fn capture(
         });
     }
     drop(tx);
-    let (status, timed_out) = wait_until(&mut child, Instant::now() + timeout)?;
+    let (status, timed_out) = wait_until(&mut child, Instant::now() + timeout, stop)?;
     let mut out = Captured {
         exit_code: status.map(exit_code),
         timed_out,
@@ -227,13 +237,17 @@ pub fn capture(
     Ok(out)
 }
 
-/// Waits for the child until `deadline`, then stops its process group.
-fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<(Option<ExitStatus>, bool)> {
+/// Waits for the child until `deadline` (or `stop`), then stops its process group.
+fn wait_until(
+    child: &mut Child,
+    deadline: Instant,
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<(Option<ExitStatus>, bool)> {
     loop {
         if let Some(s) = child.try_wait()? {
             return Ok((Some(s), false));
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline || stop() {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));

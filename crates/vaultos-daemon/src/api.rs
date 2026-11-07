@@ -4,6 +4,9 @@
 
 use crate::access::Grant;
 use serde_json::{json, Map, Value};
+use std::path::Path;
+use std::time::Duration;
+use vaultos_client::run::Program;
 use vaultos_core::agents::Agent;
 use vaultos_core::env::{self, Format};
 use vaultos_core::model::agent_ref;
@@ -212,9 +215,10 @@ fn unlock(store: &mut Store, body: &Map<String, Value>) -> Result<Reply> {
 }
 
 /// Everything after the owner's routes: agent requests and the approval relay.
-pub fn handle(store: &mut Store, req: &Request) -> Reply {
+/// An unlocked store with the file on disk loaded.
+fn ready(store: &mut Store) -> std::result::Result<(), Reply> {
     if !store.is_unlocked() {
-        return Reply::error(423, "Vault is locked. Unlock the app.");
+        return Err(Reply::error(423, "Vault is locked. Unlock the app."));
     }
     if let Err(e) = store.reload_if_changed() {
         // A file this session can no longer open (a new password or Secret Key, or damage)
@@ -222,25 +226,43 @@ pub fn handle(store: &mut Store, req: &Request) -> Reply {
         if !matches!(e, Error::Busy | Error::Io { .. } | Error::Conflict(_)) {
             store.lock();
         }
-        return Reply::error(
+        return Err(Reply::error(
             409,
             "The vault changed on disk and could not be reloaded. Unlock the app again.",
-        );
+        ));
+    }
+    Ok(())
+}
+
+/// The enrolled, active agent whose token the request carries.
+fn agent_of(store: &mut Store, req: &Request) -> std::result::Result<Agent, Reply> {
+    let token = req.agent_token.as_deref().unwrap_or("");
+    match store.authenticate_agent(token) {
+        Ok(Some(a)) => {
+            store.note_agent_seen(&a.id);
+            Ok(a)
+        }
+        Ok(None) => Err(Reply::error(
+            403,
+            "An enrolled, active agent token is required",
+        )),
+        Err(e) => Err(Reply::from_error(&e)),
+    }
+}
+
+pub fn handle(store: &mut Store, req: &Request) -> Reply {
+    if let Err(r) = ready(store) {
+        return r;
     }
     let relay = req.method == "POST" && req.target == "/pending/decide";
     let agent = if relay {
         None
     } else {
-        let token = req.agent_token.as_deref().unwrap_or("");
-        match store.authenticate_agent(token) {
-            Ok(Some(a)) => Some(a),
-            Ok(None) => return Reply::error(403, "An enrolled, active agent token is required"),
-            Err(e) => return Reply::from_error(&e),
+        match agent_of(store, req) {
+            Ok(a) => Some(a),
+            Err(r) => return r,
         }
     };
-    if let Some(a) = &agent {
-        store.note_agent_seen(&a.id);
-    }
     let body = match parse_body(req) {
         Ok(b) => b,
         Err(r) => return r,
@@ -481,7 +503,6 @@ fn route(
             return to_json(&mine);
         }
         ("POST", "/inject") => return inject(store, &cx, body),
-        ("POST", "/run/env") => return run_env(store, &cx, body),
         ("POST", "/import") => return import(store, &cx, body),
         _ => {}
     }
@@ -528,10 +549,40 @@ fn key_list(body: &Map<String, Value>) -> Result<Option<Vec<String>>> {
     }
 }
 
-/// The run scope: a project's values for one of the agent's allowed commands, which the
-/// caller (the MCP bridge or `vaultos-agent run`) starts in the given folder with its
-/// output masked. Recorded with the matching allowed command, not the full arguments.
-fn run_env(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
+pub const RUN_DEFAULT_TIMEOUT: u64 = 120;
+pub const RUN_MAX_TIMEOUT: u64 = 600;
+
+/// What `POST /run` starts once the store is released.
+#[derive(Debug)]
+pub struct RunPlan {
+    pub program: Program,
+    pub timeout: Duration,
+    pub project: String,
+    pub held_for_approval: Vec<String>,
+}
+
+/// The run scope, checked under the store: one of the agent's allowed commands, in an
+/// approved folder, with the project's approved values. The owner starts it (see
+/// `server.rs`), so the values go only to that program, never to the agent. Recorded with
+/// the matching allowed command, not the full arguments.
+pub fn run_plan(store: &mut Store, req: &Request) -> std::result::Result<RunPlan, Reply> {
+    ready(store)?;
+    let agent = agent_of(store, req)?;
+    let body = parse_body(req)?;
+    let cx = Ctx {
+        agent: &agent,
+        actor: agent_ref(&agent.id),
+        grants: req
+            .grants
+            .iter()
+            .filter(|g| g.agent_id == agent.id)
+            .collect(),
+        created: std::cell::RefCell::default(),
+    };
+    plan(store, &cx, &body).map_err(|e| Reply::from_error(&e))
+}
+
+fn plan(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<RunPlan> {
     let (id, _) = cx.project_for(store, body.get("project").and_then(Value::as_str), "run")?;
     let argv: Vec<String> = body
         .get("command")
@@ -548,14 +599,40 @@ fn run_env(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result
         .ok_or_else(|| invalid("cwd must be an absolute folder path"))?;
     let cwd = cx.agent.work_dir(dir, store.data_dir())?;
     let keys = key_list(body)?;
+    let timeout = match body.get("timeout_seconds") {
+        None | Some(Value::Null) => RUN_DEFAULT_TIMEOUT,
+        Some(v) => v
+            .as_u64()
+            .filter(|t| (1..=RUN_MAX_TIMEOUT).contains(t))
+            .ok_or_else(|| invalid("timeout_seconds must be 1 to 600"))?,
+    };
+    // The caller's PATH finds the program, as it would in the caller's shell.
+    let path = match body.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(p))
+            if !p.is_empty()
+                && p.len() <= 4096
+                && p.split(':').all(|d| Path::new(d).is_absolute()) =>
+        {
+            Some(p.clone())
+        }
+        Some(_) => return Err(invalid("path must list absolute folders, separated by :")),
+    };
     let purpose = format!("{entry} in {}", cwd.display());
     let env = store.env_values(&id, keys.as_deref(), &purpose, &cx.actor)?;
-    Ok(json!({
-        "project": env.project,
-        "cwd": cwd,
-        "values": env.pairs.iter().map(|(k, v)| json!({ "key": k, "value": v.as_str() })).collect::<Vec<_>>(),
-        "heldForApproval": env.held_for_approval,
-    }))
+    Ok(RunPlan {
+        program: Program {
+            argv: argv.into_iter().map(Into::into).collect(),
+            cwd: Some(cwd),
+            env: env.pairs,
+            plain: path
+                .map(|p| vec![("PATH".to_owned(), p)])
+                .unwrap_or_default(),
+        },
+        timeout: Duration::from_secs(timeout),
+        project: env.project,
+        held_for_approval: env.held_for_approval,
+    })
 }
 
 fn inject(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {

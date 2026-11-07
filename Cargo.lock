@@ -5700,6 +5700,7 @@ dependencies = [
  "vaultos-client",
  "vaultos-core",
  "vaultos-sync",
+ "zeroize",
 ]
 
 [[package]]
@@ -5747,7 +5748,6 @@ dependencies = [
  "vaultos-client",
  "vaultos-core",
  "vaultos-daemon",
- "zeroize",
 ]
 
 [[package]]

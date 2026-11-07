@@ -98,14 +98,15 @@ impl Index {
     /// whitespace is not part of a word, so it is not part of the value either.
     pub fn add(&mut self, value: &str, source: Source) {
         let v = value.trim();
-        if v.len() < MIN_LEN || v.len() > MAX_LEN {
-            return;
-        }
-        // A multi-line value (a key or certificate) is found by its longest lines.
+        // A multi-line value (a key or certificate, often longer than one value may be) is
+        // found by its longest lines.
         if v.contains('\n') {
             for line in v.lines().map(str::trim).filter(|l| l.len() >= 24) {
                 self.add(line, source.clone());
             }
+            return;
+        }
+        if v.len() < MIN_LEN || v.len() > MAX_LEN {
             return;
         }
         if v.bytes().any(is_break) {
@@ -362,6 +363,21 @@ mod tests {
             .collect();
         assert_eq!(at, [(1, 9, "a"), (2, 6, "c")]);
         assert!(ix.scan(b"key: synthetic-token-1234;").len() == 1);
+    }
+
+    #[test]
+    fn finds_lines_of_long_multi_line_values() {
+        let mut ix = Index::new("v");
+        let body: Vec<String> = (0..100)
+            .map(|i| format!("c3ludGhldGljLWxpbmUt{i:03}c3ludGhldGljLWxpbmUt"))
+            .collect();
+        let pem = format!(
+            "-----BEGIN SYNTHETIC KEY-----\n{}\n-----END SYNTHETIC KEY-----",
+            body.join("\n")
+        );
+        assert!(pem.len() > MAX_LEN);
+        ix.add(&pem, src("k"));
+        assert_eq!(ix.scan(body[57].as_bytes()).len(), 1);
     }
 
     #[test]

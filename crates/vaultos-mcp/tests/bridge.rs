@@ -229,6 +229,22 @@ fn the_bridge_speaks_for_the_enrolled_agent() {
         (&json!(4), &json!(false))
     );
     assert!(!ran.to_string().contains("synthetic-human-value"));
+    // The owner (the daemon in this test process) starts it, not the bridge, and no route
+    // hands an agent the values to start it with.
+    let parent = mcp.ok(
+        "run_with_secrets",
+        json!({
+            "project": "Example App",
+            "command": ["/bin/sh", "-c", r#"printf %s "$PPID""#],
+            "cwd": work,
+        }),
+    );
+    assert_eq!(parent["stdout"], std::process::id().to_string());
+    let agent = Client::with_token(data.clone(), Some(issued.token.clone()));
+    let body =
+        json!({ "project": "Example App", "command": ["/bin/sh", "-c", "true"], "cwd": work });
+    let gone = agent.request("POST", "/run/env", Some(&body)).unwrap_err();
+    assert_eq!(gone.status, Some(404));
 
     let refusals = [
         (

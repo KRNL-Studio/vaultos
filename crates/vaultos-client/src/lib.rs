@@ -325,6 +325,18 @@ impl Client {
 
     /// An agent request: needs this agent's token and an unlocked vault.
     pub fn request(&self, method: &str, route: &str, body: Option<&Value>) -> Result<Value> {
+        self.request_within(method, route, body, REQUEST_TIMEOUT)
+    }
+
+    /// As [`Client::request`], waiting up to `timeout` for the reply (`POST /run` lasts as
+    /// long as the command).
+    pub fn request_within(
+        &self,
+        method: &str,
+        route: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<Value> {
         let token = self.token.as_ref().ok_or_else(|| {
             ClientError::new(
                 Code::Token,
@@ -335,14 +347,14 @@ impl Client {
         if status.get("locked") != Some(&Value::Bool(false)) {
             return Err(ClientError::new(Code::Locked, messages::LOCKED));
         }
-        send(&session, method, route, body, Some(token))
+        send(&session, method, route, body, Some(token), timeout)
     }
 
     /// An owner request (unlock, lock, stop, admin): the session token alone. Works on a
     /// locked daemon.
     pub fn owner(&self, method: &str, route: &str, body: Option<&Value>) -> Result<Value> {
         let (session, _) = self.ensure_up()?;
-        send(&session, method, route, body, None)
+        send(&session, method, route, body, None, REQUEST_TIMEOUT)
     }
 }
 
@@ -352,6 +364,7 @@ fn send(
     route: &str,
     body: Option<&Value>,
     agent: Option<&SecretString>,
+    timeout: Duration,
 ) -> Result<Value> {
     let bearer = Zeroizing::new(format!("Bearer {}", session.token));
     let mut headers = vec![("Authorization", bearer.as_str())];
@@ -368,7 +381,7 @@ fn send(
         route,
         &headers,
         payload.as_deref().map(Vec::as_slice),
-        REQUEST_TIMEOUT,
+        timeout,
     )
     .map_err(|_| ClientError::new(Code::Interrupted, messages::INTERRUPTED))?;
     let value: Value = serde_json::from_slice(&r.body).unwrap_or_else(|_| json!({}));

@@ -1449,8 +1449,11 @@ fn scan_staged(index: &vaultos_core::leak::Index) -> Result<vaultos_core::leak::
     for name in names.split(|b| *b == 0).filter(|n| !n.is_empty()) {
         let name = String::from_utf8_lossy(name).into_owned();
         out.files += 1;
-        let bytes = Zeroizing::new(git(&["show", &format!(":{name}")])?);
-        if bytes.len() as u64 > MAX_FILE || !is_text(&bytes) {
+        let Some(bytes) = staged_blob(&name, MAX_FILE)? else {
+            out.skipped += 1;
+            continue;
+        };
+        if !is_text(&bytes) {
             out.skipped += 1;
             continue;
         }
@@ -1465,6 +1468,43 @@ fn scan_staged(index: &vaultos_core::leak::Index) -> Result<vaultos_core::leak::
         }
     }
     Ok(out)
+}
+
+/// A staged file's contents, or `None` when it is larger than `limit`, which is never read.
+fn staged_blob(name: &str, limit: u64) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    use std::io::Read;
+    let spec = format!(":{name}");
+    let size: u64 = String::from_utf8_lossy(&git(&["cat-file", "-s", &spec])?)
+        .trim()
+        .parse()
+        .map_err(|_| Fail::new("git failed; run this inside a Git repository"))?;
+    if size > limit {
+        return Ok(None);
+    }
+    let mut child = Process::new("git")
+        .args(["cat-file", "blob", &spec])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| Fail::new("cannot run git"))?;
+    // Sized up front, so no partial copy is left behind by a reallocation.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(size).unwrap_or(0).saturating_add(1),
+    ));
+    let read = child
+        .stdout
+        .take()
+        .map(|o| o.take(limit + 1).read_to_end(&mut bytes));
+    let status = child.wait().map_err(|_| Fail::new("git failed"))?;
+    if !matches!(read, Some(Ok(_))) || !status.success() {
+        return Err(Fail::new("git failed; run this inside a Git repository"));
+    }
+    // Restaged meanwhile, larger.
+    if bytes.len() as u64 > limit {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
 }
 
 /// The lines every commit added, on every branch: a value removed later is still in the
@@ -1495,6 +1535,9 @@ fn scan_history(index: &vaultos_core::leak::Index) -> Result<vaultos_core::leak:
     let mut reader = std::io::BufReader::new(stdout);
     let mut line = Zeroizing::new(Vec::new());
     let (mut commit, mut path, mut at) = (String::new(), None::<String>, 0usize);
+    // Inside a hunk every line starts with +, - or a space, so an added line that starts
+    // with "++ " is not a "+++ " file header.
+    let mut in_hunk = false;
     loop {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
@@ -1505,11 +1548,15 @@ fn scan_history(index: &vaultos_core::leak::Index) -> Result<vaultos_core::leak:
         if let Some(c) = l.strip_prefix(b"\0commit ") {
             commit = String::from_utf8_lossy(c).into_owned();
             out.files += 1;
-        } else if let Some(p) = l.strip_prefix(b"+++ ") {
+            in_hunk = false;
+        } else if l.starts_with(b"diff ") {
+            in_hunk = false;
+        } else if let Some(p) = l.strip_prefix(b"+++ ").filter(|_| !in_hunk) {
             path = p
                 .strip_prefix(b"b/")
                 .map(|p| String::from_utf8_lossy(p).into_owned());
         } else if l.starts_with(b"@@ ") {
+            in_hunk = true;
             // @@ -a,b +c,d @@: added lines are numbered from c.
             at = String::from_utf8_lossy(l)
                 .split(' ')
@@ -1778,12 +1825,22 @@ impl Ctx {
                 .map_err(|_| Fail::new("cannot write to stdout"));
         };
         let output = std::path::absolute(output).map_err(|_| Fail::usage("Invalid output path"))?;
-        if vaultos_core::agents::resolve_lexically(&output).starts_with(&self.data_dir) {
+        let (Some(folder), Some(name)) = (output.parent(), output.file_name()) else {
+            return Err(Fail::usage("Invalid output path"));
+        };
+        // The folder as it really is: a symlink on the way must not lead into vault data.
+        // The file itself is replaced by a rename, which never follows a symlink.
+        let folder = std::fs::canonicalize(folder)
+            .ok()
+            .filter(|f| f.is_dir())
+            .ok_or_else(|| Fail::usage("The output file's folder does not exist"))?;
+        let data = std::fs::canonicalize(&self.data_dir).unwrap_or_else(|_| self.data_dir.clone());
+        if folder.starts_with(&data)
+            || vaultos_core::agents::resolve_lexically(&output).starts_with(&self.data_dir)
+        {
             return Err(Fail::usage("Cannot write over vault data"));
         }
-        if !output.parent().is_some_and(Path::is_dir) {
-            return Err(Fail::usage("The output file's folder does not exist"));
-        }
+        let output = folder.join(name);
         fs_safe::atomic_write(&output, rendered.as_bytes())?;
         emit(&json!({ "output": output, "references": found.len() }))
     }

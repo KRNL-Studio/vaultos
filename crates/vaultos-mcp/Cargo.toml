@@ -22,7 +22,6 @@ rmcp = { version = "3.9", features = ["server", "transport-io", "macros"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 sha2 = "0.10"
-zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3"

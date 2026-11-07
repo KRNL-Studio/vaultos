@@ -735,6 +735,11 @@ fn reads_renders_and_runs_with_the_vault_opened_here() {
     );
     assert_eq!(mode(&out), 0o600);
     assert!(env.admin(&["render", "app.env.tpl"]).stdout.contains(VALUE));
+    // A folder that leads into the data directory through a symlink is refused too.
+    std::os::unix::fs::symlink(&env.data, env.work.join("into-data")).unwrap();
+    let refused = env.admin(&["render", "app.env.tpl", "-o", "into-data/app.env"]);
+    assert_eq!(refused.code, 2, "{}", refused.stderr);
+    assert!(!env.data.join("app.env").exists());
 
     // The command gets the value; its output shows it masked.
     let script = r#"printf '%s|%s' "$HUMAN_KEY" "${#HUMAN_KEY}""#;
@@ -961,4 +966,23 @@ fn scans_folders_staged_changes_and_history_for_values() {
     let f = &history["findings"][0];
     assert_eq!((&f["path"], &f["line"]), (&json!("app.env"), &json!(2)));
     assert_eq!(f["commit"].as_str().unwrap().len(), 40);
+
+    // In the patch, an added line that starts with "++ " reads like a file header.
+    std::fs::write(
+        env.work.join("notes.md"),
+        format!("++ heading\nTOKEN={VALUE}\n"),
+    )
+    .unwrap();
+    git(&["add", "notes.md"]);
+    git(&["commit", "-qm", "add notes"]);
+    let history = env.human(&["scan", "--history"], "");
+    let history: Value = serde_json::from_str(&history.stdout).unwrap();
+    assert!(
+        history["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "notes.md" && f["line"] == 2),
+        "{history}"
+    );
 }
