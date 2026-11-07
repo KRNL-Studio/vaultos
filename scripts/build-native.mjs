@@ -13,10 +13,13 @@ mkdirSync("build/native", {
 
 const arch = process.env.VAULTOS_ARCH || (process.arch === "arm64" ? "arm64" : "x86_64");
 
-execFileSync("/usr/bin/swiftc", [ "-O", "-target", `${arch}-apple-macos13.0`, "native/Keychain.swift", "-o", "build/native/vaultos-keychain" ], {
-    stdio: "inherit"
-});
+const helpers = [ [ "native/Keychain.swift", "vaultos-keychain" ], [ "native/Clipboard.swift", "vaultos-clipboard" ] ];
 
-if (process.env.VAULTOS_BUILD_TEST_HELPER === "1") execFileSync("/usr/bin/swiftc", [ "-O", "-D", "VAULTOS_TEST", "native/Keychain.swift", "-o", "build/native/vaultos-keychain-test" ], {
-    stdio: "inherit"
-});
+for (const [source, name] of helpers) {
+    execFileSync("/usr/bin/swiftc", [ "-O", "-target", `${arch}-apple-macos13.0`, source, "-o", `build/native/${name}` ], {
+        stdio: "inherit"
+    });
+    if (process.env.VAULTOS_BUILD_TEST_HELPER === "1") execFileSync("/usr/bin/swiftc", [ "-O", "-D", "VAULTOS_TEST", source, "-o", `build/native/${name}-test` ], {
+        stdio: "inherit"
+    });
+}

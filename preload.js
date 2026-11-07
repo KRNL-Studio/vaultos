@@ -10,6 +10,20 @@ contextBridge.exposeInMainWorld("vault", {
         ipcRenderer.on("vault:locked", listener);
         return () => ipcRenderer.removeListener("vault:locked", listener);
     },
+    onUnlocked: fn => {
+        const listener = () => fn();
+        ipcRenderer.on("vault:unlocked", listener);
+        return () => ipcRenderer.removeListener("vault:unlocked", listener);
+    },
+    onCommand: fn => {
+        const listener = () => fn();
+        ipcRenderer.on("vault:command", listener);
+        return () => ipcRenderer.removeListener("vault:command", listener);
+    },
+    takeCommand: () => ipcRenderer.invoke("vault:takeCommand"),
+    search: q => ipcRenderer.invoke("vault:search", q),
+    getDesktopPrefs: () => ipcRenderer.invoke("vault:getDesktopPrefs"),
+    setDesktopPrefs: patch => ipcRenderer.invoke("vault:setDesktopPrefs", patch),
     chooseFolder: () => ipcRenderer.invoke("vault:chooseFolder"),
     setAgentAccess: (id, projects, roots, wildcards) => ipcRenderer.invoke("vault:setAgentAccess", id, projects, roots, wildcards),
     copy: (project, key) => ipcRenderer.invoke("vault:copy", project, key),

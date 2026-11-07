@@ -168,8 +168,9 @@ asks the running owner for one round without a password. If `vault_status` shows
 halted state such as `CONFLICTS_PENDING`, report it; accepting conflicts is a human
 review step in the desktop, never something to automate.
 
-For requested uninstall, disable background access or Lock, quit the identified
-preview, and remove only its MCP entry and app. Preserve data and encrypted
+For requested uninstall, disable background access or Lock, have the human turn
+off Open at login if it is on, quit the identified preview from its menu bar item
+(closing the window leaves it running, locked), and remove only its MCP entry and app. Preserve data and encrypted
 backups unless deletion was requested. See the recovery guide for targeted
 preview data, token, Keychain/Secret Service and Linux service cleanup; do not
 remove another vault's files, launch agents, services, or keys.

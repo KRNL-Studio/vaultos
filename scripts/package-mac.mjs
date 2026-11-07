@@ -65,7 +65,7 @@ try {
         extendInfo: {
             LSMinimumSystemVersion: "13.0"
         },
-        extraResource: [ "build/native/vaultos-keychain" ]
+        extraResource: [ "build/native/vaultos-keychain", "build/native/vaultos-clipboard" ]
     });
     const bundle = path.join(folder, "VaultOS.app");
     cpSync(path.join(folder,'LICENSE'),path.join(bundle,'Contents','Resources','LICENSE.electron'));

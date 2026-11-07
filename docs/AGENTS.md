@@ -71,7 +71,7 @@ Output is JSON and never contains values. `add` reads the value from stdin only 
 
 ## Admin CLI
 
-Human-only grant and approval work can be done headlessly from a source checkout. Every command asks for the master password at a hidden prompt (or reads it from stdin with `--password-stdin`) and claims the vault, so quit the desktop first; `--stop-backend` asks a running headless backend to stop. Keychain-only authorization is deliberately not offered, because any process running as you could use it to grant itself access.
+Human-only grant and approval work can be done headlessly from a source checkout. Every command asks for the master password at a hidden prompt (or reads it from stdin with `--password-stdin`) and claims the vault, so lock or close the desktop window first (VaultOS may stay in the menu bar, locked, without owning the vault); `--stop-backend` asks a running headless backend to stop. Keychain-only authorization is deliberately not offered, because any process running as you could use it to grant itself access.
 
 ```sh
 node cli.cjs agents list
@@ -93,7 +93,7 @@ An external approver (for example a phone-notification daemon you run) can relay
 
 ## Optional background helper
 
-The bridge works with the downloaded desktop while the app is open and unlocked. To let the source bridge start its headless backend after the desktop closes, also run `npm run build:native` in that source checkout on macOS (requires command-line developer tools). This builds the same preview-namespaced Keychain helper locally. On Linux no build step is needed; the backend reads the remembered password through `secret-tool` (libsecret) and a running keyring such as GNOME Keyring. Without that, keep the desktop open; the bridge never falls back to a plaintext password file. Background access must still be enabled deliberately in desktop Settings.
+The bridge works with the downloaded desktop while the app is open and unlocked. To let the source bridge start its headless backend after the desktop window closes or locks, also run `npm run build:native` in that source checkout on macOS (requires command-line developer tools). This builds the same preview-namespaced Keychain helper locally. On Linux no build step is needed; the backend reads the remembered password through `secret-tool` (libsecret) and a running keyring such as GNOME Keyring. Without that, keep the desktop open; the bridge never falls back to a plaintext password file. Background access must still be enabled deliberately in desktop Settings.
 
 For an always-available backend, run `scripts/install-service-macos.sh` from that same checkout. It installs a per-user LaunchAgent (`org.vaultos.preview.backend`) that runs `backend.cjs --service`: it waits while the desktop owns the vault, takes over when the window closes, and exits if background access is off. Pass `--data-dir` or `--sync-repo` only for nondefault absolute paths, `--print` to review the property list first, and `--uninstall` to remove it. `vault_status` reports sync health when autosync is enabled.
 

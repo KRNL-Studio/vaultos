@@ -314,3 +314,27 @@ button.badge { cursor: pointer; font-family: inherit; }
   .status .st { display: none; }
   .scroll { padding-left: 12px; padding-right: 12px; }
 }
+
+/* Search across projects (⌘K / ⌘F). While a query is active only the box and results show. */
+.searchbox { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--field); }
+.searchbox:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.searchbox input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 9px 0; font: inherit; color: var(--ink); box-shadow: none; }
+.searchbox kbd { font: 11px var(--font-ui); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
+.scroll.searching > :not(.searchbox):not(.results) { display: none; }
+.results { display: flex; flex-direction: column; gap: 2px; }
+.results .row.result { gap: 10px; }
+.results .row.result[aria-selected="true"] { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+.results .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.results .row .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.results .grow { min-width: 0; }
+
+/* The item Quick Access or search opened. */
+.secret.card.flash { box-shadow: 0 0 0 2px var(--accent); }
+.secret.card:focus { outline: none; }
+
+/* Stored passwords stay concealed until Show. */
+.concealed { display: flex; gap: 6px; align-items: stretch; }
+.concealed input { flex: 1; min-width: 0; }
+
+/* Revealed secret values are read, not selected: Copy uses the concealed, auto-clearing path. */
+.secret .val { user-select: none; -webkit-user-select: none; }
