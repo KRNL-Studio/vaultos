@@ -195,7 +195,7 @@ impl Drop for LockFile {
     }
 }
 
-pub(crate) fn pid_alive(pid: i32) -> bool {
+pub fn pid_alive(pid: i32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: kill with signal 0 only checks whether the process exists.
