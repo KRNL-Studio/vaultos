@@ -92,6 +92,26 @@
         "expires_at": {
           "type": "string",
           "description": "ISO date when the token expires (optional). list_secrets reports expiryStatus/daysLeft so you can warn before expiry."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "login",
+            "api_key",
+            "note",
+            "ssh_key",
+            "database",
+            "server",
+            "certificate"
+          ],
+          "description": "Item type (optional). When omitted it is inferred: login if the item has a username or password, else api_key."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags (optional, at most 32), replacing the item's tags. search matches them."
         }
       },
       "required": [
@@ -103,7 +123,7 @@
   },
   {
     "name": "delete_secret",
-    "description": "Delete this agent's own secret from an approved project by key name. Requires delete:own scope; delegation does not allow deleting another owner's record.",
+    "description": "Move this agent's own secret in an approved project to the Trash, by key name. Agents no longer see it; the human can restore it from the Trash for 30 days. Requires delete:own scope; delegation does not allow deleting another owner's record.",
     "inputSchema": {
       "type": "object",
       "properties": {

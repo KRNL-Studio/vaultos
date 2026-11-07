@@ -32,7 +32,12 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+mod items;
 mod sync;
+pub use items::{
+    Finding, ImportResult, ItemVersion, Otp, TrashedItem, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES,
+    TRASH_DAYS,
+};
 pub use sync::{check_record, SyncChanges, SyncRecord};
 
 pub const VAULT_FILE: &str = "vault.enc";
@@ -104,7 +109,7 @@ pub struct ProjectSummary {
     pub updated_at: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemSummary {
     pub id: String,
@@ -127,6 +132,17 @@ pub struct ItemSummary {
     pub has_password: bool,
     pub updated_at: String,
     pub rev: u64,
+    pub kind: String,
+    pub tags: Vec<String>,
+    pub favorite: bool,
+    pub archived: bool,
+    pub trashed_at: String,
+    /// Custom fields; secret ones without their values.
+    pub fields: Vec<crate::model::Field>,
+    pub attachments: Vec<crate::model::Attachment>,
+    pub has_otp: bool,
+    pub created_at: String,
+    pub secret_changed_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -144,6 +160,8 @@ pub struct Revealed {
     pub key: String,
     pub value: SecretString,
     pub password: SecretString,
+    /// Secret custom fields' values, by field id.
+    pub fields: Vec<(String, SecretString)>,
     pub provider: String,
     pub username: String,
     pub email: String,
@@ -156,6 +174,8 @@ pub struct Exported {
     pub meta: ItemSummary,
     pub value: SecretString,
     pub password: SecretString,
+    /// Secret custom fields' values, by field id.
+    pub fields: Vec<(String, SecretString)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1071,6 +1091,14 @@ impl Store {
 
     pub fn delete_project(&mut self, id_or_name: &str, actor: &str) -> Result<(String, String)> {
         forbidden_unless_human(actor, "deleting a project")?;
+        let r = self.delete_project_inner(id_or_name, actor);
+        if r.is_ok() {
+            self.prune_attachment_files();
+        }
+        r
+    }
+
+    fn delete_project_inner(&mut self, id_or_name: &str, actor: &str) -> Result<(String, String)> {
         self.mutate(|k, st| {
             let pi = st.project(id_or_name)?;
             let before = to_value(&project_v3(k, &st.projects[pi])?);
@@ -1105,10 +1133,15 @@ impl Store {
 
     // ── Items ───────────────────────────────────────────────────────────────────────────
 
+    /// A project's items, without those in the Trash.
     pub fn list_items(&self, project: &str) -> Result<Vec<ItemSummary>> {
         let st = self.state()?;
         let p = &st.projects[st.project(project)?];
-        Ok(p.items.iter().map(summary).collect())
+        Ok(p.items
+            .iter()
+            .filter(|i| i.meta.trashed_at.is_empty())
+            .map(summary)
+            .collect())
     }
 
     /// A project's id and name, by id or case-insensitive name.
@@ -1139,9 +1172,14 @@ impl Store {
                     project: p.meta.name.clone(),
                 });
             }
-            for i in &p.items {
+            for i in p
+                .items
+                .iter()
+                .filter(|i| i.meta.trashed_at.is_empty() && !i.meta.archived)
+            {
                 if i.meta.key.to_lowercase().contains(&q)
                     || i.meta.provider.to_lowercase().contains(&q)
+                    || i.meta.tags.iter().any(|t| t.to_lowercase().contains(&q))
                 {
                     out.push(SearchHit::Secret {
                         project: p.meta.name.clone(),
@@ -1203,7 +1241,10 @@ impl Store {
             let st = self.state()?;
             let k = &self.open()?.keys;
             let p = &st.projects[st.project(project)?];
-            let with_value = p.items.iter().filter(|i| i.meta.has_value);
+            let with_value = p
+                .items
+                .iter()
+                .filter(|i| i.meta.has_value && !i.meta.archived && i.meta.trashed_at.is_empty());
             let held: Vec<String> = with_value
                 .clone()
                 .filter(|i| !i.meta.inject_approved)
@@ -1290,6 +1331,12 @@ impl Store {
                 set(&mut after.url, &fields.url);
                 set(&mut after.permission, &fields.permission);
                 set(&mut after.expires_at, &fields.expires_at);
+                apply_typed(&mut after, &before, fields);
+                // Saving a key that is in the Trash brings it back.
+                after.trashed_at.clear();
+                if secret_changed(&before, &after) {
+                    after.secret_changed_at.clone_from(&now);
+                }
                 after.modified_by = actor.to_owned();
                 after.updated_at.clone_from(&now);
                 after.rev += 1;
@@ -1331,36 +1378,37 @@ impl Store {
                 .clone()
                 .filter(|p| !p.is_empty())
                 .unwrap_or_else(|| crate::providers::match_key(&fields.key));
-            let r = Record {
-                id: random_id(),
-                key: fields.key.clone(),
-                value: fields
-                    .value
-                    .as_ref()
-                    .map(|v| v.expose().to_owned())
-                    .unwrap_or_default(),
-                provider,
-                note: fields.note.clone().unwrap_or_default(),
-                username: fields.username.clone().unwrap_or_default(),
-                email: fields.email.clone().unwrap_or_default(),
-                password: fields
-                    .password
-                    .as_ref()
-                    .map(|v| v.expose().to_owned())
-                    .unwrap_or_default(),
-                url: fields.url.clone().unwrap_or_default(),
-                permission: fields.permission.clone().unwrap_or_default(),
-                expires_at: fields.expires_at.clone().unwrap_or_default(),
-                inject_approved: owner == HUMAN,
-                owner,
-                created_by: actor.to_owned(),
-                modified_by: actor.to_owned(),
-                editable_by: Vec::new(),
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                rev: 1,
-                extra: Map::new(),
-            };
+            let mut r = Record::default();
+            r.id = random_id();
+            r.key.clone_from(&fields.key);
+            r.value = fields
+                .value
+                .as_ref()
+                .map(|v| v.expose().to_owned())
+                .unwrap_or_default();
+            r.provider = provider;
+            r.note = fields.note.clone().unwrap_or_default();
+            r.username = fields.username.clone().unwrap_or_default();
+            r.email = fields.email.clone().unwrap_or_default();
+            r.password = fields
+                .password
+                .as_ref()
+                .map(|v| v.expose().to_owned())
+                .unwrap_or_default();
+            r.url = fields.url.clone().unwrap_or_default();
+            r.permission = fields.permission.clone().unwrap_or_default();
+            r.expires_at = fields.expires_at.clone().unwrap_or_default();
+            r.inject_approved = owner == HUMAN;
+            r.owner = owner;
+            r.created_by = actor.to_owned();
+            r.modified_by = actor.to_owned();
+            r.created_at.clone_from(&now);
+            r.updated_at.clone_from(&now);
+            r.rev = 1;
+            apply_typed(&mut r, &Record::default(), fields);
+            if secret_changed(&Record::default(), &r) {
+                r.secret_changed_at.clone_from(&now);
+            }
             let item = k.item_from_record(&st.projects[pi], &r)?;
             let pid = st.projects[pi].id.clone();
             let pname = st.projects[pi].meta.name.clone();
@@ -1392,36 +1440,23 @@ impl Store {
         })
     }
 
+    /// Moves an item to the Trash: it leaves listings, search, inject and agents, and is
+    /// purged with its history after [`TRASH_DAYS`] days or when the Trash is emptied.
     pub fn delete_item(&mut self, project: &str, key: &str, actor: &str) -> Result<String> {
-        self.mutate(|k, st| {
+        {
+            let st = self.state()?;
             let pi = st.project(project)?;
-            let ii = st.item(pi, key)?;
-            can_delete(&st.projects[pi].items[ii].meta, actor)?;
-            let before = k.record(&st.projects[pi], &st.projects[pi].items[ii])?;
-            let p = &mut st.projects[pi];
-            p.items.remove(ii);
-            p.meta.updated_at = now_iso();
-            p.sealed_meta = None;
-            let (pid, pname) = (p.id.clone(), p.meta.name.clone());
-            st.tombstone(
-                format!("{pid}:{}", before.id),
-                actor,
-                label(&[("project", &pname), ("key", &before.key)]),
-            );
-            k.history_entry(
-                st,
-                actor,
-                "delete_secret",
-                Some(&pname),
-                Some(&before.key),
-                Payload {
-                    before: Some(to_value(&before)),
-                    after: None,
-                },
-                None,
-            )?;
-            Ok(before.key.clone())
-        })
+            let i = &st.projects[pi].items[st.item(pi, key)?];
+            if !i.meta.trashed_at.is_empty() {
+                return Err(Error::not_found("secret not found"));
+            }
+            can_delete(&i.meta, actor)?;
+        }
+        let meta = self.change_meta_as(project, key, actor, "trash_secret", |m| {
+            m.trashed_at = now_iso();
+            m.modified_by = actor.to_owned();
+        })?;
+        Ok(meta.key)
     }
 
     /// Applies `change` to one item's metadata as the human, bumping its revision and
@@ -1430,6 +1465,18 @@ impl Store {
         &mut self,
         project: &str,
         key: &str,
+        change: impl FnOnce(&mut ItemMeta),
+    ) -> Result<ItemMeta> {
+        self.change_meta_as(project, key, HUMAN, "update_meta", change)
+    }
+
+    /// As [`Store::change_meta`], recorded as `action` by `actor`.
+    fn change_meta_as(
+        &mut self,
+        project: &str,
+        key: &str,
+        actor: &str,
+        action: &str,
         change: impl FnOnce(&mut ItemMeta),
     ) -> Result<ItemMeta> {
         self.mutate(|k, st| {
@@ -1447,8 +1494,8 @@ impl Store {
             let meta = item.meta.clone();
             k.history_entry(
                 st,
-                HUMAN,
-                "update_meta",
+                actor,
+                action,
                 Some(&pname),
                 Some(&meta.key),
                 Payload {
@@ -1500,7 +1547,10 @@ impl Store {
 
     pub fn move_item(&mut self, from: &str, key: &str, to: &str, actor: &str) -> Result<bool> {
         forbidden_unless_human(actor, "moving a key between projects")?;
-        self.mutate(|k, st| {
+        let (fresh, old) = self.reseal_attachments(from, key, to)?;
+        let new_ids: Vec<String> = fresh.iter().map(|a| a.id.clone()).collect();
+        let mut resealed = Some(fresh);
+        let moved = self.mutate(|k, st| {
             let si = st
                 .project_index(from)
                 .ok_or_else(|| Error::not_found(format!("project not found: {from}")))?;
@@ -1529,6 +1579,7 @@ impl Store {
             let mut after = before.clone();
             after.updated_at = now_iso();
             after.rev += 1;
+            after.attachments = resealed.take().unwrap_or_default();
             let item = k.item_from_record(&st.projects[di], &after)?;
             let (src_id, src_name, dst_name) = (
                 st.projects[si].id.clone(),
@@ -1564,7 +1615,10 @@ impl Store {
                 Some(src_name),
             )?;
             Ok(true)
-        })
+        });
+        let keep_new = matches!(moved, Ok(true)) && !self.batching;
+        self.drop_attachment_files(if keep_new { &old } else { &new_ids });
+        moved
     }
 
     pub fn pending_approvals(&self) -> Result<Vec<Pending>> {
@@ -1604,12 +1658,20 @@ impl Store {
             let ii = st.item(pi, key)?;
             let p = &st.projects[pi];
             let i = &p.items[ii];
+            if is_agent(actor) && (i.meta.archived || !i.meta.trashed_at.is_empty()) {
+                return Err(Error::not_found("secret not found"));
+            }
             let secret = keys.open_secret(p, i)?;
             (
                 Revealed {
                     key: i.meta.key.clone(),
                     value: SecretString::new(secret.value.clone()),
                     password: SecretString::new(secret.password.clone()),
+                    fields: secret
+                        .fields
+                        .iter()
+                        .map(|f| (f.id.clone(), SecretString::new(f.value.clone())))
+                        .collect(),
                     provider: i.meta.provider.clone(),
                     username: i.meta.username.clone(),
                     email: i.meta.email.clone(),
@@ -1635,12 +1697,17 @@ impl Store {
             let keys = &self.open()?.keys;
             let p = &st.projects[st.project(project)?];
             let mut items = Vec::with_capacity(p.items.len());
-            for i in &p.items {
+            for i in p.items.iter().filter(|i| i.meta.trashed_at.is_empty()) {
                 let secret = keys.open_secret(p, i)?;
                 items.push(Exported {
                     meta: summary(i),
                     value: SecretString::new(secret.value.clone()),
                     password: SecretString::new(secret.password.clone()),
+                    fields: secret
+                        .fields
+                        .iter()
+                        .map(|f| (f.id.clone(), SecretString::new(f.value.clone())))
+                        .collect(),
                 });
             }
             (p.meta.name.clone(), items)
@@ -1720,7 +1787,7 @@ impl Store {
                     let restored = restore(rec(&payload.before)?, cur.rev, after.rev);
                     st.projects[pi].items[ii] = k.item_from_record(&st.projects[pi], &restored)?;
                 }
-                "update_meta" => {
+                "update_meta" | "trash_secret" | "restore_secret" => {
                     let (pi, ii) = current.ok_or_else(refuse)?;
                     let field = |v: &Option<Value>, name: &str| v.as_ref().and_then(|v| v.get(name)).cloned();
                     let item = &st.projects[pi].items[ii];
@@ -1923,6 +1990,72 @@ pub(crate) fn expiry_info(expires_at: &str) -> (String, Option<i64>) {
     (status.into(), Some(days))
 }
 
+/// The typed-item fields a save sets.
+fn apply_typed(after: &mut Record, before: &Record, f: &Fields) {
+    if let Some(k) = &f.kind {
+        after.kind.clone_from(k);
+    }
+    if let Some(t) = &f.tags {
+        after.tags = validate::normalize_tags(t);
+    }
+    if let Some(v) = f.favorite {
+        after.favorite = v;
+    }
+    if let Some(v) = f.archived {
+        after.archived = v;
+    }
+    if let Some(list) = &f.fields {
+        after.fields = merge_fields(&before.fields, list);
+    }
+}
+
+/// The fields as given; a secret one without a value keeps the stored value of the same id.
+fn merge_fields(
+    before: &[crate::model::Field],
+    input: &[validate::FieldInput],
+) -> Vec<crate::model::Field> {
+    let mut out: Vec<crate::model::Field> = Vec::with_capacity(input.len());
+    for x in input {
+        let mut f = crate::model::Field::default();
+        f.id = if x.id.is_empty() || out.iter().any(|o| o.id == x.id) {
+            random_id()
+        } else {
+            x.id.clone()
+        };
+        f.section = x.section.trim().to_owned();
+        f.label = x.label.trim().to_owned();
+        f.kind.clone_from(&x.kind);
+        f.value = match &x.value {
+            Some(v) => v.expose().to_owned(),
+            None => before
+                .iter()
+                .find(|b| b.id == f.id && b.is_secret() == f.is_secret())
+                .map(|b| b.value.clone())
+                .unwrap_or_default(),
+        };
+        out.push(f);
+    }
+    out
+}
+
+/// Whether the value, the password or a secret field differs.
+fn secret_changed(a: &Record, b: &Record) -> bool {
+    let secrets = |r: &Record| -> Vec<(String, bool)> {
+        r.fields
+            .iter()
+            .filter(|f| f.is_secret())
+            .map(|f| {
+                (
+                    sha256_hex(format!("{}\0{}", f.id, f.value).as_bytes()),
+                    f.value.is_empty(),
+                )
+            })
+            .filter(|(_, empty)| !empty)
+            .collect()
+    };
+    a.value != b.value || a.password != b.password || secrets(a) != secrets(b)
+}
+
 fn summary(i: &Item) -> ItemSummary {
     let (expiry_status, days_left) = expiry_info(&i.meta.expires_at);
     ItemSummary {
@@ -1945,6 +2078,16 @@ fn summary(i: &Item) -> ItemSummary {
         has_password: i.meta.has_password,
         updated_at: i.meta.updated_at.clone(),
         rev: i.rev,
+        kind: i.meta.kind().to_owned(),
+        tags: i.meta.tags.clone(),
+        favorite: i.meta.favorite,
+        archived: i.meta.archived,
+        trashed_at: i.meta.trashed_at.clone(),
+        fields: i.meta.fields.clone(),
+        attachments: i.meta.attachments.clone(),
+        has_otp: i.meta.has_otp(),
+        created_at: i.meta.created_at.clone(),
+        secret_changed_at: i.meta.secret_changed_at.clone(),
     }
 }
 

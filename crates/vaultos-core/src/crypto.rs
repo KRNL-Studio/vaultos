@@ -167,6 +167,37 @@ pub fn hmac_verify(key: &Key32, data: &[u8], tag: &[u8]) -> bool {
     mac.verify_slice(tag).is_ok()
 }
 
+/// An XChaCha20-Poly1305 box as raw bytes, for large contents such as attachments: the
+/// 24-byte nonce, then the ciphertext and its tag.
+pub fn seal_raw(key: &Key32, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let cipher = XChaCha20Poly1305::new(key.expose().into());
+    let nonce: [u8; 24] = random_array();
+    let ct = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .unwrap_or_else(|_| unreachable!("XChaCha20-Poly1305 encryption does not fail"));
+    let mut out = Vec::with_capacity(24 + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
+pub fn open_raw(key: &Key32, aad: &[u8], sealed: &[u8]) -> Result<SecretBytes> {
+    if sealed.len() < 24 + 16 {
+        return Err(Error::Format("sealed contents are too short".into()));
+    }
+    let (nonce, ct) = sealed.split_at(24);
+    XChaCha20Poly1305::new(key.expose().into())
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad })
+        .map(SecretBytes::new)
+        .map_err(|_| Error::Integrity)
+}
+
 /// One XChaCha20-Poly1305 box: a random 192-bit nonce (safe to pick at random for any number
 /// of messages) and ciphertext with its 16-byte tag.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

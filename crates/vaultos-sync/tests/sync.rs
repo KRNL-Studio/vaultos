@@ -153,7 +153,13 @@ fn merges_records_and_deletions_without_disclosing_values_or_their_hashes() {
     b.push();
     a.pull();
     assert_eq!(a.value("Example", "SECOND"), "synthetic-b");
+    // Moving an item to the Trash is an edit: the other device has it in its Trash too.
     a.store.delete_item("Example", "SECOND", "human").unwrap();
+    a.push();
+    b.pull();
+    assert!(!b.keys("Example").contains(&"SECOND".to_owned()));
+    assert_eq!(b.store.list_trash().unwrap().len(), 1);
+    a.store.purge_item("Example", "SECOND", "human").unwrap();
     a.push();
     let plan = b.pull();
     assert_eq!(plan.deleted.len(), 1);
@@ -283,6 +289,7 @@ fn a_deletion_stays_deleted_when_a_device_that_missed_it_pushes_the_record_again
     b.pull();
     b.push();
     a.store.delete_item("Example", "KEY", "human").unwrap();
+    a.store.purge_item("Example", "KEY", "human").unwrap();
     a.push();
     // B has not pulled the deletion. Its record's file is gone, so B writes it again: a new
     // push time, the same edit time.
@@ -320,6 +327,7 @@ fn an_edit_made_after_a_deletion_is_kept_and_its_file_cannot_be_dropped() {
     b.pull();
     c.pull();
     a.store.delete_item("Example", "KEY", "human").unwrap();
+    a.store.purge_item("Example", "KEY", "human").unwrap();
     a.push();
     // B edits the record later than A deleted it, without having pulled the deletion.
     b.force(
@@ -530,6 +538,7 @@ fn project_deletions_propagate_once_the_project_is_empty() {
     a.push();
     b.pull();
     a.store.delete_item("Doomed", "K", "human").unwrap();
+    a.store.purge_item("Doomed", "K", "human").unwrap();
     a.store.delete_project("Doomed", "human").unwrap();
     a.push();
     let plan = b.sync.pull(&mut b.store, false, false).unwrap();
@@ -671,6 +680,7 @@ fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     std::fs::write(&exclude, b"tombstones/\n").unwrap();
     a.set("Example", "GONE", "synthetic");
     a.store.delete_item("Example", "GONE", "human").unwrap();
+    a.store.purge_item("Example", "GONE", "human").unwrap();
     let e = a.sync.push_remote(&a.store, None).unwrap_err();
     assert!(e.message.contains("Git ignores files sync wrote"), "{e}");
     std::fs::write(&exclude, b"").unwrap();

@@ -187,7 +187,10 @@ function render() {
         settings: renderSettings,
         agents: renderAgents,
         delegate: renderDelegate,
-        sync: renderSync
+        sync: renderSync,
+        trash: renderTrash,
+        watchtower: renderWatchtower,
+        versions: renderVersions
     }[view.name] || renderLoading;
     fn();
 }
@@ -372,6 +375,19 @@ async function renderProjects() {
     await refreshAgents();
     if (revision !== renderVersion) return;
     searchPanel(scroll, revision);
+    const tools = el(`<div class="actionrow"></div>`);
+    for (const [label, name] of [ [ "Watchtower", "watchtower" ], [ "Trash", "trash" ] ]) {
+        const b = el(`<button class="btn ghost sm"></button>`);
+        b.textContent = label;
+        b.onclick = () => {
+            view = {
+                name: name
+            };
+            render();
+        };
+        tools.appendChild(b);
+    }
+    scroll.appendChild(tools);
     scroll.appendChild(el(`<div class="section"><span class="label">Projects</span><span class="label">${projects.length}</span></div>`));
     const pending = await window.vault.pending();
     if (revision !== renderVersion) return;
@@ -608,9 +624,11 @@ async function renderProject() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    const secrets = await window.vault.secrets(project);
+    const all = await window.vault.secrets(project);
     if (revision !== renderVersion) return;
-    scroll.appendChild(el(`<div class="section"><span class="label">${esc(project)}</span><span class="label">${secrets.length} ${secrets.length === 1 ? "key" : "keys"}</span></div>`));
+    const archivedCount = all.filter(s => s.archived).length;
+    const secrets = all.filter(s => !!view.showArchived === !!s.archived).sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+    scroll.appendChild(el(`<div class="section"><span class="label">${esc(project)}${view.showArchived ? " · Archived" : ""}</span><span class="label">${secrets.length} ${secrets.length === 1 ? "item" : "items"}</span></div>`));
     const actionRow = el(`<div class="actionrow"></div>`);
     const add = el(`<button class="btn primary"><span aria-hidden="true">+</span> Add key</button>`);
     add.onclick = () => {
@@ -640,16 +658,46 @@ async function renderProject() {
             exp.classList.remove("copied");
         }, 2e3);
     };
+    const imp = el(`<button class="btn ghost" title="Import from 1Password, Bitwarden or a CSV file">Import…</button>`);
+    imp.onclick = async () => {
+        if (await importInto(project, importStatus) && revision === renderVersion) {
+            const keep = importStatus.textContent;
+            render();
+            requestAnimationFrame(() => {
+                const n = document.querySelector(".import-status");
+                if (n) n.textContent = keep;
+            });
+        }
+    };
     actionRow.appendChild(add);
     actionRow.appendChild(exp);
+    actionRow.appendChild(imp);
+    if (archivedCount || view.showArchived) {
+        const arch = el(`<button class="btn ghost"></button>`);
+        arch.textContent = view.showArchived ? "Back to items" : `Archived (${archivedCount})`;
+        arch.onclick = () => {
+            view = {
+                name: "project",
+                project: project,
+                showArchived: !view.showArchived
+            };
+            render();
+        };
+        actionRow.appendChild(arch);
+    }
     scroll.appendChild(actionRow);
+    const importStatus = el(`<div class="note import-status" style="margin:-4px 2px 8px"></div>`);
+    scroll.appendChild(importStatus);
     const expErr = el(`<div class="err" style="margin-top:-8px"></div>`);
     scroll.appendChild(expErr);
-    if (!secrets.length) scroll.appendChild(el(`<div class="empty"><div class="big">No keys yet</div><p>No keys stored here yet.</p></div>`));
+    if (!secrets.length) scroll.appendChild(view.showArchived ? el(`<div class="empty"><div class="big">Nothing archived</div></div>`) : el(`<div class="empty"><div class="big">No keys yet</div><p>No keys stored here yet.</p></div>`));
     for (const s of secrets) {
         const prov = providerById(s.provider);
         const sub = [ s.username && `@${esc(s.username)}`, s.email && esc(s.email), s.url && esc(s.url) ].filter(Boolean).join(" · ");
         const badges = [];
+        if (s.favorite) badges.push(`<span class="badge fav" title="Favorite">★ Favorite</span>`);
+        if (s.kind && s.kind !== "api_key") badges.push(`<span class="badge">${esc(kindLabel(s.kind))}</span>`);
+        for (const t of s.tags || []) badges.push(`<span class="badge tag">#${esc(t)}</span>`);
         if (s.owner && s.owner !== "human") {
             badges.push(`<span class="badge agent">${esc(agentLabel(s.owner))}</span>`);
         }
@@ -664,6 +712,7 @@ async function renderProject() {
         const card = el(`<div class="secret card">\n      <div class="head">${prov.svg}<span class="key mono">${esc(s.key)}</span><span class="pname">${esc(prov.name)}</span></div>\n      ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}\n      ${sub ? `<div class="note">${sub}</div>` : ""}\n      ${s.note ? `<div class="note">${esc(s.note)}</div>` : ""}\n      <div class="val" data-val style="display:none"></div>\n      <div class="actions"></div></div>`);
         card.dataset.key = s.key;
         const valEl = card.querySelector("[data-val]");
+        const ownActions = [];
         const actions = card.querySelector(".actions");
         const showBtn = el(`<button class="iconbtn">Reveal</button>`);
         let shown = false;
@@ -704,23 +753,28 @@ async function renderProject() {
             };
             render();
         };
-        const delBtn = el(`<button class="iconbtn danger">Delete</button>`);
-        let armed = false;
+        const delBtn = el(`<button class="iconbtn danger" title="Move to the Trash; restore it there within 30 days">Move to Trash</button>`);
         delBtn.onclick = async () => {
-            if (!armed) {
-                armed = true;
-                delBtn.textContent = "Confirm?";
-                setTimeout(() => {
-                    armed = false;
-                    delBtn.textContent = "Delete";
-                }, 2500);
-                return;
-            }
             await window.vault.deleteSecret(project, s.key);
             render();
-            if (revision !== renderVersion) return;
         };
-        const ownActions = [];
+        const favBtn = el(`<button class="iconbtn" aria-pressed="${!!s.favorite}">${s.favorite ? "Unfavorite" : "Favorite"}</button>`);
+        favBtn.onclick = async () => {
+            await window.vault.setSecret(project, {
+                key: s.key,
+                favorite: !s.favorite
+            });
+            render();
+        };
+        const archBtn = el(`<button class="iconbtn" title="${s.archived ? "Back in the list, search and .env" : "Hide from the list, search, agents and .env"}">${s.archived ? "Unarchive" : "Archive"}</button>`);
+        archBtn.onclick = async () => {
+            await window.vault.setSecret(project, {
+                key: s.key,
+                archived: !s.archived
+            });
+            render();
+        };
+        if (s.hasOtp) ownActions.push(otpButton(project, s.key, revision));
         if (s.injectApproved === false) {
             const okBtn = el(`<button class="iconbtn">Approve for .env</button>`);
             okBtn.onclick = async () => {
@@ -750,7 +804,7 @@ async function renderProject() {
             };
             ownActions.push(dlg);
         }
-        [ showBtn, copyBtn, editBtn, ...ownActions, delBtn ].forEach(b => actions.appendChild(b));
+        [ showBtn, copyBtn, editBtn, ...ownActions, favBtn, archBtn, delBtn ].forEach(b => actions.appendChild(b));
         scroll.appendChild(card);
     }
     const del = el(`<button class="btn danger" style="margin-top:24px">Delete project</button>`);
@@ -838,6 +892,8 @@ async function renderSecret() {
         current = {
             ...meta,
             ...revealed,
+            fields: meta.fields || [],
+            secretFields: revealed.fields || [],
             key: editing
         };
         if (!view.provider) view.provider = current.provider;
@@ -864,6 +920,7 @@ async function renderSecret() {
     const scroll = el(`<div class="scroll"></div>`);
     scroll.appendChild(el(`<div class="section"><span class="label" style="display:flex;align-items:center;gap:7px">${prov.svg}${esc(prov.name)}</span><span class="label">${editing ? "Edit" : "New"}</span></div>`));
     if (prov.type === "password") buildPasswordForm(scroll, project, prov, editing, current); else if (prov.type === "custom") buildCustomForm(scroll, project, prov, editing, current); else buildKeysForm(scroll, project, prov, editing, current);
+    if (editing) itemTail(scroll, project, editing, current);
     $app.appendChild(scroll);
 }
 
@@ -873,14 +930,21 @@ function fieldBlock(labelHtml) {
 
 const OPTIONAL = ` <span class="optional">(optional)</span>`;
 
-async function persist(project, payload, editing) {
+async function persist(project, payload, editing, err) {
     const key = payload.key.trim();
-    if (editing && editing !== key) throw new Error("Key names cannot change during an edit; create a new entry instead");
-    await window.vault.setSecret(project, {
-        ...payload,
-        key: key
-    });
-    if (editing && editing !== key) throw new Error("Create a separate key to rename an existing entry");
+    if (editing && editing !== key) {
+        err.textContent = "Key names cannot change during an edit; create a new entry instead";
+        return;
+    }
+    try {
+        await window.vault.setSecret(project, {
+            ...payload,
+            key: key
+        });
+    } catch (e) {
+        err.textContent = cleanError(e);
+        return;
+    }
     view = {
         name: "project",
         project: project
@@ -893,9 +957,9 @@ function accountFields(current) {
     const box = el(`<div class="field acct-box"></div>`);
     const user = el(`<input type="text" placeholder="Username" value="${esc(current ? current.username : "")}" />`);
     const email = el(`<input type="text" placeholder="Email" value="${esc(current ? current.email : "")}" />`);
-    const pass = el(`<input type="password" placeholder="Account password" value="${esc(current ? current.password : "")}" />`);
+    const pass = el(`<input type="password" placeholder="Account password" autocomplete="off" value="${esc(current ? current.password : "")}" />`);
     const url = el(`<input type="text" placeholder="URL" value="${esc(current ? current.url : "")}" />`);
-    [ user, email, pass, url ].forEach(n => box.appendChild(n));
+    [ user, email, passwordRow(pass), url ].forEach(n => box.appendChild(n));
     return {
         nodes: [ head, box ],
         get: () => ({
@@ -990,6 +1054,7 @@ function buildKeysForm(scroll, project, prov, editing, current) {
     noteField.appendChild(noteInput);
     const meta = metaFields(prov, current);
     const acct = accountFields(current);
+    const extra = itemExtras(prov, current);
     const err = el(`<div class="err"></div>`);
     const save = el(`<button class="btn primary">Save key</button>`);
     save.onclick = () => {
@@ -1003,10 +1068,11 @@ function buildKeysForm(scroll, project, prov, editing, current) {
             provider: prov.id,
             note: noteInput.value.trim(),
             ...meta.get(),
-            ...acct.get()
-        }, editing);
+            ...acct.get(),
+            ...extra.get()
+        }, editing, err);
     };
-    [ whichField, keyField, valField, ...meta.nodes, noteField, ...acct.nodes, err, save ].forEach(n => scroll.appendChild(n));
+    [ whichField, keyField, valField, ...meta.nodes, noteField, ...acct.nodes, ...extra.nodes, err, save ].forEach(n => scroll.appendChild(n));
     paintOpts();
 }
 
@@ -1022,13 +1088,14 @@ function buildPasswordForm(scroll, project, prov, editing, current) {
     emailField.appendChild(emailInput);
     const passField = fieldBlock("Password");
     const passInput = el(`<input type="password" placeholder="the password" autocomplete="off" value="${esc(current ? current.value : "")}" />`);
-    passField.appendChild(concealedRow(passInput));
+    passField.appendChild(passwordRow(passInput));
     const urlField = fieldBlock("URL" + OPTIONAL);
     const urlInput = el(`<input type="text" placeholder="https://…" value="${esc(current ? current.url : "")}" />`);
     urlField.appendChild(urlInput);
     const noteField = fieldBlock("Note" + OPTIONAL);
     const noteInput = el(`<input type="text" placeholder="extra context" value="${esc(current ? current.note : "")}" />`);
     noteField.appendChild(noteInput);
+    const extra = itemExtras(prov, current);
     const err = el(`<div class="err"></div>`);
     const save = el(`<button class="btn primary">Save password</button>`);
     save.onclick = () => {
@@ -1049,10 +1116,11 @@ function buildPasswordForm(scroll, project, prov, editing, current) {
             note: noteInput.value.trim(),
             username: userInput.value.trim(),
             email: emailInput.value.trim(),
-            url: urlInput.value.trim()
-        }, editing);
+            url: urlInput.value.trim(),
+            ...extra.get()
+        }, editing, err);
     };
-    [ labelField, userField, emailField, passField, urlField, noteField, err, save ].forEach(n => scroll.appendChild(n));
+    [ labelField, userField, emailField, passField, urlField, noteField, ...extra.nodes, err, save ].forEach(n => scroll.appendChild(n));
     labelInput.focus();
 }
 
@@ -1068,6 +1136,7 @@ function buildCustomForm(scroll, project, prov, editing, current) {
     noteField.appendChild(noteInput);
     const meta = metaFields(prov, current);
     const acct = accountFields(current);
+    const extra = itemExtras(prov, current);
     const err = el(`<div class="err"></div>`);
     const save = el(`<button class="btn primary">Save</button>`);
     save.onclick = () => {
@@ -1082,10 +1151,11 @@ function buildCustomForm(scroll, project, prov, editing, current) {
             provider: "custom",
             note: noteInput.value.trim(),
             ...meta.get(),
-            ...acct.get()
-        }, editing);
+            ...acct.get(),
+            ...extra.get()
+        }, editing, err);
     };
-    [ keyField, valField, ...meta.nodes, noteField, ...acct.nodes, err, save ].forEach(n => scroll.appendChild(n));
+    [ keyField, valField, ...meta.nodes, noteField, ...acct.nodes, ...extra.nodes, err, save ].forEach(n => scroll.appendChild(n));
     keyInput.focus();
 }
 
@@ -1670,7 +1740,7 @@ async function renderHistory() {
     if (!entries.length) scroll.appendChild(el(`<div class="empty"><div class="big">No changes yet</div><p>Edits to projects and keys will show up here.</p></div>`));
     for (const entry of entries) {
         const row = el(`<div class="secret card"><div class="key">${esc(entry.action)} ${esc(entry.key || "")}</div><p class="note">${esc(entry.ts)} · ${esc(agentLabel(entry.actor))}</p></div>`);
-        if (!entry.reverted && [ "create_secret", "update_secret", "delete_secret", "create_project", "delete_project" ].includes(entry.action)) {
+        if (!entry.reverted && [ "create_secret", "update_secret", "delete_secret", "update_meta", "trash_secret", "restore_secret", "create_project", "delete_project" ].includes(entry.action)) {
             const undo = el('<button class="btn ghost sm">Undo</button>');
             undo.onclick = async () => {
                 await window.vault.revert(entry.id);

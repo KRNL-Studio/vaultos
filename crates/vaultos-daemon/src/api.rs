@@ -137,6 +137,19 @@ fn fields_from(body: &Map<String, Value>) -> Result<Fields> {
         provider: optional(body, "provider")?,
         permission: optional(body, "permission")?,
         expires_at: optional(body, "expiresAt")?,
+        kind: optional(body, "kind")?,
+        tags: match body.get("tags") {
+            None => None,
+            Some(Value::Array(a)) => Some(
+                a.iter()
+                    .map(|t| t.as_str().map(str::to_owned))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| invalid("Invalid tags"))?,
+            ),
+            Some(_) => return Err(invalid("Invalid tags")),
+        },
+        // Favorites, archiving and custom fields are the app's.
+        ..Fields::default()
     })
 }
 
@@ -421,7 +434,12 @@ fn route(
         match (m, key) {
             ("GET", None) => {
                 cx.scope("read")?;
-                return to_json(&store.list_items(&id)?);
+                // Archived items are kept out of agents' way, as out of inject.
+                let mut items = store.list_items(&id)?;
+                if vaultos_core::model::is_agent(&cx.actor) {
+                    items.retain(|i| !i.archived);
+                }
+                return to_json(&items);
             }
             ("POST", None) => return cx.write_secret(store, &id, &fields_from(body)?),
             ("DELETE", Some(k)) if !k.is_empty() => {

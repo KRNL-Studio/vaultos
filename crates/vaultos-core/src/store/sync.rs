@@ -40,7 +40,42 @@ pub fn check_record(r: &Record) -> Result<()> {
         provider: opt(&r.provider),
         permission: opt(&r.permission),
         expires_at: opt(&r.expires_at),
+        kind: (!r.kind.is_empty()).then(|| r.kind.clone()),
+        tags: Some(r.tags.clone()),
+        favorite: None,
+        archived: None,
+        fields: Some(
+            r.fields
+                .iter()
+                .map(|f| validate::FieldInput {
+                    id: f.id.clone(),
+                    section: f.section.clone(),
+                    label: f.label.clone(),
+                    kind: f.kind.clone(),
+                    value: Some(SecretString::new(f.value.as_str())),
+                })
+                .collect(),
+        ),
     })?;
+    if r.fields.iter().any(|f| f.id.is_empty()) {
+        return Err(Error::invalid("Invalid field id"));
+    }
+    if r.attachments.len() > crate::store::MAX_ATTACHMENTS {
+        return Err(Error::invalid("Too many attachments"));
+    }
+    for a in &r.attachments {
+        check_id(&a.id)?;
+        validate::text(&a.name, "attachment name", 255, false)?;
+        if a.sha256.len() != 64 || !a.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::invalid("Invalid attachment"));
+        }
+    }
+    for (name, v) in [
+        ("trash date", &r.trashed_at),
+        ("change date", &r.secret_changed_at),
+    ] {
+        validate::text(v, name, 64, true)?;
+    }
     for (name, v) in [
         ("owner", &r.owner),
         ("creator", &r.created_by),

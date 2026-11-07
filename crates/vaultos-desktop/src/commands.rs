@@ -3,12 +3,13 @@
 //! agents or sync. Every non-public call needs the human's unlock and resets the idle timer.
 
 use crate::app::{blocking, lock, App};
-use crate::{export, keyring, login, platform, prefs, search, settings, ui};
+use crate::{export, items, keyring, login, platform, prefs, search, settings, ui};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use vaultos_core::agents::{Wildcards, ALL_SCOPES};
 use vaultos_core::model::HUMAN;
+use vaultos_core::validate::FieldInput;
 use vaultos_core::{Error, Fields, SecretString, Store};
 use vaultos_sync::Sync;
 
@@ -130,6 +131,15 @@ fn changes(channel: &str) -> bool {
             | "syncStatus"
             | "syncIdentity"
             | "confirmHuman"
+            | "trash"
+            | "generate"
+            | "strength"
+            | "otp"
+            | "copyOtp"
+            | "saveAttachment"
+            | "itemHistory"
+            | "watchtower"
+            | "breachCheck"
     )
 }
 
@@ -170,6 +180,39 @@ fn item_fields(v: &Value) -> Result<Fields, String> {
         provider: text("provider"),
         permission: text("permission"),
         expires_at: text("expiresAt"),
+        kind: text("kind"),
+        tags: match o.get("tags") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) => Some(
+                a.iter()
+                    .map(|t| t.as_str().map(str::to_owned).ok_or("Invalid tag"))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Some(_) => return Err("Invalid tags".into()),
+        },
+        favorite: o.get("favorite").and_then(Value::as_bool),
+        archived: o.get("archived").and_then(Value::as_bool),
+        fields: match o.get("fields") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) => Some(a.iter().map(field_input).collect::<Result<_, _>>()?),
+            Some(_) => return Err("Invalid fields".into()),
+        },
+    })
+}
+
+fn field_input(v: &Value) -> Result<FieldInput, String> {
+    let o = v.as_object().ok_or("Invalid field")?;
+    let text = |k: &str| o.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    Ok(FieldInput {
+        id: text("id"),
+        section: text("section"),
+        label: text("label"),
+        kind: text("kind"),
+        value: match o.get("value") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(v)) => Some(SecretString::new(v.as_str())),
+            Some(_) => return Err("Invalid field value".into()),
+        },
     })
 }
 
@@ -182,6 +225,7 @@ fn revealed_json(r: &vaultos_core::store::Revealed) -> Value {
         "username": r.username,
         "email": r.email,
         "url": r.url,
+        "fields": r.fields.iter().map(|(id, v)| json!({ "id": id, "value": v.expose() })).collect::<Vec<_>>(),
     })
 }
 
@@ -217,7 +261,8 @@ async fn search_items(app: &Arc<App>, q: &Value) -> Reply {
     let hits = store(app, move |s| {
         let mut all = Vec::new();
         for p in s.list_projects()? {
-            let items = s.list_items(&p.name)?;
+            let mut items = s.list_items(&p.name)?;
+            items.retain(|i| !i.archived);
             all.push((p.name, items));
         }
         Ok(search::search(&all, &q, 100))
@@ -347,6 +392,30 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
         }
         "copy" => copy_value(app, a.str(0, "project")?, a.str(1, "key")?).await,
         "search" => search_items(app, a.get(0)).await,
+        "trash" => items::trash(app).await,
+        "restoreSecret" => items::restore(app, a.str(0, "project")?, a.str(1, "key")?).await,
+        "purgeSecret" => items::purge(app, a.str(0, "project")?, a.str(1, "key")?).await,
+        "emptyTrash" => items::empty_trash(app).await,
+        "generate" => items::generate(a.get(0)),
+        "strength" => items::strength(&a.str(0, "password")?),
+        "otp" => items::otp(app, a.str(0, "project")?, a.str(1, "key")?).await,
+        "copyOtp" => items::copy_otp(app, a.str(0, "project")?, a.str(1, "key")?).await,
+        "addAttachment" => {
+            items::add_attachment(app, handle, a.str(0, "project")?, a.str(1, "key")?).await
+        }
+        "saveAttachment" => {
+            let (p, k, id) = (a.str(0, "project")?, a.str(1, "key")?, a.str(2, "attachment")?);
+            items::save_attachment(app, handle, p, k, id).await
+        }
+        "removeAttachment" => {
+            let (p, k, id) = (a.str(0, "project")?, a.str(1, "key")?, a.str(2, "attachment")?);
+            items::remove_attachment(app, p, k, id).await
+        }
+        "itemHistory" => items::item_history(app, a.str(0, "project")?, a.str(1, "key")?).await,
+        "restoreVersion" => items::restore_version(app, a.str(0, "history entry")?).await,
+        "watchtower" => items::watchtower(app).await,
+        "breachCheck" => items::breach_check(app).await,
+        "importFile" => items::import_file(app, handle, a.str(0, "project")?).await,
         "getDesktopPrefs" => Ok(prefs_state(app)),
         "setDesktopPrefs" => {
             let patch = a.get(0).clone();
@@ -528,6 +597,12 @@ pub async fn quick(
     match channel.as_str() {
         "confirmHuman" => Ok(app.confirm_password(a.opt_str(0)).await),
         "search" => search_items(&app, a.get(0)).await,
+        // The panel never receives the code itself.
+        "copyOtp" => {
+            let r = items::copy_otp(&app, a.str(0, "project")?, a.str(1, "key")?).await?;
+            ui::hide_quick(&handle, true);
+            Ok(r)
+        }
         "copy" => {
             let (p, k) = (a.str(0, "project")?, a.str(1, "key")?);
             let field = a.opt_str(2).unwrap_or_else(|| "value".into());

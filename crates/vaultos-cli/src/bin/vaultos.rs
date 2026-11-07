@@ -102,6 +102,26 @@ enum Command {
         #[arg(default_value = "dotenv", value_parser = ["dotenv", "json", "shell"])]
         format: String,
     },
+    /// Import a 1Password .1pux, Bitwarden .json or CSV export (an absolute path) into a
+    /// project, creating it if needed. Attachments and passkeys are not imported
+    ImportItems { project: String, file: PathBuf },
+    /// Print an item's current one-time code
+    Otp { project: String, key: String },
+    /// Print a new random password, passphrase or PIN. Nothing is stored or opened
+    Generate {
+        /// Characters in a random password (8-128), or digits in a PIN (4-32)
+        #[arg(long)]
+        length: Option<usize>,
+        /// A passphrase of this many words (3-20) instead
+        #[arg(long, conflicts_with = "pin")]
+        words: Option<usize>,
+        /// A PIN instead
+        #[arg(long)]
+        pin: bool,
+        /// Letters and digits only
+        #[arg(long)]
+        no_symbols: bool,
+    },
     /// Copy the encrypted vault file into an absolute directory
     Backup { directory: PathBuf },
     /// Enrolled agents
@@ -1188,6 +1208,64 @@ fn run(cli: Cli) -> Result<()> {
                     .store
                     .inject(&project, &file, format, false, None, HUMAN)?,
             )
+        }
+        Command::ImportItems { project, file } => {
+            if !file.is_absolute() {
+                return Err(Fail::usage("Specify an absolute file path"));
+            }
+            let meta = std::fs::metadata(&file).map_err(|e| Fail::new(e.to_string()))?;
+            if !meta.is_file() || meta.len() > vaultos_core::import::MAX_IMPORT_BYTES as u64 {
+                return Err(Fail::usage("Specify an export file of at most 64 MB"));
+            }
+            let bytes = zeroize::Zeroizing::new(
+                std::fs::read(&file).map_err(|e| Fail::new(e.to_string()))?,
+            );
+            let name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let format = vaultos_core::import::Format::detect(&name, &bytes).ok_or_else(|| {
+                Fail::usage("Expected a 1Password .1pux, a Bitwarden .json or a .csv export")
+            })?;
+            let report = vaultos_core::import::parse(format, &bytes)?;
+            let mut open = ctx.open()?;
+            emit(&open.store.batch(|s| {
+                if s.find_project(&project)?.is_none() {
+                    s.create_project(&project, HUMAN)?;
+                }
+                s.import_items(&project, report, HUMAN)
+            })?)
+        }
+        Command::Otp { project, key } => {
+            let open = ctx.open()?;
+            let otp = open.store.otp(&project, &key, HUMAN)?;
+            say(otp.code.expose())
+        }
+        Command::Generate {
+            length,
+            words,
+            pin,
+            no_symbols,
+        } => {
+            use vaultos_core::generator::{generate, Recipe};
+            let recipe = match (words, pin) {
+                (Some(words), _) => Recipe::Passphrase {
+                    words,
+                    separator: "-".into(),
+                    capitalize: false,
+                    number: false,
+                },
+                (None, true) => Recipe::Pin {
+                    length: length.unwrap_or(6),
+                },
+                (None, false) => Recipe::Random {
+                    length: length.unwrap_or(24),
+                    digits: true,
+                    symbols: !no_symbols,
+                    avoid_ambiguous: false,
+                },
+            };
+            say(generate(&recipe)?.value.expose())
         }
         Command::Agents(c) => agents(&ctx, c),
         Command::Pending(c) => pending(&ctx, c),

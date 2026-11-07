@@ -106,6 +106,52 @@
             const found = await window.vault.search("demo");
             assert(found.length === 1 && found[0].key === "DEMO_API_KEY", "search finds the item");
             assert(!JSON.stringify(found).includes(value), "search results carry no values");
+            // Typed items: the generator, a one-time code field, the Trash and Watchtower.
+            const pin = await window.vault.generate({
+                kind: "pin",
+                length: 6
+            });
+            assert(/^\d{6}$/.test(pin.value), "the generator makes a PIN");
+            await window.vault.setSecret("Example App", {
+                key: "SYNTH_2FA",
+                provider: "custom",
+                value: "synthetic-otp-item",
+                kind: "login",
+                tags: [ "ci" ],
+                fields: [ {
+                    label: "2FA",
+                    kind: "otp",
+                    value: "JBSWY3DPEHPK3PXP"
+                } ]
+            });
+            const item = (await window.vault.secrets("Example App")).find(s => s.key === "SYNTH_2FA");
+            assert(item && item.hasOtp && item.kind === "login" && !JSON.stringify(item).includes("JBSWY3DP"), "the code's secret stays sealed");
+            assert(/^\d{6}$/.test((await window.vault.otp("Example App", "SYNTH_2FA")).code), "a one-time code");
+            await window.vault.deleteSecret("Example App", "SYNTH_2FA");
+            assert(!(await window.vault.secrets("Example App")).some(s => s.key === "SYNTH_2FA"), "a deleted item leaves the list");
+            await click("Trash");
+            await text("SYNTH_2FA");
+            await click("Restore");
+            await text("The Trash is empty");
+            assert((await window.vault.secrets("Example App")).some(s => s.key === "SYNTH_2FA"), "Restore brings it back");
+            (await button("Projects", false)).click();
+            // The editor keeps a sealed field it shows concealed, and saves it unchanged.
+            (await button("Example App", false)).click();
+            const edit = await until(() => [ ...document.querySelectorAll(".secret.card") ].find(c => c.dataset.key === "SYNTH_2FA")?.querySelector("button:nth-of-type(3)"), "the item's Edit button");
+            assert(edit.textContent === "Edit", "the third action edits");
+            edit.click();
+            const label = await field("Label");
+            assert(label.value === "2FA", "the custom field shows its label");
+            assert(label.closest(".cfield").querySelector("input[type=password]").value === "JBSWY3DPEHPK3PXP", "the editor holds the field's value concealed");
+            await click("Save");
+            await text("SYNTH_2FA");
+            const saved = (await window.vault.secrets("Example App")).find(s => s.key === "SYNTH_2FA");
+            assert(saved.hasOtp && saved.tags.join() === "ci", "saving unchanged keeps the code and tags");
+            (await button("Projects", false)).click();
+            await click("Watchtower");
+            await button("Check now");
+            (await button("Projects", false)).click();
+            await button("Example App", false);
             press(document.body, "k", true);
             const box2 = await query(".searchbox input");
             fill(box2, "demo api");
@@ -167,7 +213,7 @@
             }
             await ui("finish", {
                 ok: true,
-                report: "Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, Quick Access, close to menu bar, overlapping unlocks, lock before sleep."
+                report: "Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, typed items, Trash, Watchtower, Quick Access, close to menu bar, overlapping unlocks, lock before sleep."
             });
         }
     };

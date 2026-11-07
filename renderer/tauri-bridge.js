@@ -41,13 +41,13 @@
 
     if (location.pathname.endsWith("/quick.html")) {
         window.quick = {
-            ...api("quick", [ "state", "unlock", "unlockTouchId", "confirmHuman", "search", "copy", "openUrl", "open", "openMain", "hide" ]),
+            ...api("quick", [ "state", "unlock", "unlockTouchId", "confirmHuman", "search", "copy", "copyOtp", "openUrl", "open", "openMain", "hide" ]),
             onShow: on("quick:show"),
             onLocked: on("quick:locked")
         };
         return;
     }
-    const vault = api("vault", [ "state", "providers", "takeCommand", "search", "getDesktopPrefs", "setDesktopPrefs", "chooseFolder", "setAgentAccess", "copy", "init", "unlock", "unlockTouchId", "upgrade", "confirmHuman", "lock", "projects", "createProject", "deleteProject", "secrets", "setSecret", "deleteSecret", "reveal", "getSettings", "setSettings", "changePassword", "agents", "enrolAgent", "reissueAgent", "revokeAgent", "setAgentScopes", "allScopes", "delegate", "adopt", "approveInject", "approveInjectAll", "pending", "history", "revert", "syncStatus", "syncPush", "syncPull", "syncInit", "syncIdentity", "syncTrust", "quit" ]);
+    const vault = api("vault", [ "state", "providers", "takeCommand", "search", "getDesktopPrefs", "setDesktopPrefs", "chooseFolder", "setAgentAccess", "copy", "init", "unlock", "unlockTouchId", "upgrade", "confirmHuman", "lock", "projects", "createProject", "deleteProject", "secrets", "setSecret", "deleteSecret", "reveal", "getSettings", "setSettings", "changePassword", "agents", "enrolAgent", "reissueAgent", "revokeAgent", "setAgentScopes", "allScopes", "delegate", "adopt", "approveInject", "approveInjectAll", "pending", "history", "revert", "syncStatus", "syncPush", "syncPull", "syncInit", "syncIdentity", "syncTrust", "trash", "restoreSecret", "purgeSecret", "emptyTrash", "generate", "strength", "otp", "copyOtp", "addAttachment", "saveAttachment", "removeAttachment", "itemHistory", "restoreVersion", "watchtower", "breachCheck", "importFile", "quit" ]);
     vault.exportProject = project => invoke("vault", "export", [ project ]);
     vault.onLocked = on("vault:locked");
     vault.onUnlocked = on("vault:unlocked");

@@ -5,7 +5,7 @@ use crate::crypto::sha256_hex;
 use crate::model::Record;
 use serde_json::{Map, Value};
 
-const RECORD_FIELDS: [&str; 19] = [
+const RECORD_FIELDS: [&str; 27] = [
     "id",
     "key",
     "value",
@@ -25,6 +25,16 @@ const RECORD_FIELDS: [&str; 19] = [
     "createdAt",
     "updatedAt",
     "rev",
+    // Typed items. Each is left out of the record when empty or false, so records saved
+    // before types existed keep their hashes.
+    "kind",
+    "tags",
+    "favorite",
+    "archived",
+    "trashedAt",
+    "fields",
+    "attachments",
+    "secretChangedAt",
 ];
 
 /// A line-for-line port: null becomes "", arrays keep every element, and an object drops

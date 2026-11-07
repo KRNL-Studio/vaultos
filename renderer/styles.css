@@ -338,3 +338,44 @@ button.badge { cursor: pointer; font-family: inherit; }
 
 /* Revealed secret values are read, not selected: Copy uses the concealed, auto-clearing path. */
 .secret .val { user-select: none; -webkit-user-select: none; }
+
+/* ── typed items ── */
+select {
+  height: 28px; background: var(--field); color: var(--ink);
+  border: 1px solid var(--border); border-radius: var(--r);
+  padding: 0 6px; font-size: 13px; font-family: inherit; -webkit-app-region: no-drag;
+}
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.field > select { width: 100%; }
+.chkrow { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.badge.fav { color: var(--amber-text); background: var(--amber-tint); }
+.badge.tag { font-family: var(--font-mono); }
+.note.good { color: var(--good-text); }
+
+.meter { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; color: var(--soft); min-height: 14px; }
+.meter .bar { flex: 0 0 72px; height: 4px; border-radius: 2px; background: var(--divider); overflow: hidden; }
+.meter .bar > span { display: block; height: 100%; width: 0; background: var(--warn-text); }
+.meter[data-rating=""] .bar { visibility: hidden; }
+.meter[data-rating=weak] .bar > span { width: 25%; }
+.meter[data-rating=fair] .bar > span { width: 50%; background: var(--amber-text); }
+.meter[data-rating=good] .bar > span { width: 75%; background: var(--good); }
+.meter[data-rating=strong] .bar > span { width: 100%; background: var(--good); }
+
+.cfields { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.cfield { display: grid; grid-template-columns: minmax(80px, 1fr) auto minmax(120px, 2fr) auto; gap: 6px; align-items: center; }
+.cfield .valslot { min-width: 0; }
+
+.filerow { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid var(--divider); }
+.filerow .grow { flex: 1; min-width: 0; }
+.filerow .name { font-size: 13px; overflow-wrap: anywhere; }
+.filerow .sub { font-size: 11px; color: var(--soft); }
+
+.otp { display: inline-flex; align-items: center; gap: 6px; }
+.otpcode { font-size: 13px; letter-spacing: 0.04em; color: var(--ink); }
+
+.modal .box.wide { max-width: 420px; }
+.gen-out { min-height: 34px; margin-top: 0; user-select: all; -webkit-user-select: all; }
+.gen-opts { display: flex; flex-direction: column; gap: 6px; }
+.slider { display: grid; grid-template-columns: 56px 1fr 28px; align-items: center; gap: 8px; font-size: 13px; }
+.slider input { padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+.slider b { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }

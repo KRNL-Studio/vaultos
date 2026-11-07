@@ -99,6 +99,8 @@ fn call(client: &Client, name: &str, a: &JsonObject) -> Result<Value, String> {
                 ("url", "url"),
                 ("permission", "permission"),
                 ("expires_at", "expiresAt"),
+                ("kind", "kind"),
+                ("tags", "tags"),
             ]);
             send("POST", &secrets()?, Some(body))
         }

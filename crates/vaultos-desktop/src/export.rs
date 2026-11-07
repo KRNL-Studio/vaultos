@@ -320,6 +320,25 @@ fn layout(project: &str, items: &[Exported], generated: &str) -> Vec<Zeroizing<V
         }
         l.field("URL", &e.meta.url);
         l.field("Note", &e.meta.note);
+        for f in &e.meta.fields {
+            let value = if f.is_secret() {
+                e.fields
+                    .iter()
+                    .find(|(id, _)| *id == f.id)
+                    .map_or("", |(_, v)| v.expose())
+            } else {
+                &f.value
+            };
+            let label = if f.label.is_empty() {
+                &f.kind
+            } else {
+                &f.label
+            };
+            l.field(label, value);
+        }
+        if !e.meta.tags.is_empty() {
+            l.field("Tags", &e.meta.tags.join(", "));
+        }
         l.space(6.0);
         l.rule(HAIR, 0.5);
         l.space(8.0);
@@ -502,7 +521,7 @@ fn pdf(project: &str, items: &[Exported], password: &str, generated: &str) -> Ze
 
 /// Writes privately beside the target, then renames over it: never through a symlink, never
 /// inside the vault's folder.
-fn write_file(target: &Path, data_dir: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_file(target: &Path, data_dir: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
     let dir = target.parent().ok_or("Choose a file name")?;
     let real_dir = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
@@ -580,6 +599,7 @@ mod tests {
             meta: test_meta(),
             value: vaultos_core::SecretString::new("synthetic-value-123"),
             password: vaultos_core::SecretString::new(""),
+            fields: Vec::new(),
         };
         let bytes = pdf("demo", &[item], "export-password-1", "2026-01-01T00:00:00Z");
         assert!(bytes.starts_with(b"%PDF-1.7"));
@@ -616,6 +636,7 @@ mod tests {
             has_password: false,
             updated_at: String::new(),
             rev: 1,
+            ..Default::default()
         }
     }
 

@@ -12,6 +12,15 @@ VaultOS is now Rust throughout. Electron, Chromium, Node.js and every npm runtim
 - Sync format 2 in the app and the CLI: the device's keys live inside the encrypted vault, manifests carry no content hashes, and no `age` binary is needed. Format 1 repositories are refused (`UNSUPPORTED_REPOSITORY`); start a new repository after upgrading.
 - Packaging: `npm run dist:mac` and `npm run dist:linux` build the Rust programs and enforce size budgets; the release inventory lists the Rust crates. The packaged smoke test checks each tool starts in under 250 ms and the app stays under 250 MiB at start. Signing with a Developer ID identity and notarization run when their credentials are configured; public builds stay unsigned.
 - Linux: no Chromium sandbox helper, `--harden` or launcher script any more; screen lock is read from logind.
+- Items: each item has a type (login, API key, secure note, SSH key, database, server or certificate; inferred for existing items), tags, a favorite flag and up to 64 custom fields. Text, URL, email and date fields are metadata; concealed and one-time code fields are sealed with the item's secret and never reach agents, even with `reveal`. Items saved before this keep their record hashes.
+- One-time codes: a TOTP field (an `otpauth://totp/` link or a Base32 setup key; SHA-1, SHA-256 or SHA-512, 6 to 8 digits) shows a live code on the item, ⌥⏎ in Quick Access copies it, and `vaultos otp PROJECT KEY` prints it.
+- Generator: random passwords, EFF-wordlist passphrases and PINs, with a strength estimate in every password field. `vaultos generate` prints one.
+- Trash and Archive: Delete (in the app, `delete_secret` and the API) moves an item to the Trash, which syncs as an edit; Restore brings it back, and Delete for good (confirmed) or 30 days remove it with a tombstone. Archived items leave the list, search, Quick Access and injection. Agents see neither.
+- Versions: each item lists its history and can go back to an earlier version, keeping its current owner, delegation and attachments; the restore can be undone.
+- Attachments: up to 20 files of 25 MB each per item, sealed separately on this device under `attachments/`. They are not synced or included in the PDF export; saving one asks for confirmation.
+- Watchtower lists weak, reused, year-old, expiring and expired secrets. The breach check is off until you choose **Check now**: it sends only the first five characters of each password's SHA-1 to Have I Been Pwned's range API, with padded replies.
+- Import from 1Password (`.1pux`), Bitwarden (unencrypted `.json`) and CSV exports, in the app or with `vaultos import-items PROJECT FILE`. Attachments, passkeys and encrypted Bitwarden exports are not imported.
+- MCP: `set_secret` takes optional `kind` and `tags`.
 - Removed: the Electron app, the Node backend and bridge, `cli.cjs` (including `import-legacy`: use 0.2 to import from the earlier fork, then upgrade), the Swift Keychain and clipboard helpers, and the Playwright UI test, replaced by `npm run test:desktop`.
 
 ## Changes to the 0.2 app after 0.2.0-preview.1 (never released; the 0.3 rewrite carries their behaviour forward where it applies)

@@ -1,7 +1,7 @@
 //! Input rules, ported from `validation.js`.
 
 use crate::error::{Error, Result};
-use crate::model::parse_iso;
+use crate::model::{parse_iso, FIELD_KINDS, ITEM_KINDS};
 use crate::secret::SecretString;
 
 fn has_control(s: &str) -> bool {
@@ -53,6 +53,76 @@ pub struct Fields {
     pub provider: Option<String>,
     pub permission: Option<String>,
     pub expires_at: Option<String>,
+    /// One of [`ITEM_KINDS`].
+    pub kind: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub favorite: Option<bool>,
+    pub archived: Option<bool>,
+    /// The item's custom fields, replacing the ones it has.
+    pub fields: Option<Vec<FieldInput>>,
+}
+
+/// One custom field to save. An empty `id` is a new field. A secret field given without a
+/// value keeps the value stored under its id, so a form need not reveal it to save it.
+#[derive(Clone, Default)]
+pub struct FieldInput {
+    pub id: String,
+    pub section: String,
+    pub label: String,
+    pub kind: String,
+    pub value: Option<SecretString>,
+}
+
+impl std::fmt::Debug for FieldInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldInput")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+pub const MAX_TAGS: usize = 32;
+pub const MAX_FIELDS: usize = 64;
+
+/// Trimmed, without empty or repeated (case-insensitively) tags.
+pub fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.trim();
+        if !t.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+            out.push(t.to_owned());
+        }
+    }
+    out
+}
+
+fn field_input(f: &FieldInput) -> Result<()> {
+    if !FIELD_KINDS.contains(&f.kind.as_str()) {
+        return Err(Error::invalid("Invalid field type"));
+    }
+    if !f.id.is_empty()
+        && (f.id.len() > 64
+            || !f
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        return Err(Error::invalid("Invalid field id"));
+    }
+    text(&f.label, "field name", 256, true)?;
+    text(&f.section, "section name", 256, true)?;
+    if let Some(v) = &f.value {
+        text(v.expose(), "field value", 65536, true)?;
+        let v = v.expose();
+        if f.kind == "otp" && !v.is_empty() {
+            crate::totp::Totp::parse(v)?;
+        }
+        if f.kind == "date" && !v.is_empty() && parse_iso(&format!("{v}T00:00:00Z")).is_none() {
+            return Err(Error::invalid("Invalid date; use YYYY-MM-DD"));
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for Fields {
@@ -90,6 +160,27 @@ pub fn fields(f: &Fields) -> Result<()> {
         let date_only = e.len() == 10 && parse_iso(&format!("{e}T00:00:00Z")).is_some();
         if !date_only && parse_iso(e).is_none() {
             return Err(Error::invalid("Invalid expiry date"));
+        }
+    }
+    if let Some(k) = &f.kind {
+        if !ITEM_KINDS.contains(&k.as_str()) {
+            return Err(Error::invalid("Invalid item type"));
+        }
+    }
+    if let Some(tags) = &f.tags {
+        if tags.len() > MAX_TAGS {
+            return Err(Error::invalid(format!("Use at most {MAX_TAGS} tags")));
+        }
+        for t in tags {
+            text(t, "tag", 64, true)?;
+        }
+    }
+    if let Some(fields) = &f.fields {
+        if fields.len() > MAX_FIELDS {
+            return Err(Error::invalid(format!("Use at most {MAX_FIELDS} fields")));
+        }
+        for x in fields {
+            field_input(x)?;
         }
     }
     Ok(())

@@ -5,6 +5,7 @@
 mod app;
 mod commands;
 mod export;
+mod items;
 mod keyring;
 mod login;
 mod platform;

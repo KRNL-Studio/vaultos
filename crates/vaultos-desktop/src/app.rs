@@ -500,6 +500,8 @@ impl App {
     }
 
     fn after_unlock(&self) {
+        // What has been in the Trash for 30 days goes, with its history.
+        let _ = self.with_store(|s| s.purge_expired_trash());
         self.emit("main", "vault:unlocked");
         if let Some(app) = self.tauri.get() {
             ui::refresh_tray(app);

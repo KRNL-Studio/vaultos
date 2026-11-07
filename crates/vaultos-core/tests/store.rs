@@ -284,14 +284,19 @@ fn undo_restores_and_refuses_to_overwrite_newer_work() {
 
     s.delete_item("Example App", "K", "human").unwrap();
     assert_eq!(
-        s.tombstones().unwrap().len(),
+        s.list_trash().unwrap().len(),
         1,
-        "a deletion leaves a tombstone for sync"
+        "deleting moves to the Trash"
     );
+    assert!(s.tombstones().unwrap().is_empty());
     let delete = s.list_history(1).unwrap().remove(0);
+    assert_eq!(delete.action, "trash_secret");
     s.revert(&delete.id, "human").unwrap();
     assert_eq!(value(&mut s, "K"), "synthetic-one");
-    assert!(s.tombstones().unwrap().is_empty(), "restoring removes it");
+    assert!(
+        s.list_trash().unwrap().is_empty(),
+        "Undo takes it out again"
+    );
     assert!(matches!(
         s.revert(&delete.id, AGENT),
         Err(Error::Forbidden(_))

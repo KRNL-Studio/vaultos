@@ -68,6 +68,89 @@ fn yes() -> bool {
     true
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Item types. Records saved before types existed have none; [`ItemMeta::kind`] infers one.
+pub const ITEM_KINDS: [&str; 7] = [
+    "login",
+    "api_key",
+    "note",
+    "ssh_key",
+    "database",
+    "server",
+    "certificate",
+];
+
+/// Custom field types. `concealed` and `otp` values are secret.
+pub const FIELD_KINDS: [&str; 6] = ["text", "concealed", "url", "email", "date", "otp"];
+
+/// A custom field. In a [`Record`] it carries its value; in [`ItemMeta`] a secret field's
+/// value is empty (it lives in the sealed [`ItemSecret`]) and `has_value` says whether it is set.
+#[derive(
+    Clone, Default, PartialEq, Eq, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
+#[serde(rename_all = "camelCase")]
+pub struct Field {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub section: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_value: bool,
+}
+
+impl Field {
+    pub fn is_secret(&self) -> bool {
+        matches!(self.kind.as_str(), "concealed" | "otp")
+    }
+}
+
+impl std::fmt::Debug for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Field")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A secret custom field's value, sealed with the item's value and password.
+#[derive(
+    Clone, Default, PartialEq, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
+pub struct SecretValue {
+    pub id: String,
+    pub value: String,
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretValue")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A file attached to an item. Its contents are sealed in a file of their own under the
+/// project key; `sha256` is of that sealed file, so the signed vault vouches for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    #[serde(default)]
+    pub added_at: String,
+}
+
 /// One credential, with its value. In memory the v4 store keeps `value` and `password`
 /// sealed and decrypts them only to reveal, copy or inject.
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -109,6 +192,23 @@ pub struct Record {
     pub updated_at: String,
     #[serde(default = "one")]
     pub rev: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub favorite: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trashed_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Field>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// When the value, password or a secret field last changed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub secret_changed_at: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -146,6 +246,23 @@ pub struct ItemMeta {
     pub has_value: bool,
     #[serde(default)]
     pub has_password: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub favorite: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trashed_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Field>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// When the value, password or a secret field last changed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub secret_changed_at: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -159,6 +276,8 @@ pub struct ItemSecret {
     pub value: String,
     #[serde(default)]
     pub password: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<SecretValue>,
 }
 
 impl std::fmt::Debug for ItemSecret {
@@ -186,6 +305,24 @@ impl Drop for Record {
     }
 }
 
+impl ItemMeta {
+    /// The item's type; a record saved before types existed is a login if it has a username
+    /// or password, otherwise an API key.
+    pub fn kind(&self) -> &str {
+        if !self.kind.is_empty() {
+            &self.kind
+        } else if self.has_password || !self.username.is_empty() {
+            "login"
+        } else {
+            "api_key"
+        }
+    }
+
+    pub fn has_otp(&self) -> bool {
+        self.fields.iter().any(|f| f.kind == "otp" && f.has_value)
+    }
+}
+
 impl Record {
     pub fn split(&self) -> (ItemMeta, ItemSecret) {
         (
@@ -207,11 +344,39 @@ impl Record {
                 updated_at: self.updated_at.clone(),
                 has_value: !self.value.is_empty(),
                 has_password: !self.password.is_empty(),
+                kind: self.kind.clone(),
+                tags: self.tags.clone(),
+                favorite: self.favorite,
+                archived: self.archived,
+                trashed_at: self.trashed_at.clone(),
+                fields: self
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let mut m = f.clone();
+                        m.has_value = !f.value.is_empty();
+                        if f.is_secret() {
+                            m.value.clear();
+                        }
+                        m
+                    })
+                    .collect(),
+                attachments: self.attachments.clone(),
+                secret_changed_at: self.secret_changed_at.clone(),
                 extra: self.extra.clone(),
             },
             ItemSecret {
                 value: self.value.clone(),
                 password: self.password.clone(),
+                fields: self
+                    .fields
+                    .iter()
+                    .filter(|f| f.is_secret() && !f.value.is_empty())
+                    .map(|f| SecretValue {
+                        id: f.id.clone(),
+                        value: f.value.clone(),
+                    })
+                    .collect(),
             },
         )
     }
@@ -237,6 +402,30 @@ impl Record {
             created_at: meta.created_at.clone(),
             updated_at: meta.updated_at.clone(),
             rev,
+            kind: meta.kind.clone(),
+            tags: meta.tags.clone(),
+            favorite: meta.favorite,
+            archived: meta.archived,
+            trashed_at: meta.trashed_at.clone(),
+            fields: meta
+                .fields
+                .iter()
+                .map(|f| {
+                    let mut r = f.clone();
+                    r.has_value = false;
+                    if f.is_secret() {
+                        r.value = secret
+                            .fields
+                            .iter()
+                            .find(|s| s.id == f.id)
+                            .map(|s| s.value.clone())
+                            .unwrap_or_default();
+                    }
+                    r
+                })
+                .collect(),
+            attachments: meta.attachments.clone(),
+            secret_changed_at: meta.secret_changed_at.clone(),
             extra: meta.extra.clone(),
         }
     }

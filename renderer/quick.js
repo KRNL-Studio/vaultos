@@ -68,7 +68,7 @@ function renderList() {
         mid.append(name, sub);
         const flag = document.createElement("span");
         flag.className = "flag";
-        flag.textContent = item.hasValue ? item.injectApproved ? "" : "Held from .env" : "No value";
+        flag.textContent = item.hasValue ? item.injectApproved ? item.hasOtp ? "One-time code" : "" : "Held from .env" : item.hasOtp ? "One-time code" : "No value";
         li.append(tile, mid, flag);
         li.addEventListener("mousemove", () => {
             if (selected !== i) select(i);
@@ -153,7 +153,8 @@ async function act(kind) {
     const item = items[selected];
     if (!item) return;
     say("");
-    const run = () => kind === "copy" ? window.quick.copy(item.project, item.key, "value") : kind === "username" ? window.quick.copy(item.project, item.key, item.username ? "username" : "email") : kind === "url" ? window.quick.openUrl(item.project, item.key) : window.quick.open(item.project, item.key);
+    if (kind === "otp" && !item.hasOtp) return say("This item has no one-time code");
+    const run = () => kind === "otp" ? window.quick.copyOtp(item.project, item.key) : kind === "copy" ? window.quick.copy(item.project, item.key, "value") : kind === "username" ? window.quick.copy(item.project, item.key, item.username ? "username" : "email") : kind === "url" ? window.quick.openUrl(item.project, item.key) : window.quick.open(item.project, item.key);
     try {
         await run();
     } catch (e) {
@@ -185,7 +186,7 @@ q.addEventListener("keydown", e => {
         select(selected + (e.key === "ArrowDown" ? 1 : -1));
     } else if (e.key === "Enter") {
         e.preventDefault();
-        act(mod ? "open" : "copy");
+        act(mod ? "open" : e.altKey ? "otp" : "copy");
     } else if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
         act("url");

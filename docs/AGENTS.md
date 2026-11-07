@@ -48,12 +48,14 @@ Client configuration locations vary. Use your client's documented MCP settings. 
 | `add` | Create records and projects; new records require injection approval |
 | `edit:own` | Update that agent's records |
 | `edit:delegated` | Update records explicitly delegated to it |
-| `delete:own` | Delete that agent's records |
+| `delete:own` | Move that agent's records to the Trash |
 | `reveal` | Return raw secret values and content fingerprints |
 
 Agents cannot enroll, widen scopes or folders, approve their own records, adopt human-owned records, change settings, or undo human history via the API or MCP. Revoke a token in the desktop to stop future API calls. Revocation does not erase files or values already disclosed.
 
 `import_env` accepts `createProject: true`. It creates the project only when no project with that name exists, requires the same `add` scope as `create_project`, and validates the source path first. An existing project that is not approved for the agent is still refused.
+
+`set_secret` takes optional `kind` (`login`, `api_key`, `note`, `ssh_key`, `database`, `server` or `certificate`) and `tags`. `delete_secret` moves the record to the Trash, where the human can restore it for 30 days. Items the human archives or moves to the Trash are absent for agents: listing, search, injection and reveal leave them out. Custom fields of kind concealed or one-time code are never sent to agents, even with `reveal`; favorites, attachments, versions, Watchtower and imports from other password managers are desktop and `vaultos` features.
 
 ### All-access grants
 
@@ -93,6 +95,9 @@ vaultos rotate-password
 vaultos secret-key set --new-secret-key-file /absolute/private/vault.secret-key    # or: secret-key remove
 vaultos backup /absolute/new/dated-backup-directory
 vaultos inject PROJECT /absolute/project/.env        # replaces the file
+vaultos import-items PROJECT /absolute/export.1pux   # or a Bitwarden .json or a .csv export
+vaultos otp PROJECT KEY                              # prints the item's current one-time code
+vaultos generate                                     # or --words 5, --pin --length 6, --no-symbols
 ```
 
 `enroll` writes a fresh token to the file (mode 0600, parent created 0700) and never prints it; enrolling an existing name reissues its token and invalidates the old one. `grant` replaces only the dimensions you name. To use the per-agent default, write the token to `<data directory>/agents/NAME.token` and set `VAULTOS_AGENT=NAME`. `rotate-password` uses the same recoverable rotation as the desktop; with `--password-stdin` the second line is the new password. `vaultos backup` copies `vault.enc`, the audit log and the sync index, never tokens or other credentials. `vaultos inject` uses human authority and replaces its target; agents use `vaultos-agent inject`, which merges. Run `vaultos help COMMAND` for each command's options. Sync commands are in [the sync guide](SYNC.md).

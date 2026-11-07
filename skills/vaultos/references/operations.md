@@ -14,10 +14,10 @@ bridge tool names; a client may prefix them with a server namespace.
 | `search` | `{query}`; approved project/key/provider matches | `read` |
 | `list_pending` | `{}`; records awaiting human injection approval | `read` |
 | `create_project` | `{name}`; creates and grants this agent the new project | `add` |
-| `set_secret` | `{project,key,value,...}`; add/update a record | `add`, `edit:own`, or `edit:delegated` as applicable |
+| `set_secret` | `{project,key,value,kind?,tags?,...}`; add/update a record | `add`, `edit:own`, or `edit:delegated` as applicable |
 | `import_env` | `{project,env_path,createProject?}`; reads a file inside approved roots into an approved project; `createProject:true` creates a missing project | `add`; applicable edit scope for existing records |
 | `inject_secrets` | `{project,target_path,format?,keys?,merge?}`; write approved values to an approved path | `inject` |
-| `delete_secret` | `{project,key}`; delete this agent's record | `delete:own` |
+| `delete_secret` | `{project,key}`; move this agent's record to the Trash (the human can restore it for 30 days) | `delete:own` |
 | `reveal_secret` | `{project,key}`; returns a raw value to the client/model | `reveal` |
 | `compare` | `{}`; secret-derived fingerprints for approved projects | `reveal` |
 
@@ -33,6 +33,9 @@ Import creates its project only with `createProject: true` and only when no proj
 it can partially succeed. Never read the input file into chat to perform import.
 Metadata includes user-entered notes and identifiers, so avoid dumping it into
 public reports. Expiry fields are reminders, not automatic provider rotation.
+Items the human archived or moved to the Trash are absent for agents, so a key
+that disappeared may be there: ask the human rather than recreating it. Concealed
+and one-time code custom fields are never sent to agents.
 
 ## Shell client
 

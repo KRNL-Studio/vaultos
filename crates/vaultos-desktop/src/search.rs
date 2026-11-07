@@ -24,6 +24,9 @@ pub struct Hit {
     pub expires_at: String,
     pub inject_approved: bool,
     pub updated_at: String,
+    pub kind: String,
+    pub has_otp: bool,
+    pub favorite: bool,
     #[serde(skip)]
     score: f64,
 }
@@ -123,6 +126,7 @@ pub fn search(projects: &[(String, Vec<ItemSummary>)], query: &str, limit: usize
                 (s.email.to_lowercase(), 0.5, false),
                 (host.clone(), 0.5, false),
                 (s.note.to_lowercase(), 0.3, false),
+                (s.tags.join(" ").to_lowercase(), 0.5, false),
             ];
             let mut total = 0.0;
             for token in &tokens {
@@ -149,6 +153,9 @@ pub fn search(projects: &[(String, Vec<ItemSummary>)], query: &str, limit: usize
                     expires_at: s.expires_at.clone(),
                     inject_approved: s.inject_approved,
                     updated_at: s.updated_at.clone(),
+                    kind: s.kind.clone(),
+                    has_otp: s.has_otp,
+                    favorite: s.favorite,
                     score: total,
                 });
             }

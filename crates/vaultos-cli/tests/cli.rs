@@ -470,6 +470,44 @@ fn the_human_adds_and_imports_keys_without_values_in_arguments_or_output() {
 }
 
 #[test]
+fn generates_imports_other_managers_and_prints_one_time_codes() {
+    let env = Env::with_vault();
+    let pin = env.human(&["generate", "--pin", "--length", "8"], "");
+    assert_eq!(pin.code, 0, "{}", pin.stderr);
+    let pin = pin.stdout.trim();
+    assert!(pin.len() == 8 && pin.bytes().all(|b| b.is_ascii_digit()));
+    let words = env.human(&["generate", "--words", "4"], "");
+    assert_eq!(
+        words.stdout.trim().split('-').count(),
+        4,
+        "{}",
+        words.stderr
+    );
+    assert_eq!(env.human(&["generate", "--length", "4"], "").code, 1);
+
+    let file = env.work.join("export.csv");
+    std::fs::write(
+        &file,
+        "title,username,password,url,otpauth\nSynthetic Site,synthetic-user,synthetic-imported-password,https://example.com,otpauth://totp/Example?secret=JBSWY3DPEHPK3PXP\n",
+    )
+    .unwrap();
+    let file = file.to_string_lossy().into_owned();
+    let imported = env.admin(&["import-items", "Imported", &file]);
+    assert!(!imported.stdout.contains("synthetic-imported-password"));
+    let imported = imported.json();
+    assert_eq!(imported["imported"], 1, "{imported}");
+    let code = env.admin(&["otp", "Imported", "Synthetic Site"]);
+    assert_eq!(code.code, 0, "{}", code.stderr);
+    let code = code.stdout.trim();
+    assert!(code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()));
+    assert_eq!(env.admin(&["otp", "Example App", "HUMAN_KEY"]).code, 1);
+    assert_eq!(
+        env.admin(&["import-items", "Imported", "export.csv"]).code,
+        2
+    );
+}
+
+#[test]
 fn init_secret_keys_and_upgrade() {
     let env = Env::new();
     let kit = env.path("kit/secret-key.txt");
