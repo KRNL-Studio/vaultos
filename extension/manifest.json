@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "VaultOS (Preview)",
+  "description": "Fill and save website logins from the VaultOS app on this computer.",
+  "version": "0.3.0",
+  "version_name": "0.3.0-preview.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqb4A4wsJ0i1bAP2FIy0ITtKBCE/Oatb8ZoeCLWri5rSpT5DuogDmmQBWNrgHHr0rp2L3z2jpBOCyT8wCigpaBDmR7Wb2L56HfZK76Xf6001nr1SRxH4QofiJeM+mKj2HXcLf7qhj8gJ5FQp+lItbBWXFmpGHRPEZfp61mUsDCMIva0dFIVoZYdK4vObDv0osqsRO2LiIPb4iTySX9kBkdA2gL/tKqMY0wqFn0zAbe1M+sXjfJqp8sZt0xkvUaLT0eHA+HXMT462VXpclro4wnxiMwlbLNoguaJdpYjvYUtleEzuNaeGel1SHcRSjxCJ01ksIDRIcU4/ocyHTQ1X0AQIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": ["nativeMessaging", "storage", "activeTab"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "VaultOS",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/icon-16.png", "32": "icons/icon-32.png" }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://localhost/*", "http://*.localhost/*", "http://127.0.0.1/*"],
+      "js": ["shared.js", "content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  }
+}

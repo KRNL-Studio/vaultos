@@ -32,7 +32,7 @@ Injection reduces accidental disclosure in tool transcripts. **It does not stop 
 4. Try opening it. If macOS blocks the unidentified developer, follow Apple's [per-app Open Anyway instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**, only after you have verified and decided to trust the download. Managed Macs may disallow this. Do not disable Gatekeeper globally.
 5. Create a new vault using a unique passphrase of at least 12 characters. Optionally add a Secret Key, which the device keeps and a stolen vault file cannot be opened without. There is no password reset or recovery service.
 
-The app is a small native program (Rust, with the system's own web view for its pages). The MCP bridge (`vaultos-mcp`), the agent shell client (`vaultos-agent`), the CLI (`vaultos`), the headless owner (`vaultosd`) and the Git signing helper (`vaultos-ssh-sign`) ship inside it, in `VaultOS.app/Contents/Helpers`. Git is needed only for optional sync. A vault from VaultOS 0.2 opens only to be upgraded, when you choose **Upgrade this vault**; read [Upgrading from 0.2](docs/RECOVERY.md#upgrading-from-02) first.
+The app is a small native program (Rust, with the system's own web view for its pages). The MCP bridge (`vaultos-mcp`), the agent shell client (`vaultos-agent`), the CLI (`vaultos`), the headless owner (`vaultosd`), the Git signing helper (`vaultos-ssh-sign`) and the browser extension's helper (`vaultos-browser`) ship inside it, in `VaultOS.app/Contents/Helpers`, with the extension in `Contents/Resources/extension`. Git is needed only for optional sync. A vault from VaultOS 0.2 opens only to be upgraded, when you choose **Upgrade this vault**; read [Upgrading from 0.2](docs/RECOVERY.md#upgrading-from-02) first.
 
 ### First five minutes
 
@@ -49,6 +49,10 @@ The menu bar item shows whether the vault is locked, how many agent records awai
 `vaultos run --project "Example App" -- npm start` starts a program with that project's values in its environment and masks them in its output; `vaultos read "vault://Example App/DB_URL"` prints one value and `vaultos render config.tmpl -o config.yml` fills a template. While the app is unlocked each of these asks for Touch ID. `vaultos scan --staged` in a pre-commit hook stops a commit that contains one of your values (`vaultos scan --update-index` once first).
 
 Turn on **Settings → SSH agent** to use SSH key items with ssh and Git. The panel shows the `IdentityAgent` line for `~/.ssh/config` and the Git settings for signing commits with `vaultos-ssh-sign`. See [SECURITY.md](SECURITY.md#boundaries-and-limitations) for what an approval covers.
+
+### Browser extension
+
+The **VaultOS (Preview)** extension fills and saves website logins in Chrome, Chromium, Brave, Edge, Arc, Helium and Vivaldi; Safari is not supported yet. In **Settings → Browsers** choose **Set up browsers** (or run `vaultos browser install`). Then, in each browser, open `chrome://extensions`, turn on **Developer mode**, choose **Load unpacked** and pick `VaultOS.app/Contents/Resources/extension` (on Linux, `extension` in the install folder). Click the extension's toolbar icon, choose **Pair with VaultOS** and confirm in VaultOS when it shows the same code. Focus a login field on a site you have a login for and press the **V** button to fill it, or choose a login in the toolbar popup; after you sign in with a new password, the page offers **Save**. Logins are offered only on their own site, over HTTPS (http only on localhost); see [SECURITY.md](SECURITY.md#boundaries-and-limitations).
 
 ## Install on Linux
 

@@ -461,6 +461,7 @@ impl App {
             Ok(h) => {
                 *lock(&self.server) = Some((id, h.clone()));
                 h.set_access_confirm(Some(self.ask_human("Allow this agent's access?")));
+                h.set_browser_confirm(Some(self.ask_human("Pair this browser?")));
                 self.apply_ssh_agent();
                 Ok(h)
             }

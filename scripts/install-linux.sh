@@ -77,7 +77,7 @@ if [[ -f "$src" ]]; then
   tar -xzf "$src" -C "$tmp"
   src="$tmp/vaultos-preview-linux-$arch"
 fi
-for program in vaultos-preview vaultos vaultos-agent vaultos-mcp vaultosd vaultos-ssh-sign; do
+for program in vaultos-preview vaultos vaultos-agent vaultos-mcp vaultosd vaultos-ssh-sign vaultos-browser; do
   [[ -x "$src/$program" ]] || die "no VaultOS linux-$arch build at $src ($program is missing); run 'npm run dist:linux' or pass --from"
 done
 
@@ -111,7 +111,8 @@ command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$
 
 echo "installed:"
 echo "  app       $prefix/vaultos-preview"
-echo "  tools     $prefix/vaultos, vaultos-agent, vaultos-mcp, vaultosd, vaultos-ssh-sign"
+echo "  tools     $prefix/vaultos, vaultos-agent, vaultos-mcp, vaultosd, vaultos-ssh-sign, vaultos-browser"
+echo "  extension $prefix/extension (set up with: $prefix/vaultos browser install)"
 echo "  desktop   $desktop_file"
 
 if [[ $enable_service == 1 ]]; then

@@ -1,0 +1,10 @@
+# gitleaks's default rules, with one exception: the browser extension's manifest carries the
+# public half of the key that fixes the extension's ID. It is public by design.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "The extension's public key in extension/manifest.json"
+condition = "AND"
+paths = ['''^extension/manifest\.json$''']
+regexes = ['''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA''']

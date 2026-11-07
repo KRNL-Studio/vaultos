@@ -67,7 +67,7 @@ impl Reply {
         }
     }
 
-    fn from_error(e: &Error) -> Reply {
+    pub(crate) fn from_error(e: &Error) -> Reply {
         let message = match e {
             // OS errors can name paths or echo arguments.
             Error::Io { .. } => "File operation failed; check permissions and retry".to_owned(),
@@ -83,7 +83,7 @@ impl Reply {
 
 type Result<T> = std::result::Result<T, Error>;
 
-fn invalid(msg: &str) -> Error {
+pub(crate) fn invalid(msg: &str) -> Error {
     Error::Invalid(msg.to_owned())
 }
 
@@ -170,7 +170,7 @@ fn decode(segment: &str) -> Result<String> {
         .map_err(|_| invalid("URI malformed"))
 }
 
-fn query_param(query: &str, name: &str) -> Option<String> {
+pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
     form_urlencoded::parse(query.as_bytes())
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.into_owned())
@@ -216,7 +216,7 @@ fn unlock(store: &mut Store, body: &Map<String, Value>) -> Result<Reply> {
 
 /// Everything after the owner's routes: agent requests and the approval relay.
 /// An unlocked store with the file on disk loaded.
-fn ready(store: &mut Store) -> std::result::Result<(), Reply> {
+pub(crate) fn ready(store: &mut Store) -> std::result::Result<(), Reply> {
     if !store.is_unlocked() {
         return Err(Reply::error(423, "Vault is locked. Unlock the app."));
     }

@@ -1,13 +1,14 @@
 // Packages VaultOS.app: the Tauri desktop app in Contents/MacOS, with vaultos, vaultos-agent,
-// vaultos-mcp, vaultosd and vaultos-ssh-sign in Contents/Helpers (not beside it: on a case-insensitive volume
-// `vaultos` would replace `VaultOS`). Writes a ZIP, its checksum and a CycloneDX inventory.
+// vaultos-mcp, vaultosd, vaultos-ssh-sign and vaultos-browser in Contents/Helpers (not beside
+// it: on a case-insensitive volume `vaultos` would replace `VaultOS`), and the unpacked
+// browser extension in Contents/Resources/extension. Writes a ZIP, its checksum and a CycloneDX inventory.
 // The build is ad-hoc signed ("unsigned") unless VAULTOS_SIGN_IDENTITY names a Developer ID
 // Application identity and notarization credentials are set, and signing and notarization
 // pass. Notarization takes a notarytool Keychain profile (VAULTOS_NOTARY_PROFILE) or an App
 // Store Connect API key: VAULTOS_NOTARY_KEY (absolute path of the .p8 file),
 // VAULTOS_NOTARY_KEY_ID and VAULTOS_NOTARY_ISSUER.
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { budget, build, checksum, sbom, TOOLS, version } from "./rust-dist.mjs";
 
@@ -46,6 +47,9 @@ for (const tool of TOOLS) {
 }
 copyFileSync("build/AppIcon.icns", path.join(resources, "AppIcon.icns"));
 for (const notice of [ "LICENSE", "THIRD_PARTY_NOTICES.md" ]) copyFileSync(notice, path.join(resources, notice));
+cpSync("extension", path.join(resources, "extension"), {
+    recursive: true
+});
 
 const plist = {
     CFBundleDevelopmentRegion: "en",

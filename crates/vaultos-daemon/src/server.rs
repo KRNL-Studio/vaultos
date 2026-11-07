@@ -7,6 +7,7 @@
 use crate::access::{self, Access, Grant};
 use crate::api::{self, Reply, Request, MAX_BODY};
 use crate::autosync::AutoSync;
+use crate::browser;
 use crate::human;
 use crate::ssh_agent::{self, SshAgent};
 use bytes::Bytes;
@@ -70,7 +71,7 @@ impl std::fmt::Debug for Confirm {
 
 pub(crate) struct Shared {
     store: Mutex<Store>,
-    unlocked: AtomicBool,
+    pub(crate) unlocked: AtomicBool,
     token: String,
     session: Session,
     pub(crate) data_dir: PathBuf,
@@ -84,6 +85,10 @@ pub(crate) struct Shared {
     pub(crate) access: Access,
     pub(crate) runtime: tokio::runtime::Handle,
     runs: AtomicUsize,
+    /// How the app asks the human to pair a browser extension; without one, it cannot.
+    pub(crate) browser_confirm: Mutex<Option<Confirm>>,
+    /// When the human last declined pairing a browser.
+    pub(crate) browser_declined: Mutex<Option<Instant>>,
 }
 
 /// Never prints the session token.
@@ -104,7 +109,7 @@ impl Shared {
         r
     }
 
-    fn touch(&self) {
+    pub(crate) fn touch(&self) {
         *self
             .last_used
             .lock()
@@ -211,6 +216,16 @@ impl Handle {
         self.0.access.set_confirm(confirm);
     }
 
+    /// How the app asks the human to pair a browser extension (see [`crate::browser`]).
+    /// Without one, pairing is refused.
+    pub fn set_browser_confirm(&self, confirm: Option<Confirm>) {
+        *self
+            .0
+            .browser_confirm
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = confirm;
+    }
+
     /// The just-in-time grants in force.
     pub fn access_grants(&self) -> Vec<Grant> {
         let locks = self.0.with_store(|s| s.lock_count());
@@ -271,6 +286,8 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
         access: Access::default(),
         runtime: tokio::runtime::Handle::current(),
         runs: AtomicUsize::new(0),
+        browser_confirm: Mutex::new(None),
+        browser_declined: Mutex::new(None),
     });
 
     let guard = tokio::spawn(guard_loop(shared.clone(), cfg.idle_lock));
@@ -470,6 +487,8 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
     }
     let content_type = header(&req, CONTENT_TYPE.as_str());
     let approver = header(&req, "x-vault-approver");
+    let browser_key = header(&req, "x-vault-browser-key");
+    let browser_origin = header(&req, "x-vault-browser-origin");
     let body = match read_body(req).await {
         Ok(b) => b,
         Err(r) => return r,
@@ -479,6 +498,21 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
             return Reply::error(403, "Agents cannot use the human's own route");
         }
         return human_values(shared, body, pid).await;
+    }
+    if target.starts_with("/browser/") {
+        if agent_token.is_some() {
+            return Reply::error(403, "Agents cannot use the browser extension's routes");
+        }
+        return browser::route(
+            shared,
+            method,
+            target,
+            browser_key,
+            browser_origin,
+            body,
+            pid,
+        )
+        .await;
     }
     if method == "POST" && target == "/access/request" {
         let Some(token) = agent_token else {

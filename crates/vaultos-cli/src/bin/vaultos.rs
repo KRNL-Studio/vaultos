@@ -203,6 +203,24 @@ enum Command {
     /// The app's SSH agent (turned on in its Settings), for ssh and Git commit signing
     #[command(subcommand)]
     Ssh(SshCommand),
+    /// The browser extension's helper, for Chrome, Chromium, Brave, Edge, Arc, Helium and
+    /// Vivaldi
+    #[command(subcommand)]
+    Browser(BrowserCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum BrowserCommand {
+    /// Register the helper in this user's browsers and show the extension's folder to load
+    Install {
+        /// Only this browser (repeatable); every one found otherwise
+        #[arg(long = "browser", value_name = "NAME")]
+        browsers: Vec<String>,
+    },
+    /// Remove the helper's registration from every browser
+    Uninstall,
+    /// The browsers found and whether the helper is registered in each
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1396,6 +1414,35 @@ fn run(cli: Cli) -> Result<()> {
         Command::SecretKey(c) => secret_key(&ctx, c),
         Command::Sync(c) => sync(&ctx, c),
         Command::Ssh(c) => ssh(&ctx, c),
+        Command::Browser(c) => browser(c),
+    }
+}
+
+fn browser(c: BrowserCommand) -> Result<()> {
+    use vaultos_core::native_host;
+    let exe = std::env::current_exe().map_err(|_| Fail::new("cannot find this program"))?;
+    match c {
+        BrowserCommand::Install { browsers } => {
+            let program = exe
+                .parent()
+                .map(|d| d.join("vaultos-browser"))
+                .filter(|p| p.is_file())
+                .ok_or_else(|| Fail::new("vaultos-browser is not beside vaultos"))?;
+            let program = std::fs::canonicalize(&program).unwrap_or(program);
+            let installed = native_host::install(&program, &browsers)?;
+            if installed.is_empty() {
+                return Err(Fail::new(
+                    "No supported browser was found for this user (or none matched --browser)",
+                ));
+            }
+            emit(&json!({
+                "installed": installed,
+                "extension": native_host::extension_dir(&exe),
+                "extensionId": native_host::EXTENSION_ID,
+            }))
+        }
+        BrowserCommand::Uninstall => emit(&json!({ "removed": native_host::uninstall()? })),
+        BrowserCommand::Status => emit(&json!({ "browsers": native_host::browsers()? })),
     }
 }
 

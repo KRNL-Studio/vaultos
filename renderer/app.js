@@ -321,6 +321,64 @@ const cleanError = e => String(e?.message || e || "The operation failed. Please 
 // Human-only actions. With Touch ID confirmation on, the main process asks for Touch ID; when
 // it cannot (unavailable, cancelled, or not a Mac) it refuses with NEED_PASSWORD, and the
 // master password collected here confirms the action instead. The main process verifies it.
+// Settings → Browsers: the extension's helper, and the browsers paired with this vault.
+async function browsersPanel(page) {
+    const b = await window.vault.browsers();
+    const box = panel(page, "Browsers", {
+        tag: b.paired.length ? `${b.paired.length} paired` : "none paired"
+    });
+    box.appendChild(el(`<p class="note">The VaultOS extension fills and saves website logins in Chrome, Brave, Edge, Arc, Helium, Vivaldi and Chromium. It talks only to this app, through a helper the browser starts, and offers a login only on its own site (HTTPS, or http on localhost). Pairing shows a code in the extension and here; confirm only when they match.</p>`));
+    const hosts = b.hosts.length ? b.hosts.map(h => `${esc(h.browser)} ${h.installed ? "(set up)" : "(not set up)"}`).join(", ") : "none found";
+    box.appendChild(el(`<p class="note">Browsers: ${hosts}</p>`));
+    const status = el(`<p class="note"></p>`);
+    const actions = el(`<div class="actions"></div>`);
+    const setUp = el(`<button type="button" class="btn ghost sm">Set up browsers</button>`);
+    setUp.disabled = !b.hosts.length;
+    setUp.onclick = async () => {
+        setUp.disabled = true;
+        try {
+            const r = await window.vault.setUpBrowsers();
+            status.textContent = `Set up in ${r.installed.map(h => h.browser).join(", ")}. Restart those browsers if they were open.`;
+            status.classList.remove("err");
+        } catch (e) {
+            status.textContent = cleanError(e);
+            status.classList.add("err");
+        }
+        setUp.disabled = false;
+    };
+    actions.appendChild(setUp);
+    if (b.hosts.some(h => h.installed)) {
+        const remove = el(`<button type="button" class="iconbtn">Remove helper</button>`);
+        remove.onclick = async () => {
+            await window.vault.removeBrowserHelper();
+            render();
+        };
+        actions.appendChild(remove);
+    }
+    box.appendChild(actions);
+    box.appendChild(status);
+    const load = el(`<pre class="val" style="white-space:pre-wrap"></pre>`);
+    load.textContent = `# Load the extension (once per browser)
+Open the browser's extensions page (chrome://extensions), turn on Developer mode,
+choose Load unpacked and pick:
+${b.extension || "the extension folder inside VaultOS.app/Contents/Resources"}
+
+Its ID is ${b.extensionId}.`;
+    box.appendChild(load);
+    for (const p of b.paired) {
+        const card = el(`<div class="secret card"><div class="head"><span class="key"></span><span class="pname">paired</span></div><div class="note"></div><div class="actions"></div></div>`);
+        card.querySelector(".key").textContent = p.name;
+        card.querySelector(".note").textContent = `paired ${(p.pairedAt || "").slice(0, 10)}${p.lastSeenAt ? ` · last used ${p.lastSeenAt.slice(0, 16).replace("T", " ")}` : " · never used"}`;
+        const unpair = el(`<button type="button" class="iconbtn danger">Unpair</button>`);
+        unpair.onclick = async () => {
+            await window.vault.unpairBrowser(p.id);
+            render();
+        };
+        card.querySelector(".actions").appendChild(unpair);
+        box.appendChild(card);
+    }
+}
+
 async function human(name, ...args) {
     try {
         return await window.vault[name](...args);
@@ -1321,6 +1379,8 @@ git config --global gpg.ssh.program "${dp.sshSigner}"
 git config --global user.signingkey "key::ssh-ed25519 AAAA…"
 git config --global commit.gpgsign true`;
     scroll.appendChild(sshSetup);
+    await browsersPanel(page);
+    if (revision !== renderVersion) return;
     scroll = panel(page, "Sync");
     const autoLabel = el(`<label class="toggle"><input type="checkbox" class="switch" />Sync automatically while unlocked</label>`);
     const auto = autoLabel.querySelector("input");

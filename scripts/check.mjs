@@ -32,4 +32,8 @@ const tauri = JSON.parse(readFileSync("crates/vaultos-desktop/tauri.conf.json"))
 
 if (tauri.version !== version()) throw new Error(`tauri.conf.json is ${tauri.version}; the Cargo workspace is ${version()}`);
 
+const extension = JSON.parse(readFileSync("extension/manifest.json"));
+
+if (extension.version_name !== version() || extension.version !== version().replace(/-.*$/, "")) throw new Error(`extension/manifest.json is ${extension.version_name}; the Cargo workspace is ${version()}`);
+
 console.log("Script syntax, versions and distribution notices checked.");

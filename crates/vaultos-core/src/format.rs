@@ -128,6 +128,9 @@ pub struct VaultMeta {
     pub sync_keys: Option<crate::secret::SecretValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_head: Option<AuditHead>,
+    /// Browser extensions paired on this machine; not synced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub browsers: Vec<crate::store::Browser>,
     pub created_at: String,
     #[serde(flatten)]
     pub extra: Extra,

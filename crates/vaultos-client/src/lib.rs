@@ -356,6 +356,25 @@ impl Client {
         let (session, _) = self.ensure_up()?;
         send(&session, method, route, body, None, REQUEST_TIMEOUT)
     }
+
+    /// A browser extension's request, relayed by the native messaging host: the session
+    /// token with the extension's origin and, once paired, its key.
+    pub fn browser(
+        &self,
+        method: &str,
+        route: &str,
+        body: Option<&Value>,
+        origin: &str,
+        key: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let (session, _) = self.ensure_up()?;
+        let mut extra = vec![("x-vault-browser-origin", origin)];
+        if let Some(k) = key {
+            extra.push(("x-vault-browser-key", k));
+        }
+        send_with(&session, method, route, body, &extra, timeout)
+    }
 }
 
 fn send(
@@ -366,11 +385,24 @@ fn send(
     agent: Option<&SecretString>,
     timeout: Duration,
 ) -> Result<Value> {
+    let extra: Vec<(&str, &str)> = agent
+        .map(|t| ("x-vault-agent-token", t.expose()))
+        .into_iter()
+        .collect();
+    send_with(session, method, route, body, &extra, timeout)
+}
+
+fn send_with(
+    session: &Session,
+    method: &str,
+    route: &str,
+    body: Option<&Value>,
+    extra: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<Value> {
     let bearer = Zeroizing::new(format!("Bearer {}", session.token));
     let mut headers = vec![("Authorization", bearer.as_str())];
-    if let Some(t) = agent {
-        headers.push(("x-vault-agent-token", t.expose()));
-    }
+    headers.extend_from_slice(extra);
     let payload = body
         .map(|b| serde_json::to_vec(b).map(Zeroizing::new))
         .transpose()

@@ -1,9 +1,9 @@
 // Packages the Linux desktop app (vaultos-preview) with vaultos, vaultos-agent, vaultos-mcp,
-// vaultosd and vaultos-ssh-sign as an unsigned tar.gz with a checksum and a CycloneDX inventory. Build it on Linux
+// vaultosd, vaultos-ssh-sign, vaultos-browser and the unpacked browser extension as an unsigned tar.gz with a checksum and a CycloneDX inventory. Build it on Linux
 // for that machine's architecture: the app links the system's WebKitGTK, so it cannot be
 // cross-built. scripts/install-linux.sh installs the result for the current user.
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { budget, build, checksum, sbom, TOOLS, version } from "./rust-dist.mjs";
 
@@ -32,6 +32,9 @@ for (const tool of TOOLS) copyFileSync(path.join(release, tool), path.join(folde
 for (const file of [ executable, ...TOOLS ]) chmodSync(path.join(folder, file), 0o755);
 copyFileSync("build/icon_1024.png", path.join(folder, `${executable}.png`));
 for (const notice of [ "LICENSE", "THIRD_PARTY_NOTICES.md" ]) copyFileSync(notice, path.join(folder, notice));
+cpSync("extension", path.join(folder, "extension"), {
+    recursive: true
+});
 
 const archive = path.resolve("dist", `VaultOS-${v}-linux-${arch}-unsigned.tar.gz`);
 execFileSync("tar", [ "-czf", archive, "-C", path.dirname(folder), path.basename(folder) ], {

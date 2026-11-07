@@ -411,6 +411,43 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
         "emptyTrash" => items::empty_trash(app).await,
         "generate" => items::generate(a.get(0)),
         "generateSshKey" => items::generate_ssh_key(&a.str(0, "comment")?),
+        "browsers" => {
+            use vaultos_core::native_host;
+            let paired: Vec<Value> = store(app, |s| s.browsers())
+                .await?
+                .iter()
+                .map(|b| json!({ "id": b.id, "name": b.name, "pairedAt": b.paired_at, "lastSeenAt": b.last_seen_at }))
+                .collect();
+            let hosts = blocking(native_host::browsers).await?.map_err(|e| e.to_string())?;
+            let exe = std::env::current_exe().ok();
+            Ok(json!({
+                "paired": paired,
+                "hosts": hosts,
+                "extension": exe.as_deref().and_then(native_host::extension_dir),
+                "extensionId": native_host::EXTENSION_ID,
+            }))
+        }
+        "setUpBrowsers" => {
+            let program = ui::helper("vaultos-browser");
+            let installed = blocking(move || vaultos_core::native_host::install(&program, &[]))
+                .await?
+                .map_err(|e| e.to_string())?;
+            if installed.is_empty() {
+                return Err("No supported browser was found for this user".into());
+            }
+            Ok(json!({ "installed": installed }))
+        }
+        "removeBrowserHelper" => {
+            let removed = blocking(vaultos_core::native_host::uninstall)
+                .await?
+                .map_err(|e| e.to_string())?;
+            Ok(json!({ "removed": removed }))
+        }
+        "unpairBrowser" => {
+            let id = a.str(0, "browser")?;
+            store(app, move |s| s.unpair_browser(&id)).await?;
+            Ok(json!({ "ok": true }))
+        }
         "accessGrants" => Ok(json!(app.access_grants())),
         "endAccess" => Ok(json!({ "ended": app.end_access(&a.str(0, "agent")?) })),
         "strength" => items::strength(&a.str(0, "password")?),

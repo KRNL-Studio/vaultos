@@ -5663,6 +5663,7 @@ dependencies = [
  "ed25519-dalek",
  "hkdf",
  "hmac",
+ "idna",
  "libc",
  "miniz_oxide 0.8.9",
  "percent-encoding",
@@ -5678,6 +5679,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "url",
  "zeroize",
 ]
 

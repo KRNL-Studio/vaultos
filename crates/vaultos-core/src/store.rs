@@ -32,11 +32,13 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+mod browser;
 mod items;
 mod leak;
 mod run;
 mod ssh;
 mod sync;
+pub use browser::{Browser, Filled, LoginMatch, Pairing, DEFAULT_PROJECT};
 pub use items::{
     Finding, ImportResult, ItemVersion, Otp, TrashedItem, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES,
     TRASH_DAYS,
@@ -2255,6 +2257,7 @@ pub(crate) fn from_v3(
             sync_trust: v3.sync_trust.clone(),
             sync_keys: None,
             audit_head: None,
+            browsers: Vec::new(),
             created_at: now_iso(),
             extra: v3.extra.clone(),
         },
