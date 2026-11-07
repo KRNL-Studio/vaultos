@@ -20,11 +20,20 @@ vault or search its credential files. Defaults for this project:
 | Keychain / Secret Service prefix | `org.vaultos.preview.` |
 | Linux install | `~/.local/opt/vaultos-preview`, `org.vaultos.preview.desktop` |
 | Optional data override | `VAULTOS_DATA_DIR`, an absolute directory |
-| MCP entry point | `mcp/server.mjs` in a source checkout |
+| MCP entry point | `mcp/server.mjs` in a source checkout (desktop app), or the `vaultos-mcp` binary (Rust tools) |
 | Agent credential | `VAULTOS_AGENT_TOKEN_FILE`, an absolute private (0600) file path, or `VAULTOS_AGENT=NAME` for `<data dir>/agents/NAME.token` |
 
 Use a new absolute data directory for testing. Setting the bridge's data override
 does not change the desktop's directory: both processes need the same setting.
+
+## Choose desktop or Rust tools
+
+The desktop app uses a format v3 vault and the Node bridge. The headless Rust
+tools (`vaultosd`, `vaultos`, `vaultos-agent`, `vaultos-mcp`) use a format v4
+vault, which the desktop cannot open yet. Use the desktop unless the user asked
+for the Rust tools or a headless setup; never run `vaultos upgrade` on the user's
+vault unless they asked for it. For the Rust tools, skip to
+[Rust tools](#rust-tools).
 
 ## Install the desktop
 
@@ -101,6 +110,36 @@ setup; see the operating reference for its different lock behavior. The optional
 always-on service (`scripts/install-service-macos.sh`, with `--print` to review and
 `--uninstall` to remove, or `scripts/install-linux.sh --enable-service` on Linux)
 builds on the same opt-in; install it only when requested.
+
+## Rust tools
+
+With Rust installed (rustup fetches the pinned toolchain), build in a source
+checkout on the target host:
+
+```sh
+cargo build --release --locked
+```
+
+The four binaries are in `target/release/`; keep `vaultosd` next to `vaultos` or
+on `PATH`. The human then runs, typing the password at the hidden prompts:
+
+```sh
+vaultos init
+vaultos add "Example App" EXAMPLE_API_KEY
+vaultos agents enroll NAME --token-file /absolute/private/NAME.token --projects "Example App" --roots /absolute/project
+vaultos start
+vaultos unlock
+```
+
+`vaultos add` creates the project and asks for the value at a hidden prompt (or
+reads it from a pipe); the human types or pipes it, never an agent, and never as an
+argument. `vaultos init --new-secret-key-file PATH` also requires a Secret Key; then every
+command that opens the vault needs `--secret-key-file PATH`. Commands that change
+the vault directly need it to themselves (`--stop-backend`, then `start` and
+`unlock` again). `vaultosd` starts locked, and no agent client starts it. Its log
+is `vaultosd.log` in the data directory. Configure the MCP client with the
+absolute path to `vaultos-mcp` as `command`, no `args`, and the same `env` as the
+example below; then verify as described there.
 
 ## Enroll and configure
 

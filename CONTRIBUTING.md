@@ -12,7 +12,7 @@ Use Node.js 22+ and npm. Clone the repository, run `npm ci`, and install `age` f
 - `npm run dist:mac`: package an unsigned native preview ZIP and checksum on macOS. `VAULTOS_ARCH=x64` builds for Intel; the default uses the build machine's architecture.
 - `npm run dist:linux`: package an unsigned Linux tar.gz, checksum and inventory for x64 or arm64 (`VAULTOS_ARCH`). It can cross-build on macOS, but only a launch on Linux tests it. `scripts/install-linux.sh --help` describes the per-user install, sandbox hardening and the opt-in systemd backend unit.
 
-The Rust core (`crates/vaultos-core`) uses the toolchain pinned in `rust-toolchain.toml`; rustup installs it on first use.
+The Rust workspace (`crates/`: the core, `vaultosd`, the client, the MCP bridge, the CLIs and sync) uses the toolchain pinned in `rust-toolchain.toml`; rustup installs it on first use. `cargo build --release --locked` puts `vaultosd`, `vaultos`, `vaultos-agent` and `vaultos-mcp` in `target/release/`. The sync and daemon tests need `git`, not `age`.
 
 - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`: what CI runs. CI also runs `cargo deny check` (advisories, licences and sources; `deny.toml`).
 - `cargo bench -p vaultos-core`: rough timings for key derivation, unlock, list, save and reveal.

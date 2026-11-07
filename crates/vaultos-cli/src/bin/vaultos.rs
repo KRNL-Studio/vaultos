@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ use vaultos_core::agents::Wildcards;
 use vaultos_core::fs_safe::{self, LockFile};
 use vaultos_core::model::HUMAN;
 use vaultos_core::store::VAULT_FILE;
-use vaultos_core::{Error, KdfParams, SecretKey, SecretString, Store};
+use vaultos_core::{Error, Fields, KdfParams, SecretKey, SecretString, Store};
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -24,6 +24,8 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 
 const VIA: &str = "admin CLI";
+/// The largest value `add` reads, as `vaultos-agent add`.
+const MAX_VALUE: usize = 65536;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -78,6 +80,21 @@ enum Command {
     Projects,
     /// List a project's key names and metadata
     Keys { project: String },
+    /// Store a key, creating its project if needed. The value is read from stdin (after the
+    /// password's line with --password-stdin), or at a hidden prompt; never an argument
+    Add {
+        project: String,
+        key: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        provider: Option<String>,
+        /// Caught so that a value passed by mistake is refused, never echoed.
+        #[arg(hide = true, num_args = 0.., allow_hyphen_values = true)]
+        extra: Vec<String>,
+    },
+    /// Store every KEY=VALUE from an absolute env file, creating the project if needed
+    Import { project: String, file: PathBuf },
     /// Write a project's keys into an absolute file, replacing it
     Inject {
         project: String,
@@ -418,6 +435,37 @@ impl Ctx {
         Ok(out)
     }
 
+    /// What `add` reads before opening the vault: with `--password-stdin`, the password's
+    /// line and then the value; else a value piped on stdin. `None` for the value means
+    /// stdin is a terminal, so it is asked for at a hidden prompt once the vault is open.
+    fn add_input(&self) -> Result<(Option<SecretString>, Option<SecretString>)> {
+        fn one_line_off(s: &str) -> &str {
+            let s = s.strip_suffix('\n').unwrap_or(s);
+            s.strip_suffix('\r').unwrap_or(s)
+        }
+        if self.password_stdin {
+            let input = read_stdin(MAX_VALUE + 8192, "Input too long")?;
+            let Some((password, rest)) = input.split_once('\n') else {
+                return Err(Fail::usage(
+                    "Expected the password's line, then the value, on stdin",
+                ));
+            };
+            let password = password.trim_end_matches('\r');
+            if password.is_empty() {
+                return Err(Fail::usage("Expected the password's line on stdin"));
+            }
+            return Ok((
+                Some(SecretString::new(password)),
+                Some(SecretString::new(one_line_off(rest))),
+            ));
+        }
+        if std::io::stdin().is_terminal() {
+            return Ok((None, None));
+        }
+        let input = read_stdin(MAX_VALUE, "Value is too large")?;
+        Ok((None, Some(SecretString::new(one_line_off(&input)))))
+    }
+
     /// The vault's Secret Key, from `--secret-key-file` or a prompt, when it has one.
     fn secret_key(&self, store: &Store) -> Result<Option<SecretKey>> {
         if let Some(file) = &self.secret_key_file {
@@ -477,9 +525,17 @@ impl Ctx {
     }
 
     fn open(&self) -> Result<Open> {
+        self.open_with(None)
+    }
+
+    /// Opens the vault with `password`, or the one `passwords` reads.
+    fn open_with(&self, password: Option<SecretString>) -> Result<Open> {
         let mut store = self.store()?;
         let owner = self.own()?;
-        let password = self.passwords(1, false)?.remove(0);
+        let password = match password {
+            Some(p) => p,
+            None => self.passwords(1, false)?.remove(0),
+        };
         let secret_key = self.secret_key(&store)?;
         store.unlock(&password, secret_key.as_ref())?;
         Ok(Open {
@@ -596,9 +652,18 @@ impl Ctx {
     }
 
     fn status(&self) -> Result<()> {
-        let mut status = self.owner_client().status();
+        let client = self.owner_client();
+        let mut status = client.status();
         let store = Store::new(&self.data_dir)?;
         if let Some(o) = status.as_object_mut() {
+            // The owner sees autosync's full status, its error and peer problems included.
+            if o.get("running") == Some(&json!(true)) {
+                if let Ok(full) = client.owner("GET", "/status", None) {
+                    if let Some(sync) = full.get("sync") {
+                        o.insert("sync".into(), sync.clone());
+                    }
+                }
+            }
             o.insert("dataDir".into(), json!(self.data_dir));
             o.insert("vault".into(), json!(store.exists()));
             if store.exists() {
@@ -1003,6 +1068,71 @@ fn run(cli: Cli) -> Result<()> {
         Command::RotatePassword => ctx.rotate_password(),
         Command::Projects => emit(&ctx.open()?.store.list_projects()?),
         Command::Keys { project } => emit(&ctx.open()?.store.list_items(&project)?),
+        Command::Add {
+            project,
+            key,
+            note,
+            provider,
+            extra,
+        } => {
+            if !extra.is_empty() {
+                return Err(Fail::usage(
+                    "The value is read from stdin or a hidden prompt; never pass it as an argument",
+                ));
+            }
+            let (password, value) = ctx.add_input()?;
+            let mut open = ctx.open_with(password)?;
+            let value = match value {
+                Some(v) => v,
+                None => prompt("Value: ")?,
+            };
+            if value.expose().is_empty() {
+                return Err(Fail::usage("No value was received"));
+            }
+            let fields = Fields {
+                key,
+                value: Some(value),
+                note,
+                provider,
+                ..Default::default()
+            };
+            let (created, saved) = open.store.batch(|s| {
+                let created = s.find_project(&project)?.is_none();
+                if created {
+                    s.create_project(&project, HUMAN)?;
+                }
+                Ok((created, s.set_item(&project, &fields, HUMAN)?))
+            })?;
+            emit(&json!({ "project": project, "stored": saved.key, "createdProject": created }))
+        }
+        Command::Import { project, file } => {
+            if !file.is_absolute() {
+                return Err(Fail::usage("Specify an absolute file path"));
+            }
+            let mut open = ctx.open()?;
+            let pairs = vaultos_core::env::read_env_file(&file)?;
+            let (created, keys) = open.store.batch(|s| {
+                let created = s.find_project(&project)?.is_none();
+                if created {
+                    s.create_project(&project, HUMAN)?;
+                }
+                let mut keys = Vec::new();
+                for (key, value) in &pairs {
+                    let fields = Fields {
+                        key: key.clone(),
+                        value: Some(SecretString::new(value.as_str())),
+                        ..Default::default()
+                    };
+                    s.set_item(&project, &fields, HUMAN)?;
+                    keys.push(key.clone());
+                }
+                Ok((created, keys))
+            })?;
+            let _ = open
+                .store
+                .audit("import", &format!("{project}: {} keys", keys.len()), HUMAN);
+            emit(&json!({ "project": project, "keys": keys, "createdProject": created }))
+        }
         Command::Inject {
             project,
             file,

@@ -315,6 +315,12 @@ fn the_daemon_serves_the_agent_cli() {
         ),
         (&json!(true), &json!(false), &json!(4))
     );
+    // The owner's status carries autosync's full fields; an agent's has none of them.
+    assert!(
+        status["sync"].get("intervalSeconds").is_some(),
+        "{}",
+        status["sync"]
+    );
     let busy = env.admin(&["projects"]);
     assert_eq!(busy.code, 1);
     assert!(busy.stderr.contains("--stop-backend"), "{}", busy.stderr);
@@ -324,6 +330,11 @@ fn the_daemon_serves_the_agent_cli() {
     assert_eq!(
         env.agent(&["whoami"], "", &token).json()["name"],
         "Shell Agent"
+    );
+    let agent_status = env.agent(&["status"], "", &token).json();
+    assert!(
+        agent_status["sync"].get("intervalSeconds").is_none(),
+        "{agent_status}"
     );
     let keys = env.agent(&["keys", "Example App"], "", &token);
     assert_eq!(keys.json()[0]["key"], "HUMAN_KEY");
@@ -391,6 +402,54 @@ fn the_daemon_serves_the_agent_cli() {
     assert_eq!(env.agent(&["whoami"], "", &token).code, 3);
     let no_token = env.run(env!("CARGO_BIN_EXE_vaultos-agent"), &["whoami"], "", None);
     assert_eq!(no_token.code, 5);
+}
+
+#[test]
+fn the_human_adds_and_imports_keys_without_values_in_arguments_or_output() {
+    let env = Env::with_vault();
+    let added = env.human(
+        &[
+            "--password-stdin",
+            "add",
+            "New Project",
+            "NEW_KEY",
+            "--note",
+            "synthetic note",
+        ],
+        &format!("{PW}\nsynthetic-added-value\n"),
+    );
+    assert!(!added.stdout.contains("synthetic-added-value"));
+    let added = added.json();
+    assert_eq!(
+        (&added["stored"], &added["createdProject"]),
+        (&json!("NEW_KEY"), &json!(true))
+    );
+    let refused = env.admin(&["add", "Example App", "K", "synthetic-argument-value"]);
+    assert_eq!(refused.code, 2);
+    assert!(!refused.stderr.contains("synthetic-argument-value"));
+    let empty = env.human(
+        &["--password-stdin", "add", "Example App", "K"],
+        &format!("{PW}\n"),
+    );
+    assert_eq!(empty.code, 2, "{}", empty.stderr);
+
+    let file = env.work.join("import.env");
+    std::fs::write(&file, "A_KEY=synthetic-a\nB_KEY=synthetic-b\n").unwrap();
+    let file = file.to_string_lossy().into_owned();
+    let imported = env.admin(&["import", "Imported", &file]);
+    assert!(!imported.stdout.contains("synthetic-a"));
+    let imported = imported.json();
+    assert_eq!(imported["keys"], json!(["A_KEY", "B_KEY"]));
+    assert_eq!(imported["createdProject"], true);
+    assert_eq!(env.admin(&["import", "Imported", "import.env"]).code, 2);
+
+    let mut s = Store::new(&env.data).unwrap();
+    s.unlock(&SecretString::new(PW), None).unwrap();
+    let mut value = |p: &str, k: &str| s.reveal(p, k, "human").unwrap().value.expose().to_owned();
+    assert_eq!(value("New Project", "NEW_KEY"), "synthetic-added-value");
+    assert_eq!(value("Imported", "B_KEY"), "synthetic-b");
+    drop(s);
+    assert!(actions(&env.data, PW).iter().any(|a| a == "import"));
 }
 
 #[test]

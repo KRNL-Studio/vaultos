@@ -22,11 +22,30 @@ Coding client → MCP stdio bridge → authenticated localhost API
 
 `store.js` checks the disk hash before each write and refuses stale writes. Owners call `reloadIfChanged()` between operations (API requests, desktop IPC, the service guard, autosync rounds); it reloads under the write lock and refuses if unsaved in-memory changes exist. Mutations persist or roll back synchronously, so a reload never discards a completed local write.
 
-`sync.js` separates local merging from remote transport. `autosync.js` runs pull-then-push rounds inside the owning process, debounced after local writes and on an interval, and halts on any conflict or verification failure. `git.js` uses argument arrays, disabled hooks, known staged paths and remote receipts. Fetch and push run asynchronously, so the owner keeps serving the window and API while a remote is slow (local Git commands stay synchronous); `Sync` runs one remote operation per checkout at a time, and the local merge and age encryption still run synchronously. Fetches and pushes over SSH share one multiplexed connection unless the user configured SSH for Git. A pull reuses plaintext it already decrypted from byte-identical ciphertext, so only new or changed sync files run `age`. `Store.batch()` defers saves inside a bulk change (an .env import, Approve all, an agent creating a project) to one encrypted write. Trust pins live inside the encrypted vault; age/signing machine keys and the replay index live in the private data directory. The sync format is specific to this preview and is not a public interoperability standard.
+`sync.js` separates local merging from remote transport. `autosync.js` runs pull-then-push rounds inside the owning process, debounced after local writes and on an interval, and halts on any conflict or verification failure. `git.js` uses argument arrays, disabled hooks, known staged paths and remote receipts. Fetch and push run asynchronously, so the owner keeps serving the window and API while a remote is slow (local Git commands stay synchronous); `Sync` runs one remote operation per checkout at a time, and the local merge and age encryption still run synchronously. Fetches and pushes over SSH share one multiplexed connection unless the user configured SSH for Git. A pull reuses plaintext it already decrypted from byte-identical ciphertext, so only new or changed sync files run `age`. `Store.batch()` defers saves inside a bulk change (an .env import, Approve all, an agent creating a project) to one encrypted write. Trust pins live inside the encrypted vault; age/signing machine keys and the replay index live in the private data directory. This is sync format 1, used by the desktop app; it refuses a format 2 repository. Neither format is a public interoperability standard.
 
 ## Rust core (format v4)
 
-`crates/vaultos-core` is the Rust implementation of vault format v4, the base for moving the app to Rust. The desktop app, CLI, backend and MCP bridge do not use it yet; they still read and write format v3 through `store.js`.
+`crates/vaultos-core` is the Rust implementation of vault format v4, the base for moving the app to Rust. The headless Rust programs below use it; the desktop app, `cli.cjs`, `backend.cjs` and the Node bridge still read and write format v3 through `store.js`.
+
+```text
+Human → vaultos ──────────────┐                        ┌─▶ vault.enc (v4), audit-v4.log
+                              ▼                        │
+Coding client → vaultos-mcp ─▶ HTTP over Unix socket ─▶ vaultosd ─▶ vaultos-core
+Shell agent → vaultos-agent ──┘   (daemon.json token)   │
+                                                        └─▶ vaultos-sync ─▶ age + signed Git sync
+```
+
+| Crate | Role |
+| --- | --- |
+| `vaultos-core` | Format v4, the store, the audit chain, the v3 upgrade, file safety, process hardening |
+| `vaultos-daemon` (`vaultosd`) | The owner process. `server.rs` serves HTTP/1.1 (hyper, tokio) on `vaultosd.sock`, accepts only peers with this user's id, and requires the session token from `daemon.json` on every route but `/status`. `api.rs` ports `api.js`: each agent request is authorized independently for scopes, project and folder grants and approvals. A guard loop restores `daemon.json`, reloads `vault.enc` when another writer replaced it and applies the idle lock. `autosync.rs` runs sync rounds, holding the store only for their local steps |
+| `vaultos-client` | Ports `agent-client.js`: finds the daemon through `daemon.json` and a trusted socket path, discovers the agent token and maps errors to exit codes. It never starts a daemon |
+| `vaultos-mcp` | The stdio MCP bridge (rmcp) with the Node bridge's tool names and schemas (`tools.json`). It keeps no vault state; each tool call is one daemon request |
+| `vaultos-cli` (`vaultos`, `vaultos-agent`) | The human CLI, which opens the vault itself for admin and sync commands and talks to `vaultosd` for `start`, `unlock`, `lock`, `stop`, `status` and `sync now`; and the agent shell client |
+| `vaultos-sync` | Sync format 2: `lib.rs` encrypts, signs, verifies and merges with the rules of `sync.js`; `git.rs` runs Git with argument arrays, disabled hooks and known paths only |
+
+Sync format 2 keeps the device's age and Ed25519 keys in `VaultMeta.sync_keys`, inside the encrypted vault, and its trust pins beside them. The local index is keyed and authenticated with keys derived from the signing key, so it holds no plain record hashes. `Store::apply_sync` writes every change of one pull in a single save. See [the sync guide](SYNC.md#sync-format-2-vaultos-and-vaultosd).
 
 ```text
 master password ─Argon2id─┐

@@ -527,3 +527,21 @@ test("pull backups keep the newest 20 and the last 30 days, and leave other file
     for (let i = 0; i < 5; i++) assert(left.includes(name(now - i * day, 100 + i)));
     for (let i = 0; i < 15; i++) assert(left.includes(name(now - (40 + i) * day, i)));
 });
+
+test("a sync format 2 repository (VaultOS 0.3) is refused without writing to it", t => {
+    const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "vaultos-sync-test-"));
+    t.after(() => fs.rmSync(dir, {
+        recursive: true,
+        force: true
+    }));
+    const store = new Store(path.join(dir, "a"));
+    store.init("synthetic-password-a");
+    const repo = path.join(dir, "repo");
+    fs.mkdirSync(repo);
+    fs.writeFileSync(path.join(repo, "vaultos-sync.json"), JSON.stringify({
+        app: "VaultOS-Preview",
+        version: 2
+    }));
+    assert.throws(() => new Sync(store, repo).init("Machine A"), /made by a newer VaultOS/);
+    assert.deepEqual(fs.readdirSync(repo), [ "vaultos-sync.json" ]);
+});

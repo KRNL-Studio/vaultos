@@ -37,7 +37,8 @@ public reports. Expiry fields are reminders, not automatic provider rotation.
 ## Shell client
 
 Agents without MCP can run `node /absolute/path/to/vaultos/agent-cli.cjs` (the
-`vaultos-agent` bin) with the same token configuration: `status`, `whoami`,
+`vaultos-agent` bin, for the desktop app) or the Rust `vaultos-agent` binary (for
+`vaultosd`) with the same token configuration: `status`, `whoami`,
 `projects`, `keys`, `search`, `inject PROJECT FILE [--keys A,B] [--format F]
 [--replace]`, `add PROJECT KEY` (value on stdin only), `import PROJECT FILE
 [--create-project]`, `sync` and `pending`. Output never contains values. Never
@@ -81,6 +82,11 @@ bridge can start a separate backend, as can the optional Linux systemd unit. Tha
 background access off, or use Lock before closing, when that boundary is needed.
 Do not enable password remembering to work around an unavailable or locked vault.
 
+With the Rust tools, `vaultosd` starts locked and only a human `vaultos unlock`
+opens it; there is no remembered-password unlock. `vaultos lock` and `vaultos
+stop` are the human's; `--idle-lock-minutes` is the only automatic lock, and it
+does not observe screen lock or sleep.
+
 Two further opt-in settings weaken this boundary and are the human's decision:
 the **soft lock** policy (screen lock, sleep and idle lock only the window while
 agents keep working; Lock stays a full lock), and the always-on service installed
@@ -103,7 +109,7 @@ window, not agent tokens or the API.
 | Not running | Nothing answered and no backend could start or unlock in the background. Match data directories; background startup is optional. |
 | No projects / permission denied | Inspect `whoami`; check scopes, project IDs, and canonical folder grants in the desktop. Do not switch to privileged CLI access. |
 | Keys held for approval | Use `list_pending`; human approval is needed before injection. |
-| Output path refused | Choose an ordinary file inside an approved folder. Do not weaken path validation or target the vault directory. |
+| Output path refused | Choose an ordinary file inside an approved folder, spelled as `whoami` shows the folder (symbolic links resolved, such as `/private/var` rather than `/var` on macOS). Do not weaken path validation or target the vault directory. |
 | Another process owns the vault / stale writer | Identify the exact preview process and data directory; close it normally and unlock again. Never kill unrelated apps or delete live lock files. |
 | Write failed after disconnect | Determine whether it applied before retrying; preserve data on disk errors. |
 
@@ -167,6 +173,13 @@ Autosync is off by default; the human enables it in Settings. `node cli.cjs sync
 asks the running owner for one round without a password. If `vault_status` shows a
 halted state such as `CONFLICTS_PENDING`, report it; accepting conflicts is a human
 review step in the desktop, never something to automate.
+
+The Rust tools use sync format 2 (`vaultos sync init|identity|trust|status|push|pull|plan|accept-conflicts|auto|now`),
+which keeps the device's sync keys inside the vault and needs no `age` binary. It
+cannot share a repository with the desktop's format 1; moving means a new, empty
+repository. `vaultos sync auto on` and `accept-conflicts` are the human's
+decisions, as above. An agent's `vault_status` shows only the sync state and
+flags; the reason for a halt is in `vaultos status` and `vaultosd.log`.
 
 For requested uninstall, disable background access or Lock, quit the identified
 preview, and remove only its MCP entry and app. Preserve data and encrypted
