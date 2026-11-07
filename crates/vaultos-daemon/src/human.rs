@@ -246,8 +246,8 @@ pub fn values(store: &mut Store, ask: &Ask, who: &Peer) -> Reply {
     } else {
         format!("{} by {}", ask.purpose, who.named())
     };
-    let result = (|| -> Result<Value, Error> {
-        let mut body = Map::new();
+    let mut body = Map::new();
+    let result = (|| -> Result<(), Error> {
         if !ask.refs.is_empty() {
             let values = store.resolve_refs(&ask.refs, &purpose, HUMAN)?;
             body.insert(
@@ -278,10 +278,12 @@ pub fn values(store: &mut Store, ask: &Ask, who: &Peer) -> Reply {
                 }),
             );
         }
-        Ok(Value::Object(body))
+        Ok(())
     })();
+    // As a reply, what was read so far is zeroed when it goes, sent or not.
+    let filled = Reply::ok(Value::Object(body));
     match result {
-        Ok(body) => Reply::ok(body),
+        Ok(()) => filled,
         Err(e) => Reply::error(e.status(), e.to_string()),
     }
 }

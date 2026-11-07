@@ -280,6 +280,12 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
     guard.abort();
     autosync.abort();
     ssh_agent::stop(&shared);
+    // Ending the connections stopped the agents' commands; wait for them to go, so none that
+    // this process gave values to is still running once another process owns the vault.
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while shared.runs.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // A round already running is a blocking task that abort cannot stop. Wait for it, so no
     // Git command of this daemon still runs in the checkout once another process owns the
@@ -368,9 +374,8 @@ async fn respond(
     req: hyper::Request<Incoming>,
     pid: Option<i32>,
 ) -> hyper::Response<Full<Bytes>> {
-    let mut reply = route(shared, req, pid).await;
+    let reply = route(shared, req, pid).await;
     let body = encode(&reply.body);
-    vaultos_core::secret::scrub_json(&mut reply.body);
     let mut res = hyper::Response::new(Full::new(Bytes::from_owner(Wiped(body))));
     *res.status_mut() = hyper::StatusCode::from_u16(reply.status)
         .unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
@@ -553,7 +558,8 @@ impl Drop for Abandon {
 /// `POST /run`: the run scope. The plan is checked and the values read under the store
 /// (`api::run_plan`); this process then starts the command without holding it, and the
 /// agent gets the exit code and masked output, never the values. The command is stopped at
-/// its timeout or when this request is dropped.
+/// its timeout, when this request is dropped, or when the vault locks; its output is then
+/// withheld.
 async fn run_command(shared: Arc<Shared>, mut request: Request) -> Reply {
     if request.agent_token.is_none() {
         return Reply::error(403, "An enrolled, active agent token is required");
@@ -567,12 +573,13 @@ async fn run_command(shared: Arc<Shared>, mut request: Request) -> Reply {
     let s = shared.clone();
     let plan = tokio::task::spawn_blocking(move || {
         s.with_store(|store| {
-            request.grants = s.access.live(store.lock_count());
-            api::run_plan(store, &request)
+            let locks = store.lock_count();
+            request.grants = s.access.live(locks);
+            api::run_plan(store, &request).map(|p| (p, locks))
         })
     })
     .await;
-    let plan = match plan {
+    let (plan, locks) = match plan {
         Ok(Ok(p)) => p,
         Ok(Err(r)) => return r,
         Err(_) => return Reply::error(500, "Internal error"),
@@ -583,17 +590,33 @@ async fn run_command(shared: Arc<Shared>, mut request: Request) -> Reply {
         timeout,
         project,
         held_for_approval,
+        too_short,
     } = plan;
     let abandoned = Arc::new(AtomicBool::new(false));
     let _abandon = Abandon(abandoned.clone());
+    let s = shared.clone();
     let out = tokio::task::spawn_blocking(move || {
         let _slot = slot;
         vaultos_client::run::capture_until(&program, timeout, MAX_RUN_OUTPUT, &|| {
-            abandoned.load(Ordering::SeqCst)
+            abandoned.load(Ordering::SeqCst) || !s.unlocked.load(Ordering::SeqCst)
         })
     })
     .await;
     shared.touch();
+    // Locked while it ran (even if unlocked again since): the command keeps no value past a
+    // lock, and nor does its reply.
+    let s = shared.clone();
+    let relocked = tokio::task::spawn_blocking(move || {
+        s.with_store(|store| store.lock_count() != locks || !store.is_unlocked())
+    })
+    .await
+    .unwrap_or(true);
+    if relocked {
+        return Reply::error(
+            423,
+            "VaultOS locked while the command ran; its output is withheld",
+        );
+    }
     match out {
         Ok(Ok(c)) => Reply::ok(serde_json::json!({
             "project": project,
@@ -603,6 +626,7 @@ async fn run_command(shared: Arc<Shared>, mut request: Request) -> Reply {
             "stdout": c.stdout,
             "stderr": c.stderr,
             "heldForApproval": held_for_approval,
+            "tooShortToMask": too_short,
         })),
         Ok(Err(e)) => Reply::error(400, format!("The command could not be started: {e}")),
         Err(_) => Reply::error(500, "Internal error"),

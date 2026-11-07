@@ -182,7 +182,7 @@
   },
   {
     "name": "run_with_secrets",
-    "description": "Run a command with an approved project's values in its environment, without writing a file or seeing a value. Requires run scope, and the command must start with one the human allowed for this agent (see whoami runCommands). Runs in cwd, inside an approved folder, with no stdin; the values are masked in the returned stdout and stderr. Keys awaiting approval are left out and listed in heldForApproval. Do not try to print values to get around masking.",
+    "description": "Run a command with an approved project's values in its environment, without writing a file or seeing a value. Requires run scope, and the command must start with one the human allowed for this agent (see whoami runCommands). Runs in cwd, inside an approved folder, with no stdin; the values are masked in the returned stdout and stderr. Keys awaiting approval are left out and listed in heldForApproval; values under 4 characters cannot be masked, so they are left out and listed in tooShortToMask. The program is looked up only in PATH folders outside temporary, shared and agent folders. Do not try to print values to get around masking.",
     "inputSchema": {
       "type": "object",
       "properties": {
