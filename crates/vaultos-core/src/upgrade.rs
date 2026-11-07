@@ -89,28 +89,14 @@ fn same(original: &VaultV3, round: &VaultV3, drop: usize) -> Result<()> {
 
 /// Sets aside a v4 audit log left by an earlier, unfinished attempt; the new vault's chain
 /// starts empty. The v3 `audit.log` stays where it is, with the v3 backup it belongs to.
-fn set_aside_stale_log(dir: &Path) -> Result<()> {
-    let stale = dir.join(audit::FILE);
-    if stale.exists() {
-        let to = dir.join(format!(
-            "audit-v4.before-upgrade-{}.log",
-            now_iso()
-                .chars()
-                .filter(char::is_ascii_digit)
-                .collect::<String>()
-        ));
-        std::fs::rename(&stale, &to).map_err(Error::io("cannot set aside an earlier audit log"))?;
-    }
-    Ok(())
-}
-
 /// Upgrades the v3 vault in `data_dir` to v4, keeping the same password and optionally
 /// adding a Secret Key.
 ///
 /// Everything that can fail happens before the new file replaces the old one: the backup, the
 /// first audit entry (whose head the new vault records) and the check that the new file
-/// decodes to the original. Replacing the file is the last step, so an error always means
-/// the v3 vault is still in place.
+/// decodes to the original. Replacing the file is the last step, so an error means the v3
+/// vault is still in place, except [`Error::Unconfirmed`]: v4 is in place but the system
+/// could not confirm it reached the disk.
 pub fn upgrade(
     data_dir: &Path,
     password: &SecretString,
@@ -143,17 +129,16 @@ pub fn upgrade(
     let expected_drop = history::trim_count(&sizes);
 
     let backup = write_backup(data_dir, &bytes)?;
-    set_aside_stale_log(data_dir)?;
     let detail = format!(
         "from v3; backup {}",
         backup.file_name().and_then(|n| n.to_str()).unwrap_or("")
     );
-    let head = audit::append(
+    // A v4 log already here belongs to no vault this upgrade produces.
+    let head = audit::restart(
         data_dir,
         &keys.vault_id,
         &keys.audit_seed,
-        None,
-        HUMAN,
+        "before-upgrade",
         "upgrade_v4",
         &detail,
     )?;

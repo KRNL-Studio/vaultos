@@ -122,6 +122,10 @@ fn read_open(f: File, max: u64) -> Result<Vec<u8>> {
 
 /// Writes to a private temporary file beside `file`, fsyncs, renames over it and fsyncs the
 /// directory, so a crash leaves either the old or the new file, never a mix.
+///
+/// Any error before the rename leaves the old file. If only the final directory flush fails,
+/// the new file is already in place and the error is [`Error::Unconfirmed`]: the caller must
+/// treat the write as done.
 pub fn atomic_write(file: &Path, bytes: &[u8]) -> Result<()> {
     regular_file(file, true, u64::MAX)?;
     let dir = file.parent().unwrap_or(Path::new("."));
@@ -142,7 +146,10 @@ pub fn atomic_write(file: &Path, bytes: &[u8]) -> Result<()> {
         drop(f);
         regular_file(file, true, u64::MAX)?;
         fs::rename(&tmp, file).map_err(Error::io("cannot replace the vault file"))?;
-        sync_dir(dir)
+        sync_dir(dir).map_err(|e| match e {
+            Error::Io { source, .. } => Error::Unconfirmed(source),
+            other => other,
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -229,9 +236,31 @@ fn flock_guard(dir: &Path, name: &str) -> Result<File> {
     Ok(f)
 }
 
+/// Takes over a stale lock as `session.js` does: renames it aside, and removes it only if it
+/// still holds `held` (the dead process's pid). A lock created meanwhile by another process
+/// is put back and the claim fails, so a takeover never deletes a live lock.
+fn take_over(path: &Path, held: &[u8]) -> Result<()> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("lock");
+    let aside = path.with_file_name(format!("{name}.stale-{}", hex(&random_array::<6>())));
+    match fs::rename(path, &aside) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::io("cannot take over a stale lock")(e)),
+    }
+    let current = fs::read(&aside).ok();
+    if current.as_deref() != Some(held) {
+        let _ = fs::hard_link(&aside, path);
+        let _ = fs::remove_file(&aside);
+        return Err(Error::Busy);
+    }
+    let _ = fs::remove_file(&aside);
+    Ok(())
+}
+
 /// Claims `dir/name` the way `session.js` does: create-exclusive with our pid, and take over
-/// only a lock whose process no longer exists. The takeover happens while holding the
-/// `flock`, so only a JavaScript process could race it.
+/// only a lock whose process no longer exists. Rust processes also hold the `flock`, so two
+/// of them never race; a JavaScript process racing a takeover finds the lock renamed aside
+/// and put back rather than deleted (see `take_over`).
 pub fn claim(dir: &Path, name: &str) -> Result<LockFile> {
     #[cfg(unix)]
     let guard = flock_guard(dir, name)?;
@@ -266,7 +295,7 @@ pub fn claim(dir: &Path, name: &str) -> Result<LockFile> {
                 if pid_alive(other) {
                     return Err(Error::Busy);
                 }
-                let _ = fs::remove_file(&path);
+                take_over(&path, &held)?;
             }
             Err(e) => {
                 return Err(Error::Io {
@@ -300,6 +329,34 @@ mod tests {
             1,
             "no temporary files left"
         );
+    }
+
+    #[test]
+    fn a_stale_lock_is_taken_over_but_a_live_one_is_put_back() {
+        let d = tempfile::tempdir().unwrap();
+        let lock = d.path().join("owner.lock");
+        // A pid that cannot be running.
+        fs::write(&lock, b"2147483646").unwrap();
+        let held = claim(d.path(), "owner.lock").unwrap();
+        assert_eq!(
+            fs::read_to_string(&lock).unwrap(),
+            std::process::id().to_string()
+        );
+        drop(held);
+        assert!(!lock.exists());
+
+        // Another process replaced the stale lock between our read and the takeover.
+        fs::write(&lock, b"1").unwrap();
+        assert!(matches!(take_over(&lock, b"2147483646"), Err(Error::Busy)));
+        assert_eq!(fs::read(&lock).unwrap(), b"1", "the live lock is back");
+        let aside = fs::read_dir(d.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .is_ok_and(|e| e.file_name().to_string_lossy().contains(".stale-"))
+            })
+            .count();
+        assert_eq!(aside, 0, "nothing left aside");
     }
 
     #[cfg(unix)]

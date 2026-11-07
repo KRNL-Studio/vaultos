@@ -471,6 +471,47 @@ fn reveals_are_signed_into_a_chain_the_vault_anchors() {
 }
 
 #[test]
+fn two_sessions_on_one_damaged_log_reset_it_once() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = new_store(d.path());
+    a.audit("probe", "one", "human").unwrap();
+    a.audit("probe", "two", "human").unwrap();
+    a.set_item("Example App", &field("K", "synthetic-k"), "human")
+        .unwrap(); // anchors entry 2
+    a.lock();
+    let log = d.path().join("audit-v4.log");
+    let first = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, first.lines().next().unwrap().to_owned() + "\n").unwrap();
+
+    a.unlock(&pw(PW), None).unwrap();
+    let mut b = Store::new(d.path()).unwrap();
+    b.unlock(&pw(PW), None).unwrap();
+    assert!(a.audit_problem().is_some() && b.audit_problem().is_some());
+
+    // A resets the chain; B, which saw the same damage, adopts A's new chain instead of
+    // setting it aside, and both keep appending to one chain.
+    a.audit("probe", "from a", "human").unwrap();
+    b.audit("probe", "from b", "human").unwrap();
+    b.set_item("Example App", &field("L", "synthetic-l"), "human")
+        .unwrap();
+    let set_aside = std::fs::read_dir(d.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("audit-v4.set-aside-")
+        })
+        .count();
+    assert_eq!(set_aside, 1);
+    let (report, entries) = b.verify_audit().unwrap();
+    assert_eq!(report.anchored, Some(true));
+    let actions: Vec<&str> = entries.iter().map(|e| e.detail.as_str()).collect();
+    assert_eq!(entries[0].action, "audit_log_reset");
+    assert_eq!(&actions[1..], ["from a", "from b"]);
+}
+
+#[test]
 fn moving_a_key_reseals_it_under_the_other_project() {
     let d = tempfile::tempdir().unwrap();
     let mut s = new_store(d.path());

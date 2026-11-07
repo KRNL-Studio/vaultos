@@ -8,7 +8,7 @@ use crate::crypto::{hex, sha256};
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
 use std::fmt;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const PREFIX: &str = "VK1";
@@ -40,15 +40,19 @@ impl SecretKey {
     /// A short public fingerprint stored in the vault header, so a missing or wrong key can
     /// be named without revealing it. 32 bits of a hash of 128 random bits leaks nothing usable.
     pub fn id(&self) -> String {
-        let mut data = b"vaultos/v4/secret-key-id/".to_vec();
-        data.extend_from_slice(&self.0);
-        hex(&sha256(&data)[..4])
+        hex(&Self::hash(b"vaultos/v4/secret-key-id/", &self.0)[..4])
+    }
+
+    /// SHA-256 of a label and the key, through a buffer that is zeroed when dropped.
+    fn hash(label: &[u8], bytes: &[u8; 16]) -> Zeroizing<[u8; 32]> {
+        let mut data = Zeroizing::new(Vec::with_capacity(label.len() + 16));
+        data.extend_from_slice(label);
+        data.extend_from_slice(bytes);
+        Zeroizing::new(sha256(&data))
     }
 
     fn checksum(bytes: &[u8; 16]) -> [u8; CHECK] {
-        let mut data = b"vaultos/v4/secret-key-check/".to_vec();
-        data.extend_from_slice(bytes);
-        let h = sha256(&data);
+        let h = Self::hash(b"vaultos/v4/secret-key-check/", bytes);
         // The first 20 bits, as four 5-bit symbols.
         let bits = (u32::from(h[0]) << 12) | (u32::from(h[1]) << 4) | (u32::from(h[2]) >> 4);
         let mut out = [0u8; CHECK];
@@ -67,14 +71,17 @@ impl SecretKey {
             *slot = ALPHABET[(v & 31) as usize];
             v >>= 5;
         }
-        let mut chars: Vec<u8> = body.to_vec();
+        v.zeroize();
+        let mut chars = Zeroizing::new(Vec::with_capacity(BODY + CHECK));
+        chars.extend_from_slice(&body);
         chars.extend_from_slice(&Self::checksum(&self.0));
-        let mut out = String::from(PREFIX);
+        // Sized up front, so growing never leaves a copy behind.
+        let mut out = String::with_capacity(PREFIX.len() + (BODY + CHECK) / 6 * 7);
+        out.push_str(PREFIX);
         for group in chars.chunks(6) {
             out.push('-');
             out.push_str(std::str::from_utf8(group).unwrap_or_default());
         }
-        chars.zeroize();
         body.zeroize();
         SecretString::new(out)
     }

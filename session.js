@@ -4,6 +4,8 @@ const fs = require("node:fs");
 
 const path = require("node:path");
 
+const crypto = require("node:crypto");
+
 const {regularFile: regularFile} = require("./fs-safe");
 
 function readSession(file) {
@@ -90,6 +92,31 @@ async function requestShutdown(file) {
     return false;
 }
 
+// Takes over a lock whose process is gone. The file is renamed aside first and removed only
+// if it is still the dead process's; a lock another process (this app or the Rust one)
+// created meanwhile is put back. Unlinking by name instead could delete a live lock.
+function takeOver(file, held) {
+    const aside = `${file}.stale-${crypto.randomBytes(6).toString("hex")}`;
+    try {
+        fs.renameSync(file, aside);
+    } catch (e) {
+        if (e.code === "ENOENT") return;
+        throw e;
+    }
+    let current = null;
+    try {
+        current = fs.readFileSync(aside, "utf8");
+    } catch {}
+    if (current !== held) {
+        try {
+            fs.linkSync(aside, file);
+        } catch {}
+        fs.unlinkSync(aside);
+        throw new Error("Another VaultOS process owns this vault");
+    }
+    fs.unlinkSync(aside);
+}
+
 function claim(dataDir, name = "owner.lock") {
     const file = path.join(dataDir, name);
     for (let i = 0; i < 2; i++) {
@@ -107,15 +134,16 @@ function claim(dataDir, name = "owner.lock") {
             regularFile(file, {
                 maxBytes: 128
             });
-            const pid = Number(fs.readFileSync(file, "utf8"));
+            const held = fs.readFileSync(file, "utf8");
+            const pid = Number(held);
             if (!Number.isInteger(pid) || pid <= 0) throw new Error("Invalid owner lock; inspect it before removing it");
             try {
                 process.kill(pid, 0);
                 throw new Error("Another VaultOS process owns this vault");
             } catch (err) {
                 if (err.code !== "ESRCH") throw err;
-                fs.unlinkSync(file);
             }
+            takeOver(file, held);
         }
     }
     throw new Error("Could not claim vault");

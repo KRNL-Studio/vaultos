@@ -4,11 +4,13 @@
 //! or rewriting it is detected; only entries written after the last save can be lost unnoticed.
 //! Entries hold names, actions and actors, never values.
 
-use crate::crypto::{b64, sha256_hex, signing_key, unb64, unb64_array, verify_ed25519};
+use crate::crypto::{
+    b64, hex, random_array, sha256_hex, signing_key, unb64, unb64_array, verify_ed25519,
+};
 use crate::error::{Error, Result};
 use crate::format::AuditHead;
 use crate::fs_safe::{read_regular, regular_file};
-use crate::model::now_iso;
+use crate::model::{now_iso, HUMAN};
 use crate::secret::Key32;
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
@@ -99,11 +101,55 @@ fn tail(f: &mut std::fs::File, vault_id: &str, public: &[u8; 32]) -> Result<Opti
     }))
 }
 
+/// The log's lock: an exclusive `flock` on a companion file that is never renamed or
+/// removed, so appends, resets and set-asides are serialised across processes even while
+/// `audit-v4.log` itself is being replaced. Released when dropped.
+#[derive(Debug)]
+pub struct LogLock(#[allow(dead_code)] std::fs::File);
+
+pub fn lock(dir: &Path) -> Result<LogLock> {
+    let path = dir.join(format!(".{FILE}.flock"));
+    regular_file(&path, true, 0)?;
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let f = opts
+        .open(&path)
+        .map_err(Error::io("cannot open the audit log's lock"))?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: flock on a descriptor this function owns; blocks only while another
+        // process appends or resets.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(Error::Io {
+                context: "cannot lock the audit log",
+                source: std::io::Error::last_os_error(),
+            });
+        }
+    }
+    Ok(LogLock(f))
+}
+
 /// Appends one entry and returns the new head. `head` is the newest entry this process knows
-/// of; the entry actually follows the last one on disk, read under an exclusive lock, so two
+/// of; the entry actually follows the last one on disk, read under the log's lock, so two
 /// processes appending to one log keep a single chain. A last entry not signed by this vault
 /// is refused rather than followed.
 pub fn append(
+    dir: &Path,
+    vault_id: &str,
+    seed: &Key32,
+    head: Option<&AuditHead>,
+    actor: &str,
+    action: &str,
+    detail: &str,
+) -> Result<AuditHead> {
+    let _lock = lock(dir)?;
+    append_locked(dir, vault_id, seed, head, actor, action, detail)
+}
+
+fn append_locked(
     dir: &Path,
     vault_id: &str,
     seed: &Key32,
@@ -121,7 +167,6 @@ pub fn append(
     let mut f = opts
         .open(&path)
         .map_err(Error::io("cannot open the audit log"))?;
-    let _lock = lock_exclusive(&f)?;
     let on_disk = tail(&mut f, vault_id, &public_key(seed))?;
     let after = match (&on_disk, head) {
         (Some(d), Some(h)) if d.seq < h.seq => {
@@ -156,38 +201,59 @@ pub fn append(
     })
 }
 
-/// Holds an exclusive `flock` on the open log until dropped (a no-op elsewhere).
-struct FileLock(#[cfg(unix)] std::os::fd::RawFd);
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        // SAFETY: unlocks a descriptor that outlives this guard (it borrows the open file).
-        unsafe {
-            libc::flock(self.0, libc::LOCK_UN);
-        }
+/// Moves the log (if any) to `audit-v4.{label}-{time}-{random}.log`. Call under the lock.
+fn set_aside(dir: &Path, label: &str) -> Result<()> {
+    let from = dir.join(FILE);
+    if regular_file(&from, true, MAX_LOG_BYTES)?.is_none() {
+        return Ok(());
     }
+    let stamp: String = now_iso().chars().filter(char::is_ascii_digit).collect();
+    let to = dir.join(format!(
+        "audit-v4.{label}-{stamp}-{}.log",
+        hex(&random_array::<4>())
+    ));
+    std::fs::rename(&from, &to).map_err(Error::io("cannot set the audit log aside"))?;
+    crate::fs_safe::sync_dir(dir)
 }
 
-fn lock_exclusive(f: &std::fs::File) -> Result<FileLock> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let fd = f.as_raw_fd();
-        // SAFETY: flock on an open descriptor; blocks only while another append runs.
-        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
-            return Err(Error::Io {
-                context: "cannot lock the audit log",
-                source: std::io::Error::last_os_error(),
-            });
+/// Starts a new chain: sets the current log aside under `label` and writes its first entry.
+pub fn restart(
+    dir: &Path,
+    vault_id: &str,
+    seed: &Key32,
+    label: &str,
+    action: &str,
+    detail: &str,
+) -> Result<AuditHead> {
+    let _lock = lock(dir)?;
+    set_aside(dir, label)?;
+    append_locked(dir, vault_id, seed, None, HUMAN, action, detail)
+}
+
+pub const RESET: &str = "audit_log_reset";
+
+/// Replaces a log that failed verification at unlock with a new chain whose first entry
+/// names the problem. If another process that unlocked the same damaged log already did so
+/// since `since` (this process's unlock time), its chain is adopted instead, so two
+/// processes never set each other's new chain aside.
+pub fn reset(
+    dir: &Path,
+    vault_id: &str,
+    seed: &Key32,
+    problem: &str,
+    since: &str,
+) -> Result<AuditHead> {
+    let _lock = lock(dir)?;
+    let public = b64(&public_key(seed));
+    if let Ok((report, entries)) = verify(dir, vault_id, &public, None) {
+        if let (Some(first), Some(head)) = (entries.first(), report.head) {
+            if first.action == RESET && first.at.as_str() >= since {
+                return Ok(head);
+            }
         }
-        Ok(FileLock(fd))
     }
-    #[cfg(not(unix))]
-    {
-        let _ = f;
-        Ok(FileLock())
-    }
+    set_aside(dir, "set-aside")?;
+    append_locked(dir, vault_id, seed, None, HUMAN, RESET, problem)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

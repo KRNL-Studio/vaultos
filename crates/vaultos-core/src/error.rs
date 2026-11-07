@@ -40,6 +40,10 @@ pub enum Error {
     Conflict(String),
     #[error("The audit log failed verification: {0}")]
     Audit(String),
+    /// The new file replaced the old one, but the system could not confirm it reached the
+    /// disk. The change is in place: callers must keep it (and any new credentials).
+    #[error("The change was saved, but the system could not confirm it reached the disk ({0}); the new version is in place")]
+    Unconfirmed(std::io::Error),
     #[error("{context}: {source}")]
     Io {
         context: &'static str,

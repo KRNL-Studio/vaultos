@@ -8,7 +8,7 @@
 
 use crate::audit::{self, Signatures};
 use crate::canon::record_hash;
-use crate::crypto::{b64, hex, random_array, random_id, sha256_hex, KdfParams, Sealed};
+use crate::crypto::{b64, random_id, sha256_hex, KdfParams, Sealed};
 use crate::error::{Error, Result};
 use crate::format::{
     aad, account_unlock_key, check_id, mac_key, new_vault_id, open_audit_seed, open_json,
@@ -82,6 +82,9 @@ struct Open {
     /// The head the vault file on disk records.
     saved_anchor: Option<AuditHead>,
     audit_problem: Option<String>,
+    /// When this session unlocked: a reset of a damaged log made by another process after
+    /// this is adopted rather than redone.
+    opened_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -638,9 +641,12 @@ impl Store {
             audit_head: None,
             saved_anchor: None,
             audit_problem: None,
+            opened_at: now_iso(),
         });
         if let Err(e) = self.commit(state) {
-            self.open = None;
+            if !matches!(e, Error::Unconfirmed(_)) {
+                self.open = None;
+            }
             return Err(e);
         }
         Ok(())
@@ -667,6 +673,7 @@ impl Store {
     /// Takes a decoded vault and finds where the audit chain really ends: the head the vault
     /// recorded, or later entries written after its last save.
     fn install(&mut self, keys: Keys, mut state: State, bytes: &[u8], id: Option<FileId>) {
+        let opened_at = now_iso();
         let anchor = state.meta.audit_head.take();
         let (head, problem) = match audit::verify_with(
             &self.data_dir,
@@ -688,6 +695,7 @@ impl Store {
             audit_head: head,
             saved_anchor: anchor,
             audit_problem: problem,
+            opened_at,
         });
     }
 
@@ -730,8 +738,21 @@ impl Store {
         if !self.disk_unchanged()? {
             return Err(Error::Stale);
         }
-        atomic_write(&self.vault_path, &bytes)?;
-        self.disk_hash = Some(sha256_hex(&bytes));
+        // `Unconfirmed` means the new file is in place: adopt it, then report.
+        let written = atomic_write(&self.vault_path, &bytes);
+        if let Err(e) = written {
+            if !matches!(e, Error::Unconfirmed(_)) {
+                return Err(e);
+            }
+            self.installed(next, &bytes)?;
+            return Err(e);
+        }
+        self.installed(next, &bytes)
+    }
+
+    /// Records that `bytes` (encoding `next`) is now the file on disk.
+    fn installed(&mut self, next: State, bytes: &[u8]) -> Result<()> {
+        self.disk_hash = Some(sha256_hex(bytes));
         // Unknown means the next check reads the file instead.
         self.disk_id = fs_safe::file_id(&self.vault_path).ok().flatten();
         let open = self.open.as_mut().ok_or(Error::Locked)?;
@@ -829,7 +850,10 @@ impl Store {
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         let previous = std::mem::replace(&mut open.keys, next_keys);
         let r = self.commit(state);
-        if r.is_err() {
+        // After `Unconfirmed` the file on disk needs the new keys, so they stay.
+        if r.as_ref()
+            .is_err_and(|e| !matches!(e, Error::Unconfirmed(_)))
+        {
             if let Some(o) = self.open.as_mut() {
                 o.keys = previous;
             }
@@ -885,15 +909,12 @@ impl Store {
         let Some(problem) = open.audit_problem.clone() else {
             return Ok(());
         };
-        set_aside_audit_log(&self.data_dir)?;
-        let head = audit::append(
+        let head = audit::reset(
             &self.data_dir,
             &open.keys.vault_id,
             &open.keys.audit_seed,
-            None,
-            HUMAN,
-            "audit_log_reset",
             &problem,
+            &open.opened_at,
         )?;
         open.audit_head = Some(head);
         // The recorded head belonged to the log just set aside; the next save records the
@@ -1643,18 +1664,6 @@ fn claim_with_retry(dir: &Path) -> Result<fs_safe::LockFile> {
         }
     }
     Err(last)
-}
-
-fn set_aside_audit_log(dir: &Path) -> Result<()> {
-    let from = dir.join(audit::FILE);
-    if from.exists() {
-        let to = dir.join(format!(
-            "audit-v4.set-aside-{}.log",
-            hex(&random_array::<4>())
-        ));
-        std::fs::rename(&from, &to).map_err(Error::io("cannot set the audit log aside"))?;
-    }
-    Ok(())
 }
 
 pub(crate) fn project_v3(k: &Keys, p: &Project) -> Result<ProjectV3> {
