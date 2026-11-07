@@ -20,9 +20,10 @@ ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 hkdf = "0.12"
 hmac = "0.12"
 rand_core = { version = "0.6", features = ["getrandom"] }
+regex = { version = "1.11", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 scrypt = { version = "0.11", default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = { version = "0.10", features = ["asm"] }  # hardware SHA-256 (ARMv8, SHA-NI)
 subtle = "2"
 thiserror = "2"

@@ -12,18 +12,23 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod agents;
+pub mod approvals;
 pub mod audit;
 pub mod canon;
 pub mod crypto;
+pub mod env;
 pub mod error;
 pub mod format;
 pub mod fs_safe;
 pub mod hardening;
 pub mod history;
 pub mod model;
+pub mod paths;
 pub mod providers;
 pub mod secret;
 pub mod secret_key;
+pub mod session;
 pub mod store;
 pub mod upgrade;
 pub mod v3;

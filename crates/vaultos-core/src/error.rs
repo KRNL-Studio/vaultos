@@ -55,7 +55,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
-    pub(crate) fn io(context: &'static str) -> impl FnOnce(std::io::Error) -> Error {
+    pub fn io(context: &'static str) -> impl FnOnce(std::io::Error) -> Error {
         move |source| Error::Io { context, source }
     }
 

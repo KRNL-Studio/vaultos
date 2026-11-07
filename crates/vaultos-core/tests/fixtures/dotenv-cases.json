@@ -1,0 +1,296 @@
+[
+  {
+    "input": "A=1\nB=two\n",
+    "parsed": [
+      [
+        "A",
+        "1"
+      ],
+      [
+        "B",
+        "two"
+      ]
+    ]
+  },
+  {
+    "input": "export A=1\nexport  B = spaced \n",
+    "parsed": [
+      [
+        "A",
+        "1"
+      ],
+      [
+        "B",
+        "spaced"
+      ]
+    ]
+  },
+  {
+    "input": "A = 1 # comment\nB=1#not-a-comment\nC='x # y'\nD=\"x # y\" # c\n",
+    "parsed": [
+      [
+        "A",
+        "1"
+      ],
+      [
+        "B",
+        "1"
+      ],
+      [
+        "C",
+        "x # y"
+      ],
+      [
+        "D",
+        "x # y"
+      ]
+    ]
+  },
+  {
+    "input": "A='single'\nB=\"double\"\nC=`back`\nD='unterminated\nE=\"mixed'\n",
+    "parsed": [
+      [
+        "A",
+        "single"
+      ],
+      [
+        "B",
+        "double"
+      ],
+      [
+        "C",
+        "back"
+      ],
+      [
+        "D",
+        "unterminated\nE=\"mixed"
+      ]
+    ]
+  },
+  {
+    "input": "A=\"line\\nbreak\"\nB='line\\nkept'\nC=\"tab\\tkept\"\nD=\"cr\\rx\"\n",
+    "parsed": [
+      [
+        "A",
+        "line\nbreak"
+      ],
+      [
+        "B",
+        "line\\nkept"
+      ],
+      [
+        "C",
+        "tab\\tkept"
+      ],
+      [
+        "D",
+        "cr\rx"
+      ]
+    ]
+  },
+  {
+    "input": "A=\"multi\nline\nvalue\"\nB='also\nmulti'\nC=`and\nthis`\n",
+    "parsed": [
+      [
+        "A",
+        "multi\nline\nvalue"
+      ],
+      [
+        "B",
+        "also\nmulti"
+      ],
+      [
+        "C",
+        "and\nthis"
+      ]
+    ]
+  },
+  {
+    "input": "A=\nB= \nC=''\nD=\"\"\nE\nF=a=b=c\n",
+    "parsed": [
+      [
+        "A",
+        ""
+      ],
+      [
+        "B",
+        ""
+      ],
+      [
+        "C",
+        ""
+      ],
+      [
+        "D",
+        ""
+      ],
+      [
+        "F",
+        "a=b=c"
+      ]
+    ]
+  },
+  {
+    "input": "a.b=dots\nc-d=dashes\nE:colon\n_F=under\n9G=digit\n",
+    "parsed": [
+      [
+        "a.b",
+        "dots"
+      ],
+      [
+        "c-d",
+        "dashes"
+      ],
+      [
+        "_F",
+        "under"
+      ],
+      [
+        "9G",
+        "digit"
+      ]
+    ]
+  },
+  {
+    "input": "K=a\r\nL=b\r\nM=c",
+    "parsed": [
+      [
+        "K",
+        "a"
+      ],
+      [
+        "L",
+        "b"
+      ],
+      [
+        "M",
+        "c"
+      ]
+    ]
+  },
+  {
+    "input": "K=a\rL=b",
+    "parsed": [
+      [
+        "K",
+        "a"
+      ],
+      [
+        "L",
+        "b"
+      ]
+    ]
+  },
+  {
+    "input": "2=b\n1=a\nZ=z\n1=again\n10=ten\n01=lead\n",
+    "parsed": [
+      [
+        "1",
+        "again"
+      ],
+      [
+        "2",
+        "b"
+      ],
+      [
+        "10",
+        "ten"
+      ],
+      [
+        "Z",
+        "z"
+      ],
+      [
+        "01",
+        "lead"
+      ]
+    ]
+  },
+  {
+    "input": "﻿BOM=first\nX= nbsp \n",
+    "parsed": [
+      [
+        "BOM",
+        "first"
+      ],
+      [
+        "X",
+        "nbsp"
+      ]
+    ]
+  },
+  {
+    "input": "  INDENT=yes\n\tTAB=yes\n# full comment\n   # indented comment\n",
+    "parsed": [
+      [
+        "INDENT",
+        "yes"
+      ],
+      [
+        "TAB",
+        "yes"
+      ]
+    ]
+  },
+  {
+    "input": "Q=\"has 'single' inside\"\nR='has \"double\" inside'\nS=`has 'both' \"kinds\"`\n",
+    "parsed": [
+      [
+        "Q",
+        "has 'single' inside"
+      ],
+      [
+        "R",
+        "has \"double\" inside"
+      ],
+      [
+        "S",
+        "has 'both' \"kinds\""
+      ]
+    ]
+  },
+  {
+    "input": "DUP=one\nDUP=two\n",
+    "parsed": [
+      [
+        "DUP",
+        "two"
+      ]
+    ]
+  },
+  {
+    "input": "URL=postgres://synthetic:synthetic@localhost:5432/db?ssl=true\n",
+    "parsed": [
+      [
+        "URL",
+        "postgres://synthetic:synthetic@localhost:5432/db?ssl=true"
+      ]
+    ]
+  },
+  {
+    "input": "SPACES=  padded value  \nQUOTED=\"  kept  \"\n",
+    "parsed": [
+      [
+        "SPACES",
+        "padded value"
+      ],
+      [
+        "QUOTED",
+        "  kept  "
+      ]
+    ]
+  },
+  {
+    "input": "ESC=\"back\\\\slash\"\nESC2='back\\\\slash'\n",
+    "parsed": [
+      [
+        "ESC",
+        "back\\\\slash"
+      ],
+      [
+        "ESC2",
+        "back\\\\slash"
+      ]
+    ]
+  }
+]

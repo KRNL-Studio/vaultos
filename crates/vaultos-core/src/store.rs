@@ -9,6 +9,7 @@
 use crate::audit::{self, Signatures};
 use crate::canon::record_hash;
 use crate::crypto::{b64, random_id, sha256_hex, KdfParams, Sealed};
+use crate::env;
 use crate::error::{Error, Result};
 use crate::format::{
     aad, account_unlock_key, check_id, mac_key, new_vault_id, open_audit_seed, open_json,
@@ -29,6 +30,7 @@ use crate::validate::{self, Fields};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 pub const VAULT_FILE: &str = "vault.enc";
 
@@ -111,6 +113,9 @@ pub struct ItemSummary {
     pub url: String,
     pub permission: String,
     pub expires_at: String,
+    /// `none`, `active`, `expiring` (7 days or fewer) or `expired`.
+    pub expiry_status: String,
+    pub days_left: Option<i64>,
     pub owner: String,
     pub created_by: String,
     pub editable_by: Vec<String>,
@@ -1063,28 +1068,153 @@ impl Store {
     pub fn list_items(&self, project: &str) -> Result<Vec<ItemSummary>> {
         let st = self.state()?;
         let p = &st.projects[st.project(project)?];
+        Ok(p.items.iter().map(summary).collect())
+    }
+
+    /// A project's id and name, by id or case-insensitive name.
+    pub fn find_project(&self, id_or_name: &str) -> Result<Option<(String, String)>> {
+        let st = self.state()?;
+        Ok(st
+            .project_index(id_or_name)
+            .map(|i| (st.projects[i].id.clone(), st.projects[i].meta.name.clone())))
+    }
+
+    /// One item's metadata, by key or id.
+    pub fn find_item(&self, project: &str, key_or_id: &str) -> Result<Option<ItemSummary>> {
+        let st = self.state()?;
+        let p = &st.projects[st.project(project)?];
         Ok(p.items
             .iter()
-            .map(|i| ItemSummary {
-                id: i.id.clone(),
-                key: i.meta.key.clone(),
-                provider: i.meta.provider.clone(),
-                note: i.meta.note.clone(),
-                username: i.meta.username.clone(),
-                email: i.meta.email.clone(),
-                url: i.meta.url.clone(),
-                permission: i.meta.permission.clone(),
-                expires_at: i.meta.expires_at.clone(),
-                owner: i.meta.owner.clone(),
-                created_by: i.meta.created_by.clone(),
-                editable_by: i.meta.editable_by.clone(),
-                inject_approved: i.meta.inject_approved,
-                has_value: i.meta.has_value,
-                has_password: i.meta.has_password,
-                updated_at: i.meta.updated_at.clone(),
-                rev: i.rev,
-            })
-            .collect())
+            .find(|i| i.meta.key == key_or_id || i.id == key_or_id)
+            .map(summary))
+    }
+
+    /// Projects whose name, and items whose key or provider, contain `q` (case-insensitive).
+    pub fn search(&self, q: &str) -> Result<Vec<SearchHit>> {
+        let q = q.to_lowercase();
+        let mut out = Vec::new();
+        for p in &self.state()?.projects {
+            if p.meta.name.to_lowercase().contains(&q) {
+                out.push(SearchHit::Project {
+                    project: p.meta.name.clone(),
+                });
+            }
+            for i in &p.items {
+                if i.meta.key.to_lowercase().contains(&q)
+                    || i.meta.provider.to_lowercase().contains(&q)
+                {
+                    out.push(SearchHit::Secret {
+                        project: p.meta.name.clone(),
+                        key: i.meta.key.clone(),
+                        provider: i.meta.provider.clone(),
+                        owner: i.meta.owner.clone(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Each record's hash (`model.js` `recordHash`), for comparing two vaults without values.
+    pub fn fingerprints(&self) -> Result<Vec<Fingerprint>> {
+        let keys = &self.open()?.keys;
+        let mut out = Vec::new();
+        for p in &self.state()?.projects {
+            for i in &p.items {
+                out.push(Fingerprint {
+                    project: p.meta.name.clone(),
+                    project_id: p.id.clone(),
+                    key: i.meta.key.clone(),
+                    hash: record_hash(&keys.record(p, i)?),
+                    owner: i.meta.owner.clone(),
+                    updated_at: i.meta.updated_at.clone(),
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            let (x, y) = (
+                format!("{}{}", a.project, a.key),
+                format!("{}{}", b.project, b.key),
+            );
+            x.to_lowercase().cmp(&y.to_lowercase()).then(x.cmp(&y))
+        });
+        Ok(out)
+    }
+
+    /// Writes a project's approved values to `target`, as `store.js` `inject` does. Keys an
+    /// agent created that still await approval are left out and named in the result.
+    pub fn inject(
+        &mut self,
+        project: &str,
+        target: &Path,
+        format: env::Format,
+        merge: bool,
+        keys: Option<&[String]>,
+        actor: &str,
+    ) -> Result<Injected> {
+        if !target.is_absolute() {
+            return Err(Error::invalid("target_path must be absolute"));
+        }
+        let resolved = crate::agents::resolve_lexically(target);
+        if resolved.starts_with(&self.data_dir) {
+            return Err(Error::invalid("Cannot export over vault data"));
+        }
+        let (pname, pairs, held) = {
+            let st = self.state()?;
+            let k = &self.open()?.keys;
+            let p = &st.projects[st.project(project)?];
+            let with_value = p.items.iter().filter(|i| i.meta.has_value);
+            let held: Vec<String> = with_value
+                .clone()
+                .filter(|i| !i.meta.inject_approved)
+                .map(|i| i.meta.key.clone())
+                .collect();
+            let mut pairs = Vec::new();
+            for i in with_value.filter(|i| i.meta.inject_approved) {
+                if keys.is_some_and(|ks| !ks.contains(&i.meta.key)) {
+                    continue;
+                }
+                let secret = k.open_secret(p, i)?;
+                pairs.push((i.meta.key.clone(), Zeroizing::new(secret.value.clone())));
+            }
+            (p.meta.name.clone(), pairs, held)
+        };
+        let shown = target.to_string_lossy().into_owned();
+        self.audit(
+            "inject",
+            &format!(
+                "{pname} -> {shown} ({} keys, {})",
+                pairs.len(),
+                format.as_str()
+            ),
+            actor,
+        )?;
+        env::write_env(target, &pairs, format, merge)?;
+        Ok(Injected {
+            project: pname,
+            target: shown,
+            count: pairs.len(),
+            format: format.as_str().to_owned(),
+            held_for_approval: held,
+        })
+    }
+
+    /// Records that an agent was seen, in memory only: it is saved with the next change, as
+    /// in the JavaScript app, so a read does not rewrite the vault.
+    pub fn note_agent_seen(&mut self, id: &str) {
+        let now = Value::String(now_iso());
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        for st in std::iter::once(&mut open.state).chain(self.pending.as_mut()) {
+            for a in &mut st.meta.agents {
+                if a.get("id").and_then(Value::as_str) == Some(id) {
+                    if let Some(o) = a.as_object_mut() {
+                        o.insert("lastSeenAt".into(), now.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Creates or updates an item. On update, fields left `None` keep their values.
@@ -1664,6 +1794,91 @@ fn claim_with_retry(dir: &Path) -> Result<fs_safe::LockFile> {
         }
     }
     Err(last)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SearchHit {
+    Project {
+        project: String,
+    },
+    Secret {
+        project: String,
+        key: String,
+        provider: String,
+        owner: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fingerprint {
+    pub project: String,
+    pub project_id: String,
+    pub key: String,
+    pub hash: String,
+    pub owner: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Injected {
+    pub project: String,
+    pub target: String,
+    pub count: usize,
+    pub format: String,
+    pub held_for_approval: Vec<String>,
+}
+
+/// `store.js` `expiryInfo`: none, active, expiring (7 days or fewer) or expired.
+pub(crate) fn expiry_info(expires_at: &str) -> (String, Option<i64>) {
+    if expires_at.is_empty() {
+        return ("none".into(), None);
+    }
+    let parsed = crate::model::parse_iso(expires_at).or_else(|| {
+        (expires_at.len() == 10)
+            .then(|| crate::model::parse_iso(&format!("{expires_at}T00:00:00Z")))
+            .flatten()
+    });
+    let Some(t) = parsed else {
+        return ("active".into(), None);
+    };
+    let ms = (t - time::OffsetDateTime::now_utc()).whole_milliseconds();
+    let days = (ms as f64 / 86_400_000.0).ceil() as i64;
+    let status = if ms <= 0 {
+        "expired"
+    } else if days <= 7 {
+        "expiring"
+    } else {
+        "active"
+    };
+    (status.into(), Some(days))
+}
+
+fn summary(i: &Item) -> ItemSummary {
+    let (expiry_status, days_left) = expiry_info(&i.meta.expires_at);
+    ItemSummary {
+        id: i.id.clone(),
+        key: i.meta.key.clone(),
+        provider: i.meta.provider.clone(),
+        note: i.meta.note.clone(),
+        username: i.meta.username.clone(),
+        email: i.meta.email.clone(),
+        url: i.meta.url.clone(),
+        permission: i.meta.permission.clone(),
+        expires_at: i.meta.expires_at.clone(),
+        expiry_status,
+        days_left,
+        owner: i.meta.owner.clone(),
+        created_by: i.meta.created_by.clone(),
+        editable_by: i.meta.editable_by.clone(),
+        inject_approved: i.meta.inject_approved,
+        has_value: i.meta.has_value,
+        has_password: i.meta.has_password,
+        updated_at: i.meta.updated_at.clone(),
+        rev: i.rev,
+    }
 }
 
 pub(crate) fn project_v3(k: &Keys, p: &Project) -> Result<ProjectV3> {
