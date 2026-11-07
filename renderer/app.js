@@ -518,14 +518,15 @@ function searchPanel(scroll, revision) {
         view.query = input.value;
         const active = !!input.value.trim();
         scroll.classList.toggle("searching", active);
+        // Every keystroke, clearing included, makes older answers stale.
+        const t = ++token, query = input.value;
         if (!active) {
             results.textContent = "";
             found = [];
             return;
         }
-        const t = ++token;
-        const r = await window.vault.search(input.value);
-        if (t !== token || revision !== renderVersion) return;
+        const r = await window.vault.search(query);
+        if (t !== token || revision !== renderVersion || input.value !== query) return;
         found = r;
         sel = 0;
         draw();

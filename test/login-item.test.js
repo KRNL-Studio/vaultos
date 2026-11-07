@@ -32,6 +32,29 @@ test("Linux autostart entry quotes its command", t => {
     assert.match(entry, /^Exec="\/opt\/Vault OS\/vaultos" "--hidden"$/m);
 });
 
+test("turning it off removes only the item that starts this data directory", t => {
+    const h = home(t), cmd = [ "/Applications/VaultOS.app/Contents/MacOS/VaultOS", "--hidden" ];
+    const file = login.itemPath({ platform: "darwin", home: h });
+    login.setEnabled(true, cmd, { platform: "darwin", home: h });
+    login.setEnabled(false, null, { platform: "darwin", home: h, dataDir: "/tmp/synthetic-test-vault" });
+    assert.equal(fs.existsSync(file), true, "a test vault leaves the default vault's item alone");
+    login.setEnabled(false, null, { platform: "darwin", home: h });
+    assert.equal(fs.existsSync(file), false);
+    const lh = home(t), lopts = { platform: "linux", home: lh, env: {}, dataDir: "/tmp/synthetic-a" };
+    login.setEnabled(true, cmd, lopts);
+    login.setEnabled(false, null, { ...lopts, dataDir: null });
+    assert.equal(fs.existsSync(login.itemPath(lopts)), true);
+    login.setEnabled(false, null, lopts);
+    assert.equal(fs.existsSync(login.itemPath(lopts)), false);
+});
+
+test("a data directory with a line break cannot splice the entry", t => {
+    const h = home(t);
+    for (const dataDir of [ "/tmp/a\nExec=evil", "relative/dir", "/tmp/a\0b" ]) {
+        assert.throws(() => login.setEnabled(true, [ "/opt/vaultos" ], { platform: "linux", home: h, env: {}, dataDir }), /Invalid data directory/);
+    }
+});
+
 test("rejects commands with control characters and refuses to follow a symlink", t => {
     const h = home(t), opts = { platform: "darwin", home: h };
     assert.throws(() => login.setEnabled(true, [ "/bin/app\n<evil>" ], opts), /Invalid login command/);

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Desktop: a menu bar item (a tray icon on Linux, off by default there) shows whether the vault is locked, how many agent keys await approval and sync health, and opens Quick Access, the window, Lock, Settings and Quit.
+- Desktop: Quick Access. ⇧⌘Space (Ctrl+Shift+Space on Linux) opens a floating search panel from any app: ⏎ copies the value, ⌘C the username, ⌘O opens the website, ⌘⏎ shows the key in VaultOS. It unlocks with the master password or Touch ID, never receives values, and uses its own IPC channels that only it can call. The shortcut can be changed or turned off in Settings.
+- Desktop: search across every project (⌘K or View → Search), ranked by key, project, username, email, website and note.
+- Desktop: closing the window locks the vault and, with the menu bar item on (the macOS default), leaves VaultOS in the menu bar instead of quitting. Quit from the menu bar item or with ⌘Q.
+- Desktop: copies on macOS are marked concealed and transient, so clipboard managers that honour those markers skip them, and are kept off Universal Clipboard. The 30-second clear now leaves the clipboard alone if you copied something else in the meantime.
+- Desktop: an application menu with Settings (⌘,), Lock (⌘L) and Search; reload and developer tools only in development builds.
+- Desktop: opt-in Open at login (starts locked in the menu bar) and opt-in notifications for agent keys awaiting approval and keys expiring within 7 days. Notifications never name keys.
+- Desktop: the password field in Add key hides the value until you choose Show.
+- Dependencies: Electron 45.1.0, @modelcontextprotocol/sdk 1.32.2, dotenv 18.0.9, @electron/osx-sign 2.7.2, playwright 1.64.1 and @hono/node-server 2.1.6.
 - Storage: history is capped at 1 MB as well as 2,000 entries, dropping the oldest first, so large values no longer grow the vault without limit. Revert still works for the entries kept.
 - Sync: the vault copies a pull writes to `backups/` are pruned to the newest 20 plus any from the last 30 days. Other files in `backups/` are left alone.
 - Keychain: an unlock with remembering on rewrites the stored password only when it is missing or different, instead of on every unlock.

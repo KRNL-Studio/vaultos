@@ -115,7 +115,31 @@ function lockQuick() {
     hideQuick();
 }
 
+// Every lock bumps lockGeneration, so an unlock that was still waiting (for another process
+// to hand over the vault, for Touch ID, for the API to start) cannot finish after a later
+// Lock, window close or quit. The newest abandoned attempt gives back ownership it gained.
+let lockGeneration = 0, unlockAttempts = 0;
+
+const unlockTicket = () => ({
+    gen: lockGeneration,
+    attempt: ++unlockAttempts
+});
+
+const lockedSince = ticket => ticket.gen !== lockGeneration;
+
+function abandonUnlock(ticket) {
+    if (ticket.attempt === unlockAttempts && !store.isUnlocked() && release) {
+        release();
+        release = null;
+    }
+    return {
+        ok: false,
+        error: "VaultOS was locked while unlocking. Unlock again."
+    };
+}
+
 function lock({forget: forget = true} = {}) {
+    lockGeneration++;
     humanUnlocked = false;
     lockQuick();
     clearCopied();
@@ -151,6 +175,7 @@ function lock({forget: forget = true} = {}) {
 // Locks only the window: the human must unlock again to view or change anything, while
 // this process keeps owning the vault and serving enrolled agents.
 function lockWindow() {
+    lockGeneration++;
     humanUnlocked = false;
     lockQuick();
     humanAuth.reset();
@@ -308,7 +333,9 @@ async function unlockPasswordInner(pw) {
         ok: false,
         error: "Wait a moment before trying again"
     };
+    const ticket = unlockTicket();
     await own();
+    if (lockedSince(ticket)) return abandonUnlock(ticket);
     try {
         if (store.isUnlocked()) {
             if (!safeEqual(pw, store.password)) throw new Error("Wrong password");
@@ -319,6 +346,7 @@ async function unlockPasswordInner(pw) {
         humanAuth.markProven();
         failed = 0;
         await serve();
+        if (lockedSince(ticket)) return abandonUnlock(ticket);
         touch();
         return {
             ok: true
@@ -348,6 +376,7 @@ async function unlockTouchIdInner() {
         ok: false,
         error: status.error
     };
+    const ticket = unlockTicket();
     try {
         await humanAuth.prompt("unlock VaultOS");
     } catch {
@@ -357,11 +386,19 @@ async function unlockTouchIdInner() {
             error: "Touch ID was not confirmed. Enter the master password."
         };
     }
+    if (lockedSince(ticket)) {
+        humanAuth.reset();
+        return abandonUnlock(ticket);
+    }
     try {
         await own();
     } catch (e) {
         humanAuth.reset();
         throw e;
+    }
+    if (lockedSince(ticket)) {
+        humanAuth.reset();
+        return abandonUnlock(ticket);
     }
     const wasUnlocked = store.isUnlocked();
     try {
@@ -378,6 +415,7 @@ async function unlockTouchIdInner() {
         humanAuth.markProven();
         failed = 0;
         await serve();
+        if (lockedSince(ticket)) return abandonUnlock(ticket);
         touch();
         return {
             ok: true
@@ -464,7 +502,8 @@ handle("setDesktopPrefs", async patch => {
     const before = prefs;
     prefs = desktopPrefs.save(store.dataDir, patch);
     try {
-        if (patch && patch.launchAtLogin !== undefined && patch.launchAtLogin !== before.launchAtLogin) applyLoginItem();
+        // Applied even when unchanged, so saving "off" removes an item left by lost preferences.
+        if (patch && patch.launchAtLogin !== undefined) applyLoginItem();
     } catch (e) {
         prefs = desktopPrefs.save(store.dataDir, {
             launchAtLogin: before.launchAtLogin
@@ -633,7 +672,11 @@ handle("syncTrust", async identity => {
 handle("quit", () => app.quit(), true);
 
 // Quick Access: unlock, search, copy, open. It never receives a secret value.
-quickHandle("state", desktopState, true);
+// The panel needs only the lock state and whether to offer Touch ID.
+quickHandle("state", () => (({unlocked: unlocked, touchId: touchId}) => ({
+    unlocked: unlocked,
+    touchId: touchId
+}))(desktopState()), true);
 
 quickHandle("unlock", unlockWithPassword, true);
 
@@ -1129,7 +1172,9 @@ if (!app.requestSingleInstanceLock()) app.quit(); else {
             store.onPersist(() => refreshTray());
             // Keeps the sync line and approval count current while nothing else changes.
             setInterval(refreshTray, 3e4).unref();
-            if (prefs.launchAtLogin) try {
+            // Rewrites the item if the app moved, or removes one this vault's preferences no
+            // longer ask for (a damaged or deleted desktop-prefs.json).
+            try {
                 applyLoginItem();
             } catch {}
             if (startHidden && keepRunning()) {

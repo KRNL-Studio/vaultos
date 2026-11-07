@@ -51,19 +51,29 @@ function content(command, {platform: platform = process.platform, dataDir: dataD
     return `[Desktop Entry]\nType=Application\nName=VaultOS\nComment=Start VaultOS locked in the system tray\nExec=${exec}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n`;
 }
 
+// One login item label serves every data directory, so an item is removed only by the vault
+// it starts: a test or second vault with the preference off leaves another vault's item alone.
+function belongsTo(text, {platform: platform = process.platform, dataDir: dataDir = null} = {}) {
+    if (!dataDir) return !text.includes("VAULTOS_DATA_DIR");
+    return platform === "darwin" ? text.includes(`<string>${xml(dataDir)}</string>`) : text.includes(execArg(`VAULTOS_DATA_DIR=${dataDir}`));
+}
+
+const safeArg = a => typeof a === "string" && !/[\0\n\r]/.test(a);
+
 function setEnabled(on, command, options = {}) {
     const file = itemPath(options);
     if (!file) throw new Error("Open at login is not supported on this platform");
+    if (options.dataDir != null && (!safeArg(options.dataDir) || !path.isAbsolute(options.dataDir))) throw new Error("Invalid data directory for open at login");
     if (!on) {
         try {
             const st = fs.lstatSync(file);
-            if (st.isFile() && !st.isSymbolicLink()) fs.unlinkSync(file);
+            if (st.isFile() && !st.isSymbolicLink() && st.size < 65536 && belongsTo(fs.readFileSync(file, "utf8"), options)) fs.unlinkSync(file);
         } catch (e) {
             if (e.code !== "ENOENT") throw e;
         }
         return false;
     }
-    if (!Array.isArray(command) || !command.length || command.some(a => typeof a !== "string" || /[\0\n\r]/.test(a))) throw new Error("Invalid login command");
+    if (!Array.isArray(command) || !command.length || !command.every(safeArg)) throw new Error("Invalid login command");
     fs.mkdirSync(path.dirname(file), {
         recursive: true
     });
@@ -82,6 +92,7 @@ function setEnabled(on, command, options = {}) {
 
 module.exports = {
     LABEL: LABEL,
+    belongsTo: belongsTo,
     itemPath: itemPath,
     content: content,
     setEnabled: setEnabled

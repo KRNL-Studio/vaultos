@@ -21,11 +21,14 @@ board = NSPasteboard(name: NSPasteboard.Name(name))
 switch request.action {
 case "write":
     guard let text = request.text else { exit(2) }
+    // One item carrying all three types, written with writeObjects: declareTypes would clear
+    // the pasteboard again and drop the currentHostOnly option set just before it.
+    let item = NSPasteboardItem()
+    guard item.setString(text, forType: .string),
+          item.setData(Data(), forType: concealed),
+          item.setData(Data(), forType: transient) else { exit(3) }
     board.prepareForNewContents(with: .currentHostOnly)
-    board.declareTypes([.string, concealed, transient], owner: nil)
-    guard board.setString(text, forType: .string),
-          board.setData(Data(), forType: concealed),
-          board.setData(Data(), forType: transient) else { exit(3) }
+    guard board.writeObjects([item]) else { exit(3) }
     reply(["changeCount": board.changeCount])
 case "clear":
     // Clears only if nothing was copied since our write, so a later copy by the human survives.
