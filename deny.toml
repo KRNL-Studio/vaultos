@@ -2,15 +2,23 @@
 # CI runs `cargo deny check`; see CONTRIBUTING.md.
 
 [advisories]
-ignore = []
+# Unmaintained, with no known vulnerability: compile-time macros behind age's localized
+# error messages (age -> i18n-embed-fl). They run only while building. Revisit when age
+# updates or drops them.
+ignore = [
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml: build-time only, via age's i18n macros" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2: build-time only, via age's i18n macros" },
+]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "ISC"]
+allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "ISC", "Zlib"]
 confidence-threshold = 0.9
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The workspace's own crates depend on each other by path; none is published.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

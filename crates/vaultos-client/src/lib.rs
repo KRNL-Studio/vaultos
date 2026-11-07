@@ -413,12 +413,12 @@ mod tests {
                     .map(|(_, v)| (*v).to_owned())
             }
         };
-        let t = discover_token(env(&[("VAULTOS_AGENT_TOKEN", " 0123456789abcdef ")]), d)
+        let t = discover_token(env(&[("VAULTOS_AGENT_TOKEN", " synthetic-agent-token ")]), d)
             .ok()
             .flatten();
         assert_eq!(
             t.map(|(t, s)| (t.expose().to_owned(), s)),
-            Some(("0123456789abcdef".into(), "VAULTOS_AGENT_TOKEN"))
+            Some(("synthetic-agent-token".into(), "VAULTOS_AGENT_TOKEN"))
         );
         assert!(discover_token(env(&[("VAULTOS_AGENT_TOKEN", "short")]), d).is_err());
         assert!(discover_token(env(&[("VAULTOS_AGENT", "../x")]), d).is_err());
