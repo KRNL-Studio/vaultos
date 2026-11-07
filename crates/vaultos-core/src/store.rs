@@ -680,6 +680,8 @@ impl Store {
     fn install(&mut self, keys: Keys, mut state: State, bytes: &[u8], id: Option<FileId>) {
         let opened_at = now_iso();
         let anchor = state.meta.audit_head.take();
+        // Under the log's lock, so an append in progress elsewhere is not read half-written.
+        let log_lock = audit::lock(&self.data_dir);
         let (head, problem) = match audit::verify_with(
             &self.data_dir,
             &keys.vault_id,
@@ -690,6 +692,7 @@ impl Store {
             Ok((report, _)) => (report.head, None),
             Err(e) => (None, Some(e.to_string())),
         };
+        drop(log_lock);
         self.disk_hash = Some(sha256_hex(bytes));
         self.disk_id = id;
         self.pending = None;
@@ -779,7 +782,8 @@ impl Store {
     }
 
     /// Runs `f` with every save inside it deferred to one save at the end. If `f` fails, or
-    /// that save fails, none of its changes are kept.
+    /// that save fails, none of its changes are kept, except after [`Error::Unconfirmed`],
+    /// which means the save is in place.
     pub fn batch<R>(&mut self, f: impl FnOnce(&mut Store) -> Result<R>) -> Result<R> {
         if self.batching {
             return f(self);
@@ -839,7 +843,8 @@ impl Store {
 
     /// Saves new wrapping keys together with the history entry that records the change, in one
     /// write. If that write fails, the old keys stay in place, so the caller's error is true:
-    /// the vault still opens with the old password and Secret Key.
+    /// the vault still opens with the old password and Secret Key. After
+    /// [`Error::Unconfirmed`] the new file is in place, so the new keys are kept.
     fn save_keys(&mut self, next_keys: Keys, action: &str) -> Result<()> {
         let open = self.open.as_ref().ok_or(Error::Locked)?;
         let mut state = self.pending.as_ref().unwrap_or(&open.state).clone();
@@ -908,23 +913,29 @@ impl Store {
     }
 
     /// If unlock found the audit log damaged, sets it aside and starts a new chain whose first
-    /// entry records the problem. The problem is cleared only once that entry is written.
+    /// entry records the problem (see [`audit::reset`]). The problem is cleared only once
+    /// that is done.
     fn reset_audit_if_needed(&mut self) -> Result<()> {
         let open = self.open.as_mut().ok_or(Error::Locked)?;
         let Some(problem) = open.audit_problem.clone() else {
             return Ok(());
         };
-        let head = audit::reset(
+        match audit::reset(
             &self.data_dir,
             &open.keys.vault_id,
             &open.keys.audit_seed,
+            open.saved_anchor.as_ref(),
             &problem,
             &open.opened_at,
-        )?;
-        open.audit_head = Some(head);
-        // The recorded head belonged to the log just set aside; the next save records the
-        // new chain's.
-        open.saved_anchor = None;
+        )? {
+            audit::Reset::Continued(head) => open.audit_head = head,
+            audit::Reset::Adopted(head) | audit::Reset::Restarted(head) => {
+                open.audit_head = Some(head);
+                // The recorded head belonged to the log set aside; the next save records
+                // the new chain's.
+                open.saved_anchor = None;
+            }
+        }
         open.audit_problem = None;
         Ok(())
     }
