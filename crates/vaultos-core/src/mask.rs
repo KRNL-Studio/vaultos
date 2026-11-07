@@ -63,13 +63,8 @@ impl Masker {
         let mut i = 0;
         'scan: while i < buf.len() {
             let rest = &buf[i..];
-            for n in &self.needles {
-                if rest.starts_with(n) {
-                    out.extend_from_slice(MASK);
-                    i += n.len();
-                    continue 'scan;
-                }
-            }
+            // Hold while a longer value could still begin here, so the longest one is masked
+            // however the output was cut into reads.
             if !last
                 && self
                     .needles
@@ -77,6 +72,13 @@ impl Masker {
                     .any(|n| n.len() > rest.len() && n.starts_with(rest))
             {
                 break;
+            }
+            for n in &self.needles {
+                if rest.starts_with(n) {
+                    out.extend_from_slice(MASK);
+                    i += n.len();
+                    continue 'scan;
+                }
             }
             out.push(buf[i]);
             i += 1;
@@ -123,5 +125,16 @@ mod tests {
             run(&["secret", "secret-longer"], &["a secret-longer b secret"]),
             format!("a {m} b {m}")
         );
+    }
+
+    #[test]
+    fn masks_the_longest_value_however_the_output_is_read() {
+        let m = "<concealed by VaultOS>";
+        let values = ["0000", "00000"];
+        let whole = run(&values, &["00000000!"]);
+        assert_eq!(whole, format!("{m}000!"));
+        let bytes: Vec<String> = "00000000!".chars().map(String::from).collect();
+        let bytes: Vec<&str> = bytes.iter().map(String::as_str).collect();
+        assert_eq!(run(&values, &bytes), whole);
     }
 }

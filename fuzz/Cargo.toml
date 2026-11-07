@@ -1,6 +1,6 @@
-# Fuzz targets for the parsers that read untrusted bytes. Needs nightly and cargo-fuzz:
-#   cargo install cargo-fuzz
-#   cargo +nightly fuzz run vault_file
+# Fuzz targets for the parsers that read untrusted bytes, and for masking. Run them all with
+# `sh scripts/fuzz.sh [SECONDS]`, which names the toolchain and cargo-fuzz version, or one:
+#   cargo +nightly-2026-11-01 fuzz run -O mask_stream
 [package]
 name = "vaultos-core-fuzz"
 version = "0.0.0"
@@ -34,6 +34,55 @@ bench = false
 [[bin]]
 name = "v3_envelope"
 path = "fuzz_targets/v3_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mask_stream"
+path = "fuzz_targets/mask_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "env_file"
+path = "fuzz_targets/env_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "references"
+path = "fuzz_targets/references.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otp_uri"
+path = "fuzz_targets/otp_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "site_url"
+path = "fuzz_targets/site_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_agent"
+path = "fuzz_targets/ssh_agent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_file"
+path = "fuzz_targets/import_file.rs"
 test = false
 doc = false
 bench = false

@@ -26,7 +26,9 @@ impl SecretRef {
             )
         };
         let rest = text.trim().strip_prefix(SCHEME).ok_or_else(bad)?;
-        if rest.len() > 1024 {
+        // The limit is on the decoded parts, which `to_uri` may write three times as long;
+        // the text itself may be as long as that.
+        if rest.len() > 3 * 1024 + 2 {
             return Err(bad());
         }
         let parts: Vec<&str> = rest.split('/').collect();
@@ -40,19 +42,23 @@ impl SecretRef {
             }
             Ok(d)
         };
-        match parts.as_slice() {
-            [p, i] => Ok(SecretRef {
+        let r = match parts.as_slice() {
+            [p, i] => SecretRef {
                 project: decode(p)?,
                 item: decode(i)?,
                 field: "value".into(),
-            }),
-            [p, i, f] => Ok(SecretRef {
+            },
+            [p, i, f] => SecretRef {
                 project: decode(p)?,
                 item: decode(i)?,
                 field: decode(f)?,
-            }),
-            _ => Err(bad()),
+            },
+            _ => return Err(bad()),
+        };
+        if r.project.len() + r.item.len() + r.field.len() > 1024 {
+            return Err(bad());
         }
+        Ok(r)
     }
 
     /// The reference as text, encoding what would not survive parsing.
@@ -155,6 +161,12 @@ mod tests {
         ] {
             assert!(SecretRef::parse(bad).is_err(), "{bad}");
         }
+        // A reference written out, spaces encoded, still parses; the limit is on the parts.
+        let spaced = format!("vault://P/I/a{}b", " ".repeat(1000));
+        let r = SecretRef::parse(&spaced).unwrap();
+        assert!(r.to_uri().len() > 3000);
+        assert_eq!(SecretRef::parse(&r.to_uri()).unwrap(), r);
+        assert!(SecretRef::parse(&format!("vault://P/I/{}", "x".repeat(1100))).is_err());
     }
 
     #[test]

@@ -4,6 +4,23 @@
 
 Please use [GitHub private vulnerability reporting](https://github.com/rohit3a/vaultos/security/advisories/new). Do not put live credentials, vault files, machine private keys, personal paths, or full audit logs in public issues. Send a minimal synthetic reproduction, affected version, expected behavior, and impact. There is no paid response SLA or bug bounty. Only the latest preview is maintained; fixes may require upgrading.
 
+## Threat model
+
+VaultOS keeps a developer's secrets on their own computer and lets their programs, agents and browser use them without handing out more than each needs. The parts that hold keys are one Rust owner process at a time (the desktop app, the background service or `vaultosd`) and the vault file; everything else (the window's pages, the CLIs, the MCP bridge, `vaultos-agent`, the browser extension and its native host, `vaultos-ssh-sign`) asks the owner over a private socket. Who VaultOS defends against, and how far:
+
+| Adversary | Can | VaultOS | Not covered |
+| --- | --- | --- | --- |
+| Someone with a copy of the vault file (a backup, a lost disk, the sync remote) | Read and change files at rest | Argon2id with a stored cost floor; with a Secret Key, the password alone is not enough; every box authenticated and bound to its place; a MAC over the file | A weak password without a Secret Key; replacing the whole file with an older copy |
+| An agent with a token (MCP, `vaultos-agent`) | Ask the owner anything | Scopes, approved projects and folders, allowed commands, just-in-time grants, all checked in the owner; values never returned without `reveal`; run output masked | What an allowed program does with values it is given (see **Run scope**) |
+| A program started with values | Read its environment | Clean environment, filtered `PATH`, process group killed, stopped on lock | Encoding values past the masker; a child that leaves the group |
+| A web page or another extension | Script the page, frame it, message the extension | Fill only on the login's site by the browser-reported origin, trusted clicks in a closed shadow root, pairing confirmed by the human, agents refused | Once filled, the page has the value, as with any password manager |
+| The sync remote or its host | Read, withhold, replay or change repository files | age encryption to pinned devices, signed manifests and heartbeats, rollback checks | Withholding pushes; which devices sync and when |
+| Other users on the computer | Read shared folders, connect to sockets | 0700/0600 permissions, socket peer uid check, session token | Root |
+| A hostile import, env or template file | Feed parsers odd bytes | Size limits and fuzzed parsers; an import is parsed into a preview without touching the vault | |
+| Software running as you, root, or a debugger | Read memory, files, tokens, the Keychain | Locked and zeroed key memory, hardening against core dumps and debuggers where the OS allows | This is the trusted local account boundary below |
+
+Changes to the vault and every use of a value by an agent, a program, the browser or an SSH client are recorded in the signed `audit-v4.log`. The sections below give the details; [docs/audit](docs/audit/README.md) maps each boundary to the code that enforces it.
+
 ## What VaultOS protects
 
 VaultOS 0.3 is written in Rust: the desktop app (a Tauri shell around the same pages), the agent API, the CLIs, the MCP bridge and sync all use `crates/vaultos-core` and vault format v4. See [the architecture notes](docs/ARCHITECTURE.md) for the key hierarchy.
@@ -85,6 +102,6 @@ Nothing upgrades automatically. The upgrade runs only when the owner asks (**Upg
 
 ## Assurance
 
-This is a preview, unsigned and unnotarized unless its release notes say otherwise, and not an independently audited password manager. Automated tests cover encryption failures, stale writes and reloads, ownership/scopes, socket authentication, owner-only requests, service hand-over and manual-lock blocking, unsafe export paths and shell values, sync tampering/replay/conflicts, autosync halting, and the desktop flow (setup, reveal, lock, unlock races, Quick Access isolation, close-to-menu-bar and lock on sleep). Tests and dependency advisories cannot establish that all vulnerabilities are absent. See release notes for exact validation and outstanding platform coverage.
+This is a preview, unsigned and unnotarized unless its release notes say otherwise, and not an independently audited password manager. Automated tests cover encryption failures, stale writes and reloads, ownership/scopes, socket authentication, owner-only requests, service hand-over and manual-lock blocking, unsafe export paths and shell values, sync tampering/replay/conflicts, autosync halting, and the desktop flow (setup, reveal, lock, unlock races, Quick Access isolation, close-to-menu-bar and lock on sleep). Fuzz targets for the parsers of untrusted input and for masking run briefly on every pull request and for ten minutes each nightly, and known-answer vectors pin the format's cryptography. Tests, fuzzing and dependency advisories cannot establish that all vulnerabilities are absent. See release notes for exact validation and outstanding platform coverage. For a reviewer, [docs/audit](docs/audit/README.md) collects the cryptographic specification, test vectors and trust boundaries with the code that enforces each.
 
 The desktop follows the [Tauri security guidance](https://v2.tauri.app/security/). Contributions that weaken these boundaries require explicit design discussion and regression coverage.

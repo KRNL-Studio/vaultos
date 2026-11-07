@@ -6,7 +6,7 @@ This is an **unsigned evaluation preview** unless the download is named `notariz
 
 - macOS `arm64` (Apple Silicon) and `x64` (Intel) ZIPs with **VaultOS.app**. Deployment target: macOS 13+. The MCP bridge and CLIs are inside it, in `VaultOS.app/Contents/Helpers`.
 - Linux `x64` tarball. Install it per user with `scripts/install-linux.sh --from <tarball>` from a source checkout; it needs the system's WebKitGTK 4.1. See the README.
-- Verify the matching `.sha256` before opening. A CycloneDX JSON inventory of the Rust crates is attached for each build.
+- Verify the matching `.sha256` before opening. A CycloneDX JSON inventory of the Rust crates is attached for each build. Each archive and inventory also has signed GitHub build provenance: `gh attestation verify <download> --repo KRNL-Studio/vaultos` checks that the release workflow of this repository built it from the tagged source. Neither replaces Apple notarization; the builds remain unsigned.
 - Builds use a separate preview data, Keychain and Secret Service namespace. Nothing installs a login service or imports another vault on its own.
 
 ## New in 0.3
