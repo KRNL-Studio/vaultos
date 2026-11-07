@@ -23,7 +23,7 @@ use std::os::unix::fs::OpenOptionsExt;
 
 pub const FILE: &str = "audit-v4.log";
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_LOG_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

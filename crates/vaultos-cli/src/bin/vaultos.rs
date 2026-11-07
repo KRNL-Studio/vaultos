@@ -723,19 +723,32 @@ impl Ctx {
         }
         let store = self.store()?;
         let dir = store.data_dir();
-        fs_safe::private_dir(target)?;
-        let bytes = fs_safe::read_regular(&dir.join(VAULT_FILE), fs_safe::MAX_VAULT_BYTES)?;
-        fs_safe::atomic_write(&target.join(VAULT_FILE), &bytes)?;
-        // The audit log after the vault, under its lock, so it holds every entry the copied
-        // vault records. The sync index keeps a restored device from accepting manifests
-        // older than the ones it had already seen.
-        let _log = vaultos_core::audit::lock(dir)?;
-        for name in [vaultos_core::audit::FILE, vaultos_sync::INDEX_FILE] {
+        let optional = |name: &str, max: u64| -> Result<Option<(String, Vec<u8>)>> {
             let file = dir.join(name);
             if file.exists() {
-                let bytes = fs_safe::read_regular(&file, fs_safe::MAX_VAULT_BYTES)?;
-                fs_safe::atomic_write(&target.join(name), &bytes)?;
+                Ok(Some((name.to_owned(), fs_safe::read_regular(&file, max)?)))
+            } else {
+                Ok(None)
             }
+        };
+        // Read in this order while sync or agents may still write. The sync index before the
+        // vault: an index older than the vault only re-checks records, one newer would make a
+        // merge base of a version the copied vault never had. The audit log after it, under
+        // its lock, so it holds every entry the copied vault records. Nothing is written
+        // until all three are read.
+        let index = optional(vaultos_sync::INDEX_FILE, fs_safe::MAX_VAULT_BYTES)?;
+        let vault = fs_safe::read_regular(&dir.join(VAULT_FILE), fs_safe::MAX_VAULT_BYTES)?;
+        let log = {
+            let _lock = vaultos_core::audit::lock(dir)?;
+            optional(
+                vaultos_core::audit::FILE,
+                vaultos_core::audit::MAX_LOG_BYTES,
+            )?
+        };
+        fs_safe::private_dir(target)?;
+        fs_safe::atomic_write(&target.join(VAULT_FILE), &vault)?;
+        for (name, bytes) in index.into_iter().chain(log) {
+            fs_safe::atomic_write(&target.join(name), &bytes)?;
         }
         say("Encrypted vault, audit log and sync index backed up. Restoring needs the password and Secret Key; agent tokens and machine credentials were not copied.")
     }
@@ -846,8 +859,8 @@ fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
             } else {
                 "enrol_agent"
             };
-            // The token file and the audit entry are written inside the batch, before the
-            // save: if either fails, the vault keeps the old token and nothing changes.
+            // The audit entry is written before the save, so no change goes unaudited. The token
+            // file only after it: a token the vault never saved would replace a working one.
             let issued = store.batch(|s| {
                 let issued = match &existing {
                     None => {
@@ -867,10 +880,10 @@ fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
                         s.reissue_agent(&current.id)?
                     }
                 };
-                write_token(&token_file, &issued.token).map_err(to_core)?;
                 s.audit(action, &format!("{} via {VIA}", issued.name), HUMAN)?;
                 Ok(issued)
             })?;
+            write_token(&token_file, &issued.token).map_err(unsaved_token)?;
             let mut out = summary(store, &issued.id)?;
             out["tokenFile"] = json!(token_file);
             out["reissued"] = json!(reissued);
@@ -918,6 +931,14 @@ fn to_core(f: Fail) -> Error {
     Error::Invalid(f.message)
 }
 
+/// A token the vault saved but that could not be written: the old one no longer works.
+fn unsaved_token(f: Fail) -> Fail {
+    Fail::new(format!(
+        "The new token is in effect but could not be written ({}); the previous token no longer works. Run the command again to issue another.",
+        f.message
+    ))
+}
+
 fn pending(ctx: &Ctx, cmd: PendingCommand) -> Result<()> {
     let usage = "usage: vaultos pending approve PROJECT KEY | --all [--project P]";
     if let PendingCommand::Approve {
@@ -953,11 +974,9 @@ fn approver(ctx: &Ctx, cmd: ApproverCommand) -> Result<()> {
     let store = &mut open.store;
     match cmd {
         ApproverCommand::Set { token_file } => {
-            // Written before the save, so a failed write leaves the old relay token working.
-            store.batch(|s| {
-                let token = s.issue_approver_token()?;
-                write_token(&token_file, &token).map_err(to_core)
-            })?;
+            // Written after the save, so the file never holds a token the vault does not know.
+            let token = store.issue_approver_token()?;
+            write_token(&token_file, &token).map_err(unsaved_token)?;
             emit(&json!({ "approverConfigured": true, "tokenFile": token_file }))
         }
         ApproverCommand::Clear => {

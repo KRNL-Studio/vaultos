@@ -62,7 +62,49 @@ pub struct Commit {
 }
 
 fn first_lines(s: &str) -> String {
-    s.trim().lines().take(4).collect::<Vec<_>>().join(" ")
+    scrub_urls(&s.trim().lines().take(4).collect::<Vec<_>>().join(" "))
+}
+
+/// Git's messages quote remote URLs in full. A user name and password, or a token in a query
+/// string, would reach the daemon's log and the audit log, so both are masked.
+fn scrub_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>' | '`'))
+            .unwrap_or(tail.len());
+        let (url, after) = tail.split_at(end);
+        let host_end = url.find(['/', '?', '#']).unwrap_or(url.len());
+        let (authority, path) = url.split_at(host_end);
+        match authority.rfind('@') {
+            Some(at) => {
+                out.push_str("***@");
+                out.push_str(&authority[at + 1..]);
+            }
+            None => out.push_str(authority),
+        }
+        match path.find(['?', '#']) {
+            Some(q) => {
+                out.push_str(&path[..q]);
+                out.push_str("?***");
+            }
+            None => out.push_str(path),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Git's own control files, wherever they are.
+fn control_file(rel: &str) -> bool {
+    matches!(
+        rel.rsplit('/').next().unwrap_or(rel),
+        ".gitignore" | ".gitattributes" | ".gitmodules"
+    )
 }
 
 /// Runs `git` with the arguments every sync command uses. Every path VaultOS hands Git is a
@@ -552,6 +594,25 @@ impl GitRepo {
             if !rb.ok {
                 return rb;
             }
+            // The rebase brought in commits nothing has verified yet. Their ciphertext is
+            // checked by the next pull before anything is applied; a Git control file changes
+            // what this checkout commits from now on, so it stops the push here.
+            match self.tracked_paths(&["."]) {
+                Ok(all) => {
+                    let control: Vec<String> =
+                        all.into_iter().filter(|f| control_file(f)).collect();
+                    if !control.is_empty() {
+                        return Remote::fail(
+                            "SIGNATURE_INVALID",
+                            format!(
+                                "The remote added Git control files that change what sync commits; remove them with git rm: {}",
+                                control.join(", ")
+                            ),
+                        );
+                    }
+                }
+                Err(e) => return Remote::fail("GIT_HISTORY_DIVERGED", e),
+            }
             r = self.net(&["push", "--quiet", &remote, &refspec], &remote);
         }
         if !r.ok {
@@ -606,5 +667,28 @@ impl GitRepo {
             changed: true,
             ..Remote::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_never_carry_url_credentials() {
+        let e = "fatal: unable to access 'https://user:synthetic-pass@git.example.invalid/r.git?token=synthetic-token': Could not resolve host";
+        let s = scrub_urls(e);
+        assert!(
+            !s.contains("synthetic-pass") && !s.contains("synthetic-token"),
+            "{s}"
+        );
+        assert!(
+            s.contains("https://***@git.example.invalid/r.git?***'"),
+            "{s}"
+        );
+        assert_eq!(
+            scrub_urls("ssh://git.example.invalid/r.git and git@host:r.git"),
+            "ssh://git.example.invalid/r.git and git@host:r.git"
+        );
     }
 }

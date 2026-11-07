@@ -232,18 +232,17 @@ impl AutoSync {
         }
     }
 
-    /// Lets no new round start and waits up to `limit` for a running one to finish. False if
-    /// one is still running.
-    pub(crate) fn stop(&self, limit: Duration) -> bool {
+    /// Lets no new round start and waits for a running one to finish. Every Git command in a
+    /// round is killed at its own time limit, so this ends; stopping sooner would release the
+    /// vault while Git still works in the checkout, where another owner could start.
+    pub(crate) fn stop(&self) {
         self.st().stopping = true;
-        let deadline = Instant::now() + limit;
+        if self.st().running {
+            eprintln!("vaultosd: waiting for the sync round in progress to finish");
+        }
         while self.st().running {
-            if Instant::now() >= deadline {
-                return false;
-            }
             std::thread::sleep(Duration::from_millis(50));
         }
-        true
     }
 
     /// Runs until the daemon stops: waits for the next round, or for a change to look again.

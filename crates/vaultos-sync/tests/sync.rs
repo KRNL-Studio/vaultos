@@ -306,6 +306,52 @@ fn a_deletion_stays_deleted_when_a_device_that_missed_it_pushes_the_record_again
 }
 
 #[test]
+fn an_edit_made_after_a_deletion_is_kept_and_its_file_cannot_be_dropped() {
+    let (root, repo, mut a, mut b) = pair();
+    let mut c = Dev::new(root.path(), "c", &repo);
+    let ic = c.sync.init(&mut c.store, "Machine C").unwrap();
+    c.trust(&a.identity());
+    c.trust(&b.identity());
+    a.trust(&ic);
+    b.trust(&ic);
+    a.set("Example", "KEY", "synthetic");
+    a.force("Example", "KEY", "synthetic", 1, "2026-01-02T03:04:05.678Z");
+    a.push();
+    b.pull();
+    c.pull();
+    a.store.delete_item("Example", "KEY", "human").unwrap();
+    a.push();
+    // B edits the record later than A deleted it, without having pulled the deletion.
+    b.force(
+        "Example",
+        "KEY",
+        "edited-after",
+        2,
+        "2030-01-01T00:00:00.000Z",
+    );
+    assert_eq!(b.push().written, 1);
+    assert_eq!(a.pull().added.len(), 1);
+    assert_eq!(a.value("Example", "KEY"), "edited-after");
+    // C still has the version from before the deletion: the later edit wins there too.
+    assert!(c.pull().deleted.is_empty());
+    assert_eq!(c.value("Example", "KEY"), "edited-after");
+
+    // The tombstone of the same name does not excuse a current record file going missing.
+    let record = std::fs::read_dir(repo.join("records"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_file(record).unwrap();
+    let problems = a.sync.verify_manifests(&a.store, false).unwrap();
+    assert!(
+        problems.contains(&"Signed ciphertext is missing".to_owned()),
+        "{problems:?}"
+    );
+}
+
+#[test]
 fn refuses_ciphertext_a_later_push_replaced_even_when_a_stale_manifest_signs_it() {
     let (root, repo, mut a, mut b) = pair();
     let mut c = Dev::new(root.path(), "c", &repo);

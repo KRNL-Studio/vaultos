@@ -29,7 +29,7 @@ use vaultos_core::{Error, Store};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const GUARD_INTERVAL: Duration = Duration::from_secs(10);
 const FAILED_UNLOCK_DELAY: Duration = Duration::from_secs(1);
-/// The longest a sync round is given: a connection's limit, and shutdown's wait for one.
+/// The longest a connection is served: a manual sync round is the slowest request.
 const ROUND_LIMIT: Duration = Duration::from_secs(150);
 
 #[derive(Clone, Debug)]
@@ -170,9 +170,7 @@ pub async fn run(cfg: Config) -> Result<(), Error> {
     // vault. Then lock before releasing anything, and remove what clients use to find it.
     let s = shared.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        if !s.autosync.stop(ROUND_LIMIT) {
-            eprintln!("vaultosd: a sync round is still running; stopping without it");
-        }
+        s.autosync.stop();
         s.with_store(Store::lock)
     })
     .await;

@@ -1090,12 +1090,11 @@ impl Sync {
                 }
             }
         }
+        // A push that removes a file lists it no more, which supersedes its entry; a file
+        // with a current entry was never removed by a device, so it must be here.
         for name in valid.keys() {
             if !self.rel(name).exists() {
-                let tomb = format!("tombstones/{}", name.rsplit('/').next().unwrap_or(""));
-                if !name.starts_with("records/") || !self.rel(&tomb).exists() {
-                    problem("Signed ciphertext is missing".into());
-                }
+                problem("Signed ciphertext is missing".into());
             }
         }
         if problems.is_empty() && remember {
@@ -1666,10 +1665,11 @@ impl Sync {
                 plan.unchanged += 1;
                 continue;
             }
-            if remote_tombs
-                .get(reference)
-                .is_some_and(|t| later(ms(&t.deleted_at), ms_or_epoch(&lo.record.updated_at)))
-            {
+            // Here too a deletion yields to a later edit, on either side.
+            if remote_tombs.get(reference).is_some_and(|t| {
+                later(ms(&t.deleted_at), ms_or_epoch(&lo.record.updated_at))
+                    && later(ms(&t.deleted_at), ms_or_epoch(&rp.record.updated_at))
+            }) {
                 plan.deleted.push(reference.clone());
                 continue;
             }
@@ -1714,7 +1714,10 @@ impl Sync {
             if plan.deleted.contains(reference) {
                 continue;
             }
-            if later(ms(&t.deleted_at), ms_or_epoch(&lo.record.updated_at)) {
+            let edited_there = remote
+                .get(reference)
+                .is_some_and(|rp| !later(ms(&t.deleted_at), ms_or_epoch(&rp.record.updated_at)));
+            if !edited_there && later(ms(&t.deleted_at), ms_or_epoch(&lo.record.updated_at)) {
                 plan.deleted.push(reference.clone());
             }
         }
