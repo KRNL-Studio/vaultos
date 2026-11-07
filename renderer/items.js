@@ -535,6 +535,44 @@ async function renderWatchtower() {
         check.textContent = "Check again";
     };
     breach.append(check, out);
+    const leaks = panel(scroll, "Leaked values");
+    leaks.appendChild(el(`<div class="note">Looks for your vault's values in a folder's files (.git and node_modules are skipped). Nothing leaves this device. For staged changes and Git history, use <span class="mono">vaultos scan --staged</span> or <span class="mono">--history</span> with a saved index.</div>`));
+    const scanBtn = el(`<button class="btn sm">Scan a folder…</button>`);
+    const saveIndex = el(`<button class="btn ghost sm">Save index for vaultos scan</button>`);
+    const found = el(`<div></div>`);
+    scanBtn.onclick = async () => {
+        scanBtn.disabled = true;
+        scanBtn.textContent = "Scanning…";
+        found.textContent = "";
+        try {
+            const r = await window.vault.scanFolder();
+            if (revision !== renderVersion) return;
+            if (r.ok) {
+                const summary = `${r.files.toLocaleString()} files in ${r.folder}${r.incomplete ? " (stopped at the limit)" : ""}`;
+                if (!r.findings.length) found.appendChild(el(`<div class="note good"></div>`)).textContent = `No values from your vault in ${summary}.`;
+                else found.appendChild(el(`<div class="note bad"></div>`)).textContent = `${r.findings.length} found in ${summary}. Rotate any value that was shared or committed.`;
+                for (const f of r.findings) {
+                    const item = f.items[0] || {};
+                    found.appendChild(row({ project: item.project, key: item.item || "Unknown item" }, `${f.path}:${f.line}`));
+                }
+            }
+        } catch (e) {
+            found.appendChild(el(`<div class="err"></div>`)).textContent = cleanError(e);
+        }
+        scanBtn.disabled = false;
+        scanBtn.textContent = "Scan a folder…";
+    };
+    saveIndex.onclick = async () => {
+        found.textContent = "";
+        try {
+            const r = await human("saveLeakIndex");
+            if (revision !== renderVersion) return;
+            found.appendChild(el(`<div class="note good"></div>`)).textContent = `Saved an index of ${r.indexed} values (keyed hashes only). Save it again after adding secrets.`;
+        } catch (e) {
+            found.appendChild(el(`<div class="err"></div>`)).textContent = cleanError(e);
+        }
+    };
+    leaks.append(scanBtn, saveIndex, found);
     $app.appendChild(scroll);
 }
 

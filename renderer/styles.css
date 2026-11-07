@@ -351,6 +351,7 @@ select:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .badge.fav { color: var(--amber-text); background: var(--amber-tint); }
 .badge.tag { font-family: var(--font-mono); }
 .note.good { color: var(--good-text); }
+.note.bad { color: var(--warn-text); }
 
 .meter { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; color: var(--soft); min-height: 14px; }
 .meter .bar { flex: 0 0 72px; height: 4px; border-radius: 2px; background: var(--divider); overflow: hidden; }

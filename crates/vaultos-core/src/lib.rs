@@ -25,6 +25,7 @@ pub mod generator;
 pub mod hardening;
 pub mod history;
 pub mod import;
+pub mod leak;
 pub mod mask;
 pub mod model;
 pub mod paths;

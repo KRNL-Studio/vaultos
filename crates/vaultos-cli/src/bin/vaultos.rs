@@ -126,6 +126,25 @@ enum Command {
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+    /// Look for the vault's values in files, in what is staged for the next commit, or in Git
+    /// history, using a saved index of keyed hashes (no values are stored). Exits 1 when it
+    /// finds any; for a pre-commit hook: vaultos scan --staged
+    Scan {
+        /// Files or folders (default: the current folder); .git and node_modules are skipped
+        paths: Vec<PathBuf>,
+        /// What is staged for the next commit
+        #[arg(long, conflicts_with_all = ["history", "paths"])]
+        staged: bool,
+        /// The lines every commit on every branch added
+        #[arg(long, conflicts_with = "paths")]
+        history: bool,
+        /// Rebuild the index from the vault first (do this after adding secrets)
+        #[arg(long)]
+        update_index: bool,
+        /// Name the items found, which needs the vault (Touch ID while the app owns it)
+        #[arg(long)]
+        names: bool,
+    },
     /// Run a command with secrets in its environment: a project's values, env files whose
     /// values are vault:// references, and variables set to references. Their values are
     /// masked in its output
@@ -1312,6 +1331,13 @@ fn run(cli: Cli) -> Result<()> {
                 .map_err(|_| Fail::new("cannot write to stdout"))
         }
         Command::Render { template, output } => ctx.render(&template, output.as_deref()),
+        Command::Scan {
+            paths,
+            staged,
+            history,
+            update_index,
+            names,
+        } => ctx.scan(&paths, staged, history, update_index, names),
         Command::Run {
             project,
             keys,
@@ -1357,6 +1383,126 @@ fn run(cli: Cli) -> Result<()> {
         Command::SecretKey(c) => secret_key(&ctx, c),
         Command::Sync(c) => sync(&ctx, c),
     }
+}
+
+fn git(args: &[&str]) -> Result<Vec<u8>> {
+    let out = Process::new("git")
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| Fail::new("cannot run git"))?;
+    if !out.status.success() {
+        return Err(Fail::new("git failed; run this inside a Git repository"));
+    }
+    Ok(out.stdout)
+}
+
+/// What is staged for the next commit, as a pre-commit hook would check it.
+fn scan_staged(index: &vaultos_core::leak::Index) -> Result<vaultos_core::leak::TreeScan> {
+    use vaultos_core::leak::{is_text, Finding, TreeScan, MAX_FILE};
+    let mut out = TreeScan::default();
+    let names = git(&[
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z",
+        "--diff-filter=ACMR",
+    ])?;
+    for name in names.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+        let name = String::from_utf8_lossy(name).into_owned();
+        out.files += 1;
+        let bytes = Zeroizing::new(git(&["show", &format!(":{name}")])?);
+        if bytes.len() as u64 > MAX_FILE || !is_text(&bytes) {
+            out.skipped += 1;
+            continue;
+        }
+        for h in index.scan(&bytes) {
+            out.findings.push(Finding {
+                path: name.clone(),
+                commit: None,
+                line: h.line,
+                column: h.column,
+                sources: h.sources,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The lines every commit added, on every branch: a value removed later is still in the
+/// history anyone with the repository has.
+fn scan_history(index: &vaultos_core::leak::Index) -> Result<vaultos_core::leak::TreeScan> {
+    use std::io::BufRead;
+    use vaultos_core::leak::{Finding, TreeScan, MAX_FINDINGS};
+    let mut child = Process::new("git")
+        .args([
+            "log",
+            "--all",
+            "-p",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=0",
+            "--format=%x00commit %H",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| Fail::new("cannot run git"))?;
+    let mut out = TreeScan::default();
+    let Some(stdout) = child.stdout.take() else {
+        return Err(Fail::new("cannot read git's output"));
+    };
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut line = Zeroizing::new(Vec::new());
+    let (mut commit, mut path, mut at) = (String::new(), None::<String>, 0usize);
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let l = line.strip_suffix(b"\n").unwrap_or(&line);
+        if let Some(c) = l.strip_prefix(b"\0commit ") {
+            commit = String::from_utf8_lossy(c).into_owned();
+            out.files += 1;
+        } else if let Some(p) = l.strip_prefix(b"+++ ") {
+            path = p
+                .strip_prefix(b"b/")
+                .map(|p| String::from_utf8_lossy(p).into_owned());
+        } else if l.starts_with(b"@@ ") {
+            // @@ -a,b +c,d @@: added lines are numbered from c.
+            at = String::from_utf8_lossy(l)
+                .split(' ')
+                .find_map(|w| w.strip_prefix('+'))
+                .and_then(|w| w.split(',').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+        } else if let (Some(added), Some(p)) = (l.strip_prefix(b"+"), &path) {
+            for h in index.scan(added) {
+                out.findings.push(Finding {
+                    path: p.clone(),
+                    commit: Some(commit.clone()),
+                    line: at,
+                    column: h.column,
+                    sources: h.sources,
+                });
+            }
+            at += 1;
+            if out.findings.len() >= MAX_FINDINGS {
+                out.incomplete = true;
+                let _ = child.kill();
+                break;
+            }
+        }
+    }
+    let status = child.wait().map_err(|_| Fail::new("git failed"))?;
+    if !status.success() && !out.incomplete {
+        return Err(Fail::new("git failed; run this inside a Git repository"));
+    }
+    Ok(out)
 }
 
 /// What [`Ctx::values`] returns: the references' values in order, and a project's values.
@@ -1409,27 +1555,7 @@ impl Ctx {
                 body["env"]["keys"] = json!(k);
             }
         }
-        let mut with_password = self.password_stdin;
-        let reply = loop {
-            if with_password {
-                let store = self.store()?;
-                let password = self.passwords(1, false)?.remove(0);
-                body["password"] = json!(password.expose());
-                if let Some(k) = self.secret_key(&store)? {
-                    body["secretKey"] = json!(k.display().expose());
-                }
-            }
-            let reply = client.owner("POST", "/human/values", Some(&body));
-            for field in ["password", "secretKey"] {
-                if let Some(Value::String(s)) = body.get_mut(field) {
-                    zeroize::Zeroize::zeroize(s);
-                }
-            }
-            match reply {
-                Err(e) if e.status == Some(401) && !with_password => with_password = true,
-                other => break other?,
-            }
-        };
+        let reply = self.ask_owner(&client, body)?;
         let text = |v: &Value| Zeroizing::new(v.as_str().unwrap_or_default().to_owned());
         let values = reply["values"]
             .as_array()
@@ -1462,6 +1588,131 @@ impl Ctx {
             env: pairs,
             held,
         })
+    }
+
+    /// `POST /human/values` to the running owner. Without `--password-stdin` the owner
+    /// confirms with Touch ID; when it cannot, this asks for the master password and retries.
+    fn ask_owner(&self, client: &Client, mut body: Value) -> Result<Value> {
+        let mut with_password = self.password_stdin;
+        loop {
+            if with_password {
+                let store = self.store()?;
+                let password = self.passwords(1, false)?.remove(0);
+                body["password"] = json!(password.expose());
+                if let Some(k) = self.secret_key(&store)? {
+                    body["secretKey"] = json!(k.display().expose());
+                }
+            }
+            let reply = client.owner("POST", "/human/values", Some(&body));
+            for field in ["password", "secretKey"] {
+                if let Some(Value::String(s)) = body.get_mut(field) {
+                    zeroize::Zeroize::zeroize(s);
+                }
+            }
+            match reply {
+                Err(e) if e.status == Some(401) && !with_password => with_password = true,
+                other => return Ok(other?),
+            }
+        }
+    }
+
+    /// `vaultos scan`: the saved leak index against files, staged changes or history.
+    fn scan(
+        &self,
+        paths: &[PathBuf],
+        staged: bool,
+        history: bool,
+        update: bool,
+        names: bool,
+    ) -> Result<()> {
+        use vaultos_core::leak::{scan_tree, Index};
+        let client = self.owner_client();
+        let owner = client.live(Duration::from_millis(1500)).is_some();
+        if update {
+            let indexed = if owner {
+                self.ask_owner(&client, json!({ "leakIndex": true, "purpose": "scan" }))?["indexed"]
+                    .clone()
+            } else {
+                let mut open = self.open()?;
+                let index = open.store.leak_index(HUMAN)?;
+                index.save(&self.data_dir)?;
+                json!(index.len())
+            };
+            eprintln!("vaultos: indexed {indexed} values");
+        }
+        let index = Index::load(&self.data_dir)?.ok_or_else(|| Fail {
+            message: "No leak index yet. Run `vaultos scan --update-index` once, and again after adding secrets".into(),
+            code: 2,
+        })?;
+        let mut report = if staged {
+            scan_staged(&index)?
+        } else if history {
+            scan_history(&index)?
+        } else {
+            let roots = if paths.is_empty() {
+                vec![PathBuf::from(".")]
+            } else {
+                paths.to_vec()
+            };
+            let mut all = vaultos_core::leak::TreeScan::default();
+            for root in roots {
+                let root = std::path::absolute(&root).map_err(|_| Fail::usage("Invalid path"))?;
+                if !root.exists() {
+                    return Err(Fail::usage(format!("{} does not exist", root.display())));
+                }
+                let one = scan_tree(&index, &root, &self.data_dir)?;
+                all.findings.extend(one.findings);
+                all.files += one.files;
+                all.skipped += one.skipped;
+                all.incomplete |= one.incomplete;
+            }
+            all
+        };
+        report.findings.truncate(vaultos_core::leak::MAX_FINDINGS);
+        let mut out = serde_json::to_value(&report)
+            .map_err(|_| Fail::new("The report could not be encoded"))?;
+        out["indexedAt"] = json!(index.created_at);
+        if names && !report.findings.is_empty() {
+            let mut sources: Vec<vaultos_core::leak::Source> = Vec::new();
+            for f in &report.findings {
+                for src in &f.sources {
+                    if !sources.contains(src) {
+                        sources.push(src.clone());
+                    }
+                }
+            }
+            let named: Vec<Value> = if owner {
+                let r = self.ask_owner(&client, json!({ "names": sources, "purpose": "scan" }))?;
+                r["names"].as_array().cloned().unwrap_or_default()
+            } else {
+                let open = self.open()?;
+                open.store
+                    .name_sources(&sources)?
+                    .into_iter()
+                    .map(|n| serde_json::to_value(n).unwrap_or_default())
+                    .collect()
+            };
+            if let Some(list) = out["findings"].as_array_mut() {
+                for (f, finding) in list.iter_mut().zip(&report.findings) {
+                    f["items"] = finding
+                        .sources
+                        .iter()
+                        .filter_map(|src| sources.iter().position(|x| x == src))
+                        .map(|i| named.get(i).cloned().unwrap_or_default())
+                        .collect();
+                }
+            }
+        }
+        emit(&out)?;
+        match report.findings.len() {
+            0 => Ok(()),
+            n => {
+                eprintln!(
+                    "vaultos: found {n} value(s) from the vault; rotate any that were shared"
+                );
+                Err(Fail::quiet(1))
+            }
+        }
     }
 
     fn render(&self, template: &Path, output: Option<&Path>) -> Result<()> {

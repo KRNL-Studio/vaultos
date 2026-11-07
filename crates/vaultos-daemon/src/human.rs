@@ -2,9 +2,11 @@
 //! `run`) while the app or `vaultosd` owns the vault. The session token is not enough, since
 //! any process of the user can read it: each request is confirmed with Touch ID by the app,
 //! or carries the master password (and Secret Key). Nothing is remembered between requests.
+//! `vaultos scan` uses it too, to rebuild the leak index and to name the items it found.
 
 use crate::api::Reply;
 use serde_json::{json, Map, Value};
+use vaultos_core::leak::Source;
 use vaultos_core::model::HUMAN;
 use vaultos_core::refs::{SecretRef, MAX_REFS};
 use vaultos_core::{Error, SecretKey, SecretString, Store};
@@ -13,6 +15,10 @@ use vaultos_core::{Error, SecretKey, SecretString, Store};
 pub struct Ask {
     pub refs: Vec<SecretRef>,
     pub env: Option<(String, Option<Vec<String>>)>,
+    /// Rebuild and save the leak index.
+    pub leak_index: bool,
+    /// Name the items behind leak findings.
+    pub names: Vec<Source>,
     pub purpose: String,
     pub password: Option<SecretString>,
     pub secret_key: Option<SecretKey>,
@@ -81,7 +87,15 @@ impl Ask {
             }
             Some(_) => return Err(bad("Invalid env")),
         };
-        if refs.is_empty() && env.is_none() {
+        let leak_index = b.get("leakIndex") == Some(&Value::Bool(true));
+        let names: Vec<Source> = match b.get("names") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(v) => serde_json::from_value(v.clone()).map_err(|_| bad("Invalid names"))?,
+        };
+        if names.len() > vaultos_core::leak::MAX_FINDINGS {
+            return Err(bad("Too many names"));
+        }
+        if refs.is_empty() && env.is_none() && !leak_index && names.is_empty() {
             return Err(bad("Nothing was asked for"));
         }
         let purpose = clean(b.get("purpose").and_then(Value::as_str).unwrap_or(""));
@@ -100,6 +114,8 @@ impl Ask {
         Ok(Ask {
             refs,
             env,
+            leak_index,
+            names,
             purpose,
             password,
             secret_key,
@@ -108,6 +124,14 @@ impl Ask {
 
     /// The Touch ID sheet's reason, completing "VaultOS is trying to …".
     pub fn reason(&self, who: &Peer) -> String {
+        if self.refs.is_empty() && self.env.is_none() {
+            let what = if self.leak_index {
+                "index your values for leak scanning"
+            } else {
+                "name the items behind leak findings"
+            };
+            return format!("{what}, for {}", who.shown());
+        }
         let mut projects: Vec<&str> = self.refs.iter().map(|r| r.project.as_str()).collect();
         if let Some((p, _)) = &self.env {
             projects.push(p);
@@ -221,6 +245,18 @@ pub fn values(store: &mut Store, ask: &Ask, who: &Peer) -> Reply {
             body.insert(
                 "values".into(),
                 values.iter().map(|v| json!(v.as_str())).collect(),
+            );
+        }
+        if ask.leak_index {
+            let index = store.leak_index(HUMAN)?;
+            index.save(store.data_dir())?;
+            body.insert("indexed".into(), json!(index.len()));
+        }
+        if !ask.names.is_empty() {
+            let named = store.name_sources(&ask.names)?;
+            body.insert(
+                "names".into(),
+                serde_json::to_value(named).unwrap_or_default(),
             );
         }
         if let Some((project, keys)) = &ask.env {

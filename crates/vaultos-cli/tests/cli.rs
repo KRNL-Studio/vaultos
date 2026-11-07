@@ -881,3 +881,78 @@ fn asks_the_running_owner_to_confirm() {
     assert_eq!(env.human(&["stop"], "").code, 0);
     daemon.join().unwrap().unwrap();
 }
+
+#[test]
+fn scans_folders_staged_changes_and_history_for_values() {
+    let env = Env::with_vault();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Synthetic",
+                "-c",
+                "user.email=synthetic@example.com",
+            ])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(&env.work)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    let none = env.admin(&["scan"]);
+    assert_eq!(none.code, 2);
+    assert!(none.stderr.contains("--update-index"), "{}", none.stderr);
+
+    std::fs::write(env.work.join("clean.txt"), "nothing to see\n").unwrap();
+    let clean = env.admin(&["scan", "--update-index"]);
+    assert_eq!(clean.code, 0, "{}", clean.stderr);
+    assert_eq!(clean.json()["findings"], json!([]));
+    let index = std::fs::read_to_string(env.data.join("leak-index.json")).unwrap();
+    assert!(!index.contains(VALUE) && !index.contains("HUMAN_KEY"));
+    assert_eq!(mode(&env.data.join("leak-index.json")), 0o600);
+
+    git(&["init", "-q"]);
+    std::fs::write(
+        env.work.join("app.env"),
+        format!("# config\nTOKEN={VALUE}\n"),
+    )
+    .unwrap();
+    // The index works without the vault: no password is given here.
+    let found = env.human(&["scan"], "");
+    assert_eq!(found.code, 1, "{}", found.stderr);
+    let report: Value = serde_json::from_str(&found.stdout).unwrap();
+    let f = &report["findings"][0];
+    assert!(f["path"].as_str().unwrap().ends_with("app.env"), "{report}");
+    assert_eq!((&f["line"], &f["column"]), (&json!(2), &json!(7)));
+    assert!(!found.stdout.contains(VALUE));
+    let named = env.admin(&["scan", "--names", "app.env"]);
+    let named: Value = serde_json::from_str(&named.stdout).unwrap();
+    assert_eq!(
+        named["findings"][0]["items"],
+        json!([{ "project": "Example App", "item": "HUMAN_KEY", "field": "value" }])
+    );
+
+    git(&["add", "app.env"]);
+    let staged = env.human(&["scan", "--staged"], "");
+    assert_eq!(staged.code, 1);
+    let staged: Value = serde_json::from_str(&staged.stdout).unwrap();
+    assert_eq!(staged["findings"][0]["path"], "app.env");
+    git(&["commit", "-qm", "add config"]);
+    std::fs::write(env.work.join("app.env"), "# config\nTOKEN=\n").unwrap();
+    git(&["commit", "-qam", "remove the value"]);
+    assert_eq!(env.human(&["scan", "--staged"], "").code, 0);
+    let history = env.human(&["scan", "--history"], "");
+    assert_eq!(history.code, 1, "{}", history.stderr);
+    let history: Value = serde_json::from_str(&history.stdout).unwrap();
+    let f = &history["findings"][0];
+    assert_eq!((&f["path"], &f["line"]), (&json!("app.env"), &json!(2)));
+    assert_eq!(f["commit"].as_str().unwrap().len(), 40);
+}

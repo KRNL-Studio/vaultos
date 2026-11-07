@@ -1,5 +1,6 @@
 //! The window's typed-item calls: the Trash, the generator, one-time codes, attachments,
-//! versions, Watchtower with its opt-in breach check, and importing other managers' exports.
+//! versions, Watchtower with its opt-in breach check and leak scan, and importing other
+//! managers' exports.
 
 use crate::app::{blocking, App};
 use serde_json::{json, Value};
@@ -186,6 +187,62 @@ pub async fn restore_version(app: &Arc<App>, id: String) -> Reply {
 
 pub async fn watchtower(app: &Arc<App>) -> Reply {
     to_json(store(app, |s| s.watchtower(HUMAN)).await?)
+}
+
+/// Looks for the vault's values in a folder the human picks, with an index built in memory
+/// (nothing is saved), and names the items found.
+pub async fn scan_folder(app: &Arc<App>, handle: &AppHandle) -> Reply {
+    let Value::String(folder) = crate::ui::choose_folder(handle).await? else {
+        return Ok(json!({ "ok": false, "canceled": true }));
+    };
+    let index = store(app, |s| s.leak_index(HUMAN)).await?;
+    let data_dir = app.data_dir.clone();
+    let root = std::path::PathBuf::from(&folder);
+    let report = blocking(move || vaultos_core::leak::scan_tree(&index, &root, &data_dir))
+        .await?
+        .map_err(|e| e.to_string())?;
+    let sources: Vec<_> = report
+        .findings
+        .iter()
+        .flat_map(|f| f.sources.clone())
+        .collect();
+    let named = store(app, move |s| s.name_sources(&sources)).await?;
+    let mut named = named.into_iter();
+    let findings: Vec<Value> = report
+        .findings
+        .iter()
+        .map(|f| {
+            let items: Vec<_> = f
+                .sources
+                .iter()
+                .filter_map(|_| named.next().flatten())
+                .collect();
+            let path = Path::new(&f.path)
+                .strip_prefix(&folder)
+                .map_or_else(|_| f.path.clone(), |p| p.to_string_lossy().into_owned());
+            json!({ "path": path, "line": f.line, "column": f.column, "items": items })
+        })
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "folder": folder,
+        "files": report.files,
+        "skipped": report.skipped,
+        "incomplete": report.incomplete,
+        "findings": findings,
+    }))
+}
+
+/// Saves the leak index (keyed hashes, no values) for `vaultos scan` and pre-commit hooks.
+pub async fn save_leak_index(app: &Arc<App>) -> Reply {
+    app.gate("save the leak index for vaultos scan").await?;
+    let indexed = store(app, |s| {
+        let index = s.leak_index(HUMAN)?;
+        index.save(s.data_dir())?;
+        Ok(index.len())
+    })
+    .await?;
+    Ok(json!({ "ok": true, "indexed": indexed }))
 }
 
 const CURL: [&str; 3] = ["/usr/bin/curl", "/bin/curl", "/usr/local/bin/curl"];

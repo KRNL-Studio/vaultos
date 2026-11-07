@@ -140,6 +140,8 @@ fn changes(channel: &str) -> bool {
             | "itemHistory"
             | "watchtower"
             | "breachCheck"
+            | "scanFolder"
+            | "saveLeakIndex"
     )
 }
 
@@ -415,6 +417,8 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
         "restoreVersion" => items::restore_version(app, a.str(0, "history entry")?).await,
         "watchtower" => items::watchtower(app).await,
         "breachCheck" => items::breach_check(app).await,
+        "scanFolder" => items::scan_folder(app, handle).await,
+        "saveLeakIndex" => items::save_leak_index(app).await,
         "importFile" => items::import_file(app, handle, a.str(0, "project")?).await,
         "getDesktopPrefs" => Ok(prefs_state(app)),
         "setDesktopPrefs" => {
