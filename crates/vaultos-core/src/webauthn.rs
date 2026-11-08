@@ -28,8 +28,9 @@ pub const MAX_USER_HANDLE: usize = 64;
 
 const FLAG_UP: u8 = 0x01;
 const FLAG_UV: u8 = 0x04;
+/// Backup eligible: the passkey can sync with the vault. "Backed up" (0x10) is never claimed,
+/// since VaultOS does not know that a sync has carried it anywhere.
 const FLAG_BE: u8 = 0x08;
-const FLAG_BS: u8 = 0x10;
 const FLAG_AT: u8 = 0x40;
 const AAGUID: [u8; 16] = [0; 16];
 
@@ -161,10 +162,12 @@ fn spki(key: &SigningKey) -> Vec<u8> {
     out
 }
 
-fn auth_data(rp_id: &str, attested: Option<(&[u8], &[u8])>) -> Vec<u8> {
+/// `verified`: the human was verified for this request (Touch ID), not only present.
+fn auth_data(rp_id: &str, verified: bool, attested: Option<(&[u8], &[u8])>) -> Vec<u8> {
     let mut out = sha256(rp_id.as_bytes()).to_vec();
+    let uv = if verified { FLAG_UV } else { 0 };
     let at = if attested.is_some() { FLAG_AT } else { 0 };
-    out.push(FLAG_UP | FLAG_UV | FLAG_BE | FLAG_BS | at);
+    out.push(FLAG_UP | uv | FLAG_BE | at);
     out.extend([0, 0, 0, 0]);
     if let Some((credential_id, cose)) = attested {
         out.extend_from_slice(&AAGUID);
@@ -225,9 +228,10 @@ pub fn register(
     challenge: &[u8],
     credential_id: &[u8],
     private_key: &str,
+    verified: bool,
 ) -> Result<Registration> {
     let key = signing_key(private_key)?;
-    let authenticator_data = auth_data(rp_id, Some((credential_id, &cose_key(&key))));
+    let authenticator_data = auth_data(rp_id, verified, Some((credential_id, &cose_key(&key))));
     let mut attestation_object = Vec::with_capacity(authenticator_data.len() + 32);
     head(&mut attestation_object, 5, 3);
     text(&mut attestation_object, "fmt");
@@ -255,9 +259,15 @@ pub struct Assertion {
 
 /// Signs in with the passkey: an ES256 signature over the authenticator data and the hash of
 /// the client data.
-pub fn assert(rp_id: &str, origin: &str, challenge: &[u8], private_key: &str) -> Result<Assertion> {
+pub fn assert(
+    rp_id: &str,
+    origin: &str,
+    challenge: &[u8],
+    private_key: &str,
+    verified: bool,
+) -> Result<Assertion> {
     let key = signing_key(private_key)?;
-    let authenticator_data = auth_data(rp_id, None);
+    let authenticator_data = auth_data(rp_id, verified, None);
     let client_data_json = client_data("webauthn.get", challenge, origin);
     let mut signed = authenticator_data.clone();
     signed.extend_from_slice(&sha256(client_data_json.as_bytes()));
@@ -324,6 +334,7 @@ mod tests {
             challenge,
             &pk.credential_id,
             &pk.private_key,
+            false,
         )
         .unwrap();
         let client: serde_json::Value = serde_json::from_str(&reg.client_data_json).unwrap();
@@ -335,7 +346,8 @@ mod tests {
         );
         let ad = &reg.authenticator_data;
         assert_eq!(&ad[..32], &sha256(b"example.com"));
-        assert_eq!(ad[32], 0x5d);
+        // User present, backup eligible, attested credential data; not verified.
+        assert_eq!(ad[32], 0x49);
         assert_eq!(&ad[33..37], &[0, 0, 0, 0]);
         assert_eq!(&ad[37..53], &AAGUID);
         assert_eq!(&ad[53..55], &[0, 16]);
@@ -362,10 +374,12 @@ mod tests {
             "https://login.example.com",
             b"second-challenge",
             &pk.private_key,
+            true,
         )
         .unwrap();
         assert_eq!(a.authenticator_data.len(), 37);
-        assert_eq!(a.authenticator_data[32], 0x1d);
+        // User present and verified, backup eligible.
+        assert_eq!(a.authenticator_data[32], 0x0d);
         let mut signed = a.authenticator_data.clone();
         signed.extend_from_slice(&sha256(a.client_data_json.as_bytes()));
         let sig = undo_der(&a.signature);

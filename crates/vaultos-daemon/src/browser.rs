@@ -13,13 +13,17 @@
 //! - `POST /browser/passkeys` `{url, rpId, allow?}`: the passkeys that page may use, without
 //!   keys.
 //! - `POST /browser/passkey/create` `{url, rpId, user: {id, name}, challenge, algorithms,
-//!   exclude?}`: makes and saves a passkey; the credential, client data, attestation object,
-//!   authenticator data and public key (base64url).
-//! - `POST /browser/passkey/get` `{url, rpId, challenge, projectId, itemId}`: signs in with a
-//!   passkey; the credential id, client data, authenticator data, signature and user handle.
+//!   exclude?, userVerification?}`: makes and saves a passkey; the credential, client data,
+//!   attestation object, authenticator data and public key (base64url).
+//! - `POST /browser/passkey/get` `{url, rpId, challenge, projectId, itemId, credentialId,
+//!   userVerification?}`: signs in with that login's passkey, if it is still `credentialId`;
+//!   the credential id, client data, authenticator data, signature and user handle.
 //!
 //! The extension asks only after the human chose in its own window. `url` is the page's
-//! address as the browser reports it; the client data names its origin.
+//! address as the browser reports it; the client data names its origin. Unless the site's
+//! `userVerification` is "discouraged", the owner asks for Touch ID first and reports the
+//! human verified only when it was given; where there is no Touch ID, a site that requires
+//! verification gets 412 (the extension then hands it to the browser).
 
 use crate::api::{self, Reply};
 use crate::human::{clean, Peer};
@@ -28,7 +32,7 @@ use serde_json::{json, Map, Value};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
-use vaultos_core::store::NewPasskeyRequest;
+use vaultos_core::store::{NewPasskeyRequest, PasskeyUse};
 use vaultos_core::webauthn::{self, b64url};
 use vaultos_core::{Error, SecretString, Store};
 
@@ -122,10 +126,15 @@ pub(crate) async fn route(
     };
     let saving =
         method == "POST" && (target == "/browser/save" || target == "/browser/passkey/create");
+    let verified = match verification(&shared, &method, &target, &key, &origin, &body).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let s = shared.clone();
     let reply = tokio::task::spawn_blocking(move || {
         let mut body = body;
-        let r = s.with_store(|store| serve(store, &method, &target, &key, &origin, &body));
+        let r =
+            s.with_store(|store| serve(store, &method, &target, &key, &origin, &body, verified));
         zeroize::Zeroize::zeroize(&mut body);
         r
     })
@@ -140,6 +149,87 @@ pub(crate) async fn route(
     reply
 }
 
+/// For a passkey request: whether the human was verified with Touch ID, as the site's
+/// `userVerification` asks ("preferred" when it says nothing). The prompt is shown only for
+/// a paired browser's request that its page may make; [`serve`] refuses the others.
+async fn verification(
+    shared: &Arc<Shared>,
+    method: &str,
+    target: &str,
+    key: &str,
+    origin: &str,
+    body: &[u8],
+) -> Result<bool, Reply> {
+    let create = target == "/browser/passkey/create";
+    if method != "POST" || !(create || target == "/browser/passkey/get") {
+        return Ok(false);
+    }
+    let b = body_of(body)?;
+    let field = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let wanted = b
+        .get("userVerification")
+        .and_then(Value::as_str)
+        .unwrap_or("preferred");
+    if wanted == "discouraged" {
+        return Ok(false);
+    }
+    let (url, rp, key, origin) = (
+        field("url"),
+        field("rpId"),
+        key.to_owned(),
+        origin.to_owned(),
+    );
+    let s = shared.clone();
+    let check = rp.clone();
+    let allowed = tokio::task::spawn_blocking(move || {
+        s.with_store(|store| {
+            api::ready(store).is_ok()
+                && matches!(store.authenticate_browser(&key, &origin), Ok(Some(_)))
+                && store.passkeys_for(&url, &check, &[]).is_ok()
+        })
+    })
+    .await
+    .unwrap_or(false);
+    if !allowed {
+        return Ok(false);
+    }
+    let unverified = || {
+        if wanted == "required" {
+            Err(Reply::error(
+                412,
+                "This site asks VaultOS to verify you, which needs Touch ID",
+            ))
+        } else {
+            Ok(false)
+        }
+    };
+    let Some(confirm) = shared.confirm.clone() else {
+        return unverified();
+    };
+    if shared.confirming.swap(true, Ordering::SeqCst) {
+        return Err(Reply::error(
+            429,
+            "Another request is waiting for confirmation",
+        ));
+    }
+    let _one = Confirming(&shared.confirming);
+    let rp = clean(&rp);
+    let reason = if create {
+        format!("save a passkey for {rp}")
+    } else {
+        format!("sign in to {rp} with a passkey")
+    };
+    match tokio::task::spawn_blocking(move || (confirm.0)(&reason))
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(true) => Ok(true),
+        Some(false) => Err(Reply::error(403, "Touch ID was not confirmed")),
+        None => unverified(),
+    }
+}
+
 fn serve(
     store: &mut Store,
     method: &str,
@@ -147,6 +237,7 @@ fn serve(
     key: &str,
     origin: &str,
     body: &[u8],
+    verified: bool,
 ) -> Reply {
     if let Err(r) = api::ready(store) {
         return r;
@@ -227,6 +318,7 @@ fn serve(
                         user_handle: &handle,
                         challenge: &challenge,
                         exclude: &exclude,
+                        verified,
                     },
                     &browser,
                 )?;
@@ -242,12 +334,21 @@ fn serve(
                 }))
             }
             ("POST", "/browser/passkey/get") => {
+                let credential_id = webauthn::unb64url(
+                    text(&b, "credentialId")?,
+                    "credential id",
+                    webauthn::MAX_CREDENTIAL_ID,
+                )?;
                 let u = store.use_passkey(
                     text(&b, "url")?,
-                    text(&b, "rpId")?,
-                    text(&b, "projectId")?,
-                    text(&b, "itemId")?,
-                    &challenge(&b)?,
+                    &PasskeyUse {
+                        rp_id: text(&b, "rpId")?,
+                        project_id: text(&b, "projectId")?,
+                        item_id: text(&b, "itemId")?,
+                        credential_id: &credential_id,
+                        challenge: &challenge(&b)?,
+                        verified,
+                    },
                     &browser,
                 )?;
                 Ok(json!({

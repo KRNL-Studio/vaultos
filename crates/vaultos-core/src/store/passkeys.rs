@@ -53,6 +53,21 @@ pub struct NewPasskeyRequest<'a> {
     pub challenge: &'a [u8],
     /// Credential IDs the site already has for this account.
     pub exclude: &'a [Vec<u8>],
+    /// Whether the human was verified for this request (Touch ID), not only present.
+    pub verified: bool,
+}
+
+/// A sign-in the human chose in the extension's window.
+#[derive(Debug)]
+pub struct PasskeyUse<'a> {
+    pub rp_id: &'a str,
+    pub project_id: &'a str,
+    pub item_id: &'a str,
+    /// The credential the window showed; the item must still hold it.
+    pub credential_id: &'a [u8],
+    pub challenge: &'a [u8],
+    /// Whether the human was verified for this request (Touch ID), not only present.
+    pub verified: bool,
 }
 
 fn value<'a>(meta: &'a ItemMeta, id: &str) -> &'a str {
@@ -131,8 +146,9 @@ impl Store {
     }
 
     /// Makes a passkey for the page's site and saves it: in the one login for this site and
-    /// username that has none yet, or in a new login in [`DEFAULT_PROJECT`]. The human chose
-    /// to save it in the extension's window; the item is the human's.
+    /// username that has none yet and that only the human controls (theirs, delegated to no
+    /// agent), or in a new login of the human's in [`DEFAULT_PROJECT`]. The human chose to
+    /// save it in the extension's window.
     pub fn create_passkey(
         &mut self,
         page: &str,
@@ -164,7 +180,8 @@ impl Store {
         for p in &st.projects {
             for i in &p.items {
                 let fits = super::browser::fits(&i.meta, &site);
-                if fits && i.meta.username == req.user_name && !has_passkey(&i.meta) {
+                let humans = i.meta.owner == HUMAN && i.meta.editable_by.is_empty();
+                if fits && humans && i.meta.username == req.user_name && !has_passkey(&i.meta) {
                     let fields = i
                         .meta
                         .fields
@@ -193,6 +210,7 @@ impl Store {
             req.challenge,
             &new.credential_id,
             &new.private_key,
+            req.verified,
         )?;
         let (project_id, project, key, mut fields, url) = match into.len() {
             1 => {
@@ -237,6 +255,13 @@ impl Store {
                 new.private_key.to_string(),
             ),
         ]);
+        // Audited before the save, which records the entry in the vault: a passkey is never
+        // saved without its entry.
+        self.audit(
+            "browser-passkey-create",
+            &format!("{project}/{key} for {} from {}", req.rp_id, site.host),
+            &browser_actor(browser),
+        )?;
         let saved = self.set_item(
             &project_id,
             &Fields {
@@ -249,14 +274,6 @@ impl Store {
             },
             HUMAN,
         )?;
-        self.audit(
-            "browser-passkey-create",
-            &format!(
-                "{project}/{} for {} from {}",
-                saved.key, req.rp_id, site.host
-            ),
-            &browser_actor(browser),
-        )?;
         Ok(Created {
             project,
             name: saved.key,
@@ -264,16 +281,21 @@ impl Store {
         })
     }
 
-    /// Signs in to the page's site with a login's passkey for `rp_id`.
+    /// Signs in to the page's site with a login's passkey for `rp_id`, if the login still
+    /// holds the credential the human chose.
     pub fn use_passkey(
         &mut self,
         page: &str,
-        rp_id: &str,
-        project_id: &str,
-        item_id: &str,
-        challenge: &[u8],
+        u: &PasskeyUse<'_>,
         browser: &Browser,
     ) -> Result<Used> {
+        let PasskeyUse {
+            rp_id,
+            project_id,
+            item_id,
+            challenge,
+            ..
+        } = *u;
         let (site, origin) = page_for(page, rp_id)?;
         if challenge.len() < 16 {
             return Err(Error::invalid("The site's challenge is too short"));
@@ -292,6 +314,11 @@ impl Store {
                         .map(|c| (i, c))
                 })
                 .ok_or_else(|| Error::not_found("No passkey for this site has that id"))?;
+            if credential_id != u.credential_id {
+                return Err(Error::Conflict(
+                    "This login's passkey changed while you were choosing it. Try again.".into(),
+                ));
+            }
             let secret = keys.open_secret(p, i)?;
             let key = secret
                 .fields
@@ -307,7 +334,7 @@ impl Store {
                 Used {
                     credential_id,
                     user_handle,
-                    assertion: webauthn::assert(rp_id, &origin, challenge, &key.value)?,
+                    assertion: webauthn::assert(rp_id, &origin, challenge, &key.value, u.verified)?,
                 },
                 format!("{}/{} on {}", p.meta.name, i.meta.key, site.host),
             )

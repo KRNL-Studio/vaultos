@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 /// The longest message accepted from the browser; requests are small.
 const MAX_MESSAGE: usize = 64 * 1024;
-/// A pairing waits for the human to confirm in the app.
+/// A pairing, or a passkey that needs Touch ID, waits for the human to confirm in the app.
 const PAIR_TIMEOUT: Duration = Duration::from_secs(130);
 const TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -72,6 +72,7 @@ fn handle(
                 let code = match (e.code.as_str(), e.status) {
                     (_, Some(401)) => "unpaired",
                     (_, Some(409)) => "conflict",
+                    (_, Some(412)) => "unverified",
                     (c, _) => c,
                 };
                 (code.to_owned(), e.message)
@@ -133,14 +134,24 @@ fn handle(
                 "challenge",
                 "algorithms",
                 "exclude",
+                "userVerification",
             ])),
-            TIMEOUT,
+            // The owner may wait for Touch ID.
+            PAIR_TIMEOUT,
         ),
         "passkeyGet" => call(
             "POST",
             "/browser/passkey/get",
-            Some(&pick(&["url", "rpId", "challenge", "projectId", "itemId"])),
-            TIMEOUT,
+            Some(&pick(&[
+                "url",
+                "rpId",
+                "challenge",
+                "projectId",
+                "itemId",
+                "credentialId",
+                "userVerification",
+            ])),
+            PAIR_TIMEOUT,
         ),
         _ => Err(("usage".into(), "Unknown operation".into())),
     }

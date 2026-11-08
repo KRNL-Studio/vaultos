@@ -78,7 +78,8 @@ pub(crate) struct Shared {
     last_used: Mutex<Instant>,
     shutdown: Notify,
     pub(crate) autosync: AutoSync,
-    confirm: Option<Confirm>,
+    /// Touch ID, for `/human/values` and passkeys' user verification.
+    pub(crate) confirm: Option<Confirm>,
     /// One confirmation sheet at a time; others are refused rather than queued.
     pub(crate) confirming: AtomicBool,
     pub(crate) ssh: SshAgent,

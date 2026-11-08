@@ -125,6 +125,13 @@ async function signInShown(tabId) {
 /** Passkey requests waiting for the human in the extension's window, by request id. */
 const passkeyRequests = new Map();
 const PASSKEY_WINDOW = "passkey.html";
+// The page's request is a message whose answer this worker holds; Chrome ends a worker
+// whose one event runs five minutes, so a request ends first, as if it timed out.
+const PASSKEY_WAIT_MAX = 4 * 60 * 1000;
+const PASSKEY_WAIT_MIN = 15 * 1000;
+// More credential IDs than this and VaultOS cannot tell which the site has: the browser's own.
+const MAX_CREDENTIAL_LIST = 64;
+const VERIFICATION = [ "required", "preferred", "discouraged" ];
 
 const fromPasskeyWindow = s => s.id === api.runtime.id && typeof s.url === "string" && s.url.startsWith(api.runtime.getURL(PASSKEY_WINDOW));
 
@@ -132,6 +139,7 @@ function finishPasskey(id, result) {
     const r = passkeyRequests.get(id);
     if (!r) return;
     passkeyRequests.delete(id);
+    clearTimeout(r.timer);
     r.resolve(result);
     if (r.windowId !== undefined) api.windows.remove(r.windowId).catch(() => {});
 }
@@ -145,20 +153,25 @@ const b64urlOk = (v, max) => typeof v === "string" && v.length <= Math.ceil(max 
 /** The parts of a page's request VaultOS uses, checked; null when it is not one. */
 function passkeyRequest(kind, q) {
     if (!q || typeof q.rpId !== "string" || q.rpId.length > 253 || !b64urlOk(q.challenge, 1024)) return null;
+    const ids = list => list === undefined ? [] : Array.isArray(list) && list.length <= MAX_CREDENTIAL_LIST && list.every(c => b64urlOk(c, 1023)) ? list : null;
+    const userVerification = VERIFICATION.includes(q.userVerification) ? q.userVerification : "preferred";
+    const timeout = Number.isFinite(q.timeout) && q.timeout > 0 ? Math.min(Math.max(q.timeout, PASSKEY_WAIT_MIN), PASSKEY_WAIT_MAX) : PASSKEY_WAIT_MAX;
     if (kind === "get") {
-        const allow = Array.isArray(q.allow) ? q.allow.slice(0, 64) : [];
-        return allow.every(c => b64urlOk(c, 1023)) ? { rpId: q.rpId, challenge: q.challenge, allow } : null;
+        const allow = ids(q.allow);
+        return allow && { rpId: q.rpId, challenge: q.challenge, allow, userVerification, timeout };
     }
     const u = q.user || {};
-    const exclude = Array.isArray(q.exclude) ? q.exclude.slice(0, 64) : [];
-    if (!b64urlOk(u.id, 64) || !exclude.every(c => b64urlOk(c, 1023))) return null;
+    const exclude = ids(q.exclude);
+    if (!b64urlOk(u.id, 64) || !exclude) return null;
     return {
         rpId: q.rpId,
         rpName: String(q.rpName || "").slice(0, 100),
         user: { id: u.id, name: String(u.name || "").slice(0, 256), displayName: String(u.displayName || "").slice(0, 256) },
         challenge: q.challenge,
         algorithms: Array.isArray(q.algorithms) ? q.algorithms.slice(0, 16).map(Number) : [],
-        exclude
+        exclude,
+        userVerification,
+        timeout
     };
 }
 
@@ -184,6 +197,7 @@ async function passkey(m, s) {
     }
     const id = S.pairingCode(crypto.getRandomValues(new Uint8Array(8)));
     const done = new Promise(resolve => passkeyRequests.set(id, { kind, tabId: s.tab.id, pageId: m.id, url: s.url, q, passkeys, resolve }));
+    passkeyRequests.get(id).timer = setTimeout(() => finishPasskey(id, { ok: false, code: "cancel" }), q.timeout);
     try {
         const w = await api.windows.create({ url: api.runtime.getURL(`${PASSKEY_WINDOW}#${id}`), type: "popup", width: 420, height: 480, focused: true });
         const r = passkeyRequests.get(id);
@@ -229,13 +243,27 @@ const passkeyWindowOps = {
             return { ok: true };
         }
         let result;
+        const { timeout, ...q } = r.q;
         if (r.kind === "create") {
-            result = await call("passkeyCreate", { url: r.url, ...r.q });
+            result = await call("passkeyCreate", { url: r.url, ...q });
             if (!result.ok && result.code === "conflict") result = { ok: false, code: "exists", error: result.error };
         } else {
             const pick = r.passkeys.find(p => p.projectId === m.projectId && p.itemId === m.itemId);
             if (!pick) return { ok: false, code: "usage", error: "Choose one of the passkeys shown." };
-            result = await call("passkeyGet", { url: r.url, rpId: r.q.rpId, challenge: r.q.challenge, projectId: pick.projectId, itemId: pick.itemId });
+            result = await call("passkeyGet", {
+                url: r.url,
+                rpId: q.rpId,
+                challenge: q.challenge,
+                projectId: pick.projectId,
+                itemId: pick.itemId,
+                credentialId: pick.credentialId,
+                userVerification: q.userVerification
+            });
+        }
+        // The site requires verifying the human, and there is no Touch ID: the browser's own.
+        if (!result.ok && result.code === "unverified") {
+            finishPasskey(id, { ok: false, code: "fallback" });
+            return { ok: true };
         }
         if (!result.ok && result.code !== "exists") return result;
         finishPasskey(id, result);

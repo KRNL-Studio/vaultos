@@ -134,9 +134,10 @@ Token hashes are unsalted because tokens are 256-bit random values; a guess is n
 against the hash. The leak index key sits beside its tags, so anyone who can read that file
 can test guesses for indexed values offline (see [SECURITY.md](../../SECURITY.md)).
 
-A passkey's authenticator data is the SHA-256 of the relying party ID, flags `0x5d` when
-made (user present and verified, backup eligible and backed up, attested credential data) or
-`0x1d` when used, and a counter of 0. The attested credential data has a zero AAGUID and the
+A passkey's authenticator data is the SHA-256 of the relying party ID, flags `0x49` when
+made (user present, backup eligible, attested credential data) or `0x09` when used, with
+user verified (`0x04`) added only after Touch ID for that request, and a counter of 0.
+Backed up (`0x10`) is never set. The attested credential data has a zero AAGUID and the
 COSE key `{1: 2, 3: -7, -1: 1, -2: x, -3: y}`, and the attestation object is
 `{"fmt": "none", "attStmt": {}, "authData": …}`, both in CTAP2 canonical CBOR. The owner
 writes the client data JSON itself (`type`, `challenge`, `origin`, `crossOrigin: false`), with

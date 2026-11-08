@@ -28,6 +28,15 @@
         return out.buffer;
     };
     const ids = list => Array.isArray(list) ? list.filter(c => c && c.type === "public-key").map(c => b64url(c.id)) : [];
+    // What VaultOS cannot do and a site may insist on: those requests go to the browser's own.
+    const needsOther = (pk, create) => {
+        const x = pk.extensions || {};
+        const sel = pk.authenticatorSelection || {};
+        return (create && sel.authenticatorAttachment === "cross-platform") ||
+            (x.largeBlob && x.largeBlob.support === "required") ||
+            (create && x.enforceCredentialProtectionPolicy === true && x.credentialProtectionPolicy !== undefined && x.credentialProtectionPolicy !== "userVerificationOptional") ||
+            Boolean(x.payment && x.payment.isPayment);
+    };
 
     let next = 0;
     function ask(kind, request, signal) {
@@ -88,7 +97,7 @@
 
     creds.create = async function create(options) {
         const pk = options && options.publicKey;
-        if (!pk) return nativeCreate(options);
+        if (!pk || needsOther(pk, true)) return nativeCreate(options);
         let request;
         try {
             request = {
@@ -97,7 +106,9 @@
                 user: { id: b64url(pk.user.id), name: String(pk.user.name || ""), displayName: String(pk.user.displayName || "") },
                 challenge: b64url(pk.challenge),
                 algorithms: Array.isArray(pk.pubKeyCredParams) ? pk.pubKeyCredParams.filter(p => p && p.type === "public-key").map(p => Number(p.alg)) : [],
-                exclude: ids(pk.excludeCredentials)
+                exclude: ids(pk.excludeCredentials),
+                userVerification: String(pk.authenticatorSelection && pk.authenticatorSelection.userVerification || "preferred"),
+                timeout: Number(pk.timeout) || 0
             };
         } catch {
             return nativeCreate(options);
@@ -127,10 +138,16 @@
     creds.get = async function get(options) {
         const pk = options && options.publicKey;
         // Passkey autofill waits for a field to be focused; VaultOS offers no such list yet.
-        if (!pk || options.mediation === "conditional") return nativeGet(options);
+        if (!pk || options.mediation === "conditional" || needsOther(pk, false)) return nativeGet(options);
         let request;
         try {
-            request = { rpId: pk.rpId || window.location.hostname, challenge: b64url(pk.challenge), allow: ids(pk.allowCredentials) };
+            request = {
+                rpId: pk.rpId || window.location.hostname,
+                challenge: b64url(pk.challenge),
+                allow: ids(pk.allowCredentials),
+                userVerification: String(pk.userVerification || "preferred"),
+                timeout: Number(pk.timeout) || 0
+            };
         } catch {
             return nativeGet(options);
         }

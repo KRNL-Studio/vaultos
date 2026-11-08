@@ -64,7 +64,12 @@ async function signIn() {
     const client = JSON.parse(dec.decode(a.response.clientDataJSON));
     return { verified: await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, p1363(a.response.signature), signed),
         sameId: a.id === window.cred.id, challenge: client.challenge === b64(challenge), type: client.type, origin: client.origin,
-        user: dec.decode(a.response.userHandle), instance: a.response instanceof AuthenticatorAssertionResponse };
+        user: dec.decode(a.response.userHandle), instance: a.response instanceof AuthenticatorAssertionResponse, flags: auth[32] };
+}
+// Requests VaultOS hands to the browser's own WebAuthn (here, a virtual security key).
+async function registerWith(authenticatorSelection) {
+    const c = await navigator.credentials.create({ publicKey: { ...created(), user: { id: enc.encode("user-bob"), name: "bob", displayName: "Bob" }, authenticatorSelection } });
+    return c.response.getTransports().join();
 }
 </script>`;
 const server = http.createServer((req, res) => {
@@ -268,15 +273,25 @@ try {
         return pending;
     };
     const made = await choose(`register()`, "button.primary");
-    const want = { instance: true, type: "webauthn.create", origin: `http://localhost:${port}`, alg: -7, rk: true, flags: 0x5d, rp: true, json: true };
+    const want = { instance: true, type: "webauthn.create", origin: `http://localhost:${port}`, alg: -7, rk: true, flags: 0x49, rp: true, json: true };
     if (JSON.stringify(made) !== JSON.stringify(want)) throw new Error(`Unexpected passkey: ${JSON.stringify(made)}`);
     console.log("registered a passkey");
     const again = await choose(`registerAgain()`, "button.primary");
     if (again !== "InvalidStateError") throw new Error(`A second passkey for the account: ${again}`);
     const signedIn = await choose(`signIn()`, "li button");
-    const wantIn = { verified: true, sameId: true, challenge: true, type: "webauthn.get", origin: `http://localhost:${port}`, user: "user-alice", instance: true };
+    const wantIn = { verified: true, sameId: true, challenge: true, type: "webauthn.get", origin: `http://localhost:${port}`, user: "user-alice", instance: true, flags: 0x0d };
     if (JSON.stringify(signedIn) !== JSON.stringify(wantIn)) throw new Error(`Unexpected sign-in: ${JSON.stringify(signedIn)}`);
     console.log("signed in with the passkey");
+    // A site that requires verifying the human, with no Touch ID for saving, and one that wants
+    // a security key, get the browser's own WebAuthn.
+    await send("WebAuthn.enable", { enableUI: false }, tab);
+    await send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "usb", hasResidentKey: true,
+        hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } }, tab);
+    const required = await choose(`registerWith({ userVerification: "required" })`, "button.primary");
+    if (required !== "usb") throw new Error(`A required verification was not handed to the browser: ${required}`);
+    const elsewhere = await evaluate(tab, `registerWith({ authenticatorAttachment: "cross-platform" })`);
+    if (elsewhere !== "usb") throw new Error(`A security key request was not handed to the browser: ${elsewhere}`);
+    console.log("handed requests VaultOS cannot meet to the browser");
     await send("Browser.close").catch(() => null);
 } catch (e) {
     console.error(e && e.stack || e);

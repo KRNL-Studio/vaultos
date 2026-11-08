@@ -8,7 +8,7 @@ use p256::ecdsa::{Signature, VerifyingKey};
 use std::path::Path;
 use vaultos_core::crypto::sha256;
 use vaultos_core::error::Error;
-use vaultos_core::store::{Browser, NewPasskeyRequest};
+use vaultos_core::store::{Browser, NewPasskeyRequest, PasskeyMatch, PasskeyUse};
 use vaultos_core::{Fields, KdfParams, SecretString, Store};
 
 const PW: &str = "synthetic-passkey-password";
@@ -48,6 +48,24 @@ fn request<'a>(user: &'a str, handle: &'a [u8], exclude: &'a [Vec<u8>]) -> NewPa
         user_handle: handle,
         challenge: CHALLENGE,
         exclude,
+        verified: false,
+    }
+}
+
+/// A sign-in with the passkey `m` shows, whose credential ID is `cred`.
+fn using<'a>(
+    rp_id: &'a str,
+    m: &'a PasskeyMatch,
+    cred: &'a [u8],
+    challenge: &'a [u8],
+) -> PasskeyUse<'a> {
+    PasskeyUse {
+        rp_id,
+        project_id: &m.project_id,
+        item_id: &m.item_id,
+        credential_id: cred,
+        challenge,
+        verified: true,
     }
 }
 
@@ -88,6 +106,8 @@ fn makes_a_passkey_in_the_login_and_signs_in_with_it() {
     let client: serde_json::Value = serde_json::from_str(&c.registration.client_data_json).unwrap();
     assert_eq!(client["origin"], "https://login.example.com");
     assert_eq!(client["type"], "webauthn.create");
+    // Present, not verified; backup eligible, never claimed as backed up.
+    assert_eq!(c.registration.authenticator_data[32], 0x49);
     let item = st.find_item("Example App", "Example").unwrap().unwrap();
     let ids: Vec<&str> = item.fields.iter().map(|f| f.id.as_str()).collect();
     assert_eq!(
@@ -136,10 +156,7 @@ fn makes_a_passkey_in_the_login_and_signs_in_with_it() {
     let used = st
         .use_passkey(
             "https://example.com/signin",
-            "example.com",
-            &m.project_id,
-            &m.item_id,
-            b"second-synthetic-challenge-0123",
+            &using("example.com", m, &cred, b"second-synthetic-challenge-0123"),
             &b,
         )
         .unwrap();
@@ -147,6 +164,7 @@ fn makes_a_passkey_in_the_login_and_signs_in_with_it() {
     assert_eq!(used.user_handle, b"user-1");
     let a = &used.assertion;
     assert_eq!(&a.authenticator_data[..32], &sha256(b"example.com"));
+    assert_eq!(a.authenticator_data[32], 0x0d);
     assert!(verify(
         &c.registration.public_key,
         &a.authenticator_data,
@@ -179,6 +197,7 @@ fn keeps_passkeys_to_their_relying_party() {
         .passkeys_for("https://example.com/", "example.com", &[])
         .unwrap()
         .remove(0);
+    let cred = c.registration.credential_id.clone();
     // Another site, a public suffix, a parent the page is not under, plain HTTP.
     for (page, rp) in [
         ("https://evil.example/", "example.com"),
@@ -192,7 +211,7 @@ fn keeps_passkeys_to_their_relying_party() {
             "{page} {rp} listed"
         );
         assert!(
-            st.use_passkey(page, rp, &m.project_id, &m.item_id, CHALLENGE, &b)
+            st.use_passkey(page, &using(rp, &m, &cred, CHALLENGE), &b)
                 .is_err(),
             "{page} {rp} signed"
         );
@@ -211,25 +230,31 @@ fn keeps_passkeys_to_their_relying_party() {
     }
     // A login without a passkey, or one for another relying party, cannot sign.
     let other = st.find_item("Example App", "Example").unwrap().unwrap();
+    let other = PasskeyMatch {
+        item_id: other.id,
+        ..m.clone()
+    };
     assert!(matches!(
         st.use_passkey(
             "https://example.org/",
-            "example.org",
-            &m.project_id,
-            &other.id,
-            CHALLENGE,
+            &using("example.org", &other, &cred, CHALLENGE),
             &b
         ),
         Err(Error::NotFound(_))
     ));
+    // Nor a login whose passkey is no longer the one the human chose.
+    assert!(matches!(
+        st.use_passkey(
+            "https://example.com/",
+            &using("example.com", &m, b"another-credential", CHALLENGE),
+            &b
+        ),
+        Err(Error::Conflict(_))
+    ));
     // The site's list of credentials it already has stops a second passkey.
     let again = st.create_passkey(
         "https://example.com/",
-        &request(
-            "alice",
-            b"user-1",
-            &[b"other".to_vec(), c.registration.credential_id],
-        ),
+        &request("alice", b"user-1", &[b"other".to_vec(), cred.clone()]),
         &b,
     );
     assert!(matches!(again, Err(Error::Conflict(_))));
@@ -237,10 +262,7 @@ fn keeps_passkeys_to_their_relying_party() {
     assert!(st
         .use_passkey(
             "https://example.com/",
-            "example.com",
-            &m.project_id,
-            &m.item_id,
-            b"short",
+            &using("example.com", &m, &cred, b"short"),
             &b
         )
         .is_err());
@@ -309,4 +331,28 @@ fn saves_a_new_login_when_none_fits() {
             .len(),
         2
     );
+}
+
+#[test]
+fn never_puts_a_passkey_in_a_login_an_agent_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut st, b) = store(dir.path());
+    st.delegate("Example App", "Example", "agent:0123456789abcdef", true)
+        .unwrap();
+    let c = st
+        .create_passkey(
+            "https://example.com/",
+            &request("alice", b"user-1", &[]),
+            &b,
+        )
+        .unwrap();
+    // The delegated login is left alone; the passkey gets a new login of the human's.
+    assert_eq!(
+        (c.project.as_str(), c.name.as_str()),
+        ("Logins", "example.com")
+    );
+    let item = st.find_item("Logins", "example.com").unwrap().unwrap();
+    assert_eq!((item.owner.as_str(), item.editable_by.len()), ("human", 0));
+    let delegated = st.find_item("Example App", "Example").unwrap().unwrap();
+    assert!(delegated.fields.is_empty());
 }

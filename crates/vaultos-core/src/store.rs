@@ -45,7 +45,7 @@ pub use items::{
     TRASH_DAYS,
 };
 pub use leak::Named;
-pub use passkeys::{Created, NewPasskeyRequest, PasskeyMatch, Used};
+pub use passkeys::{Created, NewPasskeyRequest, PasskeyMatch, PasskeyUse, Used};
 pub use run::EnvValues;
 pub use ssh::SshIdentity;
 pub use sync::{check_record, SyncChanges, SyncRecord};

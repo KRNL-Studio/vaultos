@@ -69,7 +69,10 @@ impl Owner {
             idle_lock: None,
             wait_for_owner: false,
             sync_repo: None,
-            confirm: None,
+            // Touch ID: given for passkey sign-ins, unavailable for anything else.
+            confirm: Some(Confirm(Arc::new(|reason: &str| {
+                reason.starts_with("sign in to ").then_some(true)
+            }))),
         };
         let thread = std::thread::spawn(move || {
             tokio::runtime::Builder::new_multi_thread()
