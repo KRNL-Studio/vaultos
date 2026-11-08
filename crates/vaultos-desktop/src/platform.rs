@@ -172,6 +172,12 @@ pub(crate) mod mac {
     }
 
     pub fn touch_id_prompt(reason: &str) -> bool {
+        evaluated(reason).is_some()
+    }
+
+    /// Asks for Touch ID and returns the confirmed context: a Secure Enclave key bound to
+    /// biometry accepts it without asking again.
+    pub fn evaluated(reason: &str) -> Option<Retained<LAContext>> {
         let (tx, rx) = std::sync::mpsc::channel::<bool>();
         let reply = RcBlock::new(move |ok: Bool, _: *mut NSError| {
             let _ = tx.send(ok.as_bool());
@@ -186,9 +192,7 @@ pub(crate) mod mac {
                 &reply,
             );
         }
-        let ok = rx.recv().unwrap_or(false);
-        drop(context);
-        ok
+        rx.recv().unwrap_or(false).then_some(context)
     }
 
     fn item(text: &str, concealed: bool) -> Option<Retained<NSPasteboardItem>> {

@@ -4,6 +4,7 @@
 
 mod app;
 mod commands;
+mod enclave;
 mod export;
 mod items;
 mod keyring;

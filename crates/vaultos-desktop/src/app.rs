@@ -10,6 +10,7 @@
 //! still waiting (for its turn, for Touch ID, for another process to hand over the vault)
 //! cannot finish after a later Lock.
 
+use crate::enclave::{self, Unsealed};
 use crate::keyring::{self, Keyring};
 use crate::platform::{self, Clipboard};
 use crate::prefs::{self, Prefs};
@@ -526,11 +527,22 @@ impl App {
     fn write_touch_id_hint(&self, s: &Map<String, Value>) {
         let file = self.data_dir.join(TOUCH_ID_HINT);
         let t = settings::touch_id(s);
-        if t["unlock"] == json!(true) && settings::remember(s) {
+        if t["unlock"] == json!(true) {
             let hint = json!({ "unlock": true, "autoPrompt": t["autoPrompt"] });
             let _ = atomic_write(&file, hint.to_string().as_bytes());
         } else if std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
             let _ = std::fs::remove_file(&file);
+        }
+    }
+
+    /// Keeps the password sealed to the Secure Enclave while Touch ID unlock is on. A seal
+    /// that fails (no fingerprints enrolled, say) leaves any earlier one; Touch ID unlock
+    /// then asks for the password if that one no longer opens the vault.
+    fn seal_for_touch_id(&self, s: &Map<String, Value>, password: &SecretString) {
+        if settings::touch_id(s)["unlock"] == json!(true) {
+            let _ = enclave::seal(&self.data_dir, password);
+        } else {
+            enclave::remove(&self.data_dir);
         }
     }
 
@@ -558,6 +570,7 @@ impl App {
                 let _ = self.keyring.ensure(keyring::PASSWORD, &password);
             }
             self.write_touch_id_hint(&s);
+            self.seal_for_touch_id(&s, &password);
         }
         *lock(&self.password) = Some(password);
         *lock(&self.secret_key) = key;
@@ -760,7 +773,7 @@ impl App {
                 .with_store(|s| Ok(s.settings()?.clone()))
                 .unwrap_or_default();
             let t = settings::touch_id(&s);
-            let enabled = t["unlock"] == json!(true) && settings::remember(&s);
+            let enabled = t["unlock"] == json!(true);
             (t, enabled)
         } else {
             let t = self.touch_id_hint();
@@ -774,6 +787,8 @@ impl App {
             Some("Touch ID unlock is off. Enter the master password.")
         } else if self.data_dir.join(LOCKED_FILE).exists() {
             Some("After Lock, enter the master password once.")
+        } else if !enclave::exists(&self.data_dir) {
+            Some("Enter the master password once to start using Touch ID unlock.")
         } else {
             None
         };
@@ -830,6 +845,32 @@ impl App {
         Ok(ok)
     }
 
+    /// Touch ID for unlocking: the Secure Enclave key's own check, with the same bookkeeping
+    /// as [`App::prompt`].
+    async fn unseal(self: &Arc<Self>, reason: &str) -> Result<Unsealed, String> {
+        let epoch = lock(&self.proof).epoch;
+        let _one = self.proving.lock().await;
+        if lock(&self.proof).epoch != epoch {
+            return Err("Vault is locked".into());
+        }
+        self.prompting.fetch_add(1, Ordering::SeqCst);
+        let (dir, reason) = (self.data_dir.clone(), reason.to_owned());
+        let r = blocking(move || enclave::open(&dir, &reason))
+            .await
+            .unwrap_or(Unsealed::Canceled);
+        self.prompting.fetch_sub(1, Ordering::SeqCst);
+        if let Some(app) = self.tauri.get() {
+            ui::refocus_quick(app);
+        }
+        if lock(&self.proof).epoch != epoch {
+            return Err("Vault is locked".into());
+        }
+        if matches!(r, Unsealed::Password(_)) {
+            self.mark_proven();
+        }
+        Ok(r)
+    }
+
     pub async fn unlock_touch_id(self: &Arc<Self>) -> Value {
         let r = self.unlock_touch_id_inner().await;
         if r["ok"] == json!(true) {
@@ -851,9 +892,18 @@ impl App {
             );
         }
         let generation = self.generation();
-        if !matches!(self.prompt("unlock VaultOS").await, Ok(true)) {
-            return json!({ "ok": false, "canceled": true, "error": "Touch ID was not confirmed. Enter the master password." });
-        }
+        let pw = match self.unseal("unlock VaultOS").await {
+            Ok(Unsealed::Password(pw)) => pw,
+            Ok(Unsealed::Unavailable) => {
+                enclave::remove(&self.data_dir);
+                return refused(
+                    "Touch ID unlock needs the master password once more (were fingerprints changed?). Enter it to continue.",
+                );
+            }
+            _ => {
+                return json!({ "ok": false, "canceled": true, "error": "Touch ID was not confirmed. Enter the master password." })
+            }
+        };
         let _turn = self.unlocks.lock().await;
         if self.locked_since(generation) {
             self.forget_proof();
@@ -881,10 +931,9 @@ impl App {
             if me.data_dir.join(LOCKED_FILE).exists() {
                 return None;
             }
-            let pw = me.keyring.get(keyring::PASSWORD)?;
             let key = me.open_vault(&h2, &pw, None).ok()?;
             let s = h2.with_store(|s| s.settings().cloned()).ok()?;
-            let on = settings::touch_id(&s)["unlock"] == json!(true) && settings::remember(&s);
+            let on = settings::touch_id(&s)["unlock"] == json!(true);
             on.then_some((pw, key))
         })
         .await
@@ -898,6 +947,9 @@ impl App {
                 json!({ "ok": true })
             }
             None => {
+                // A password changed elsewhere, a Lock or Touch ID unlock turned off: the next
+                // password unlock seals again if it is on.
+                enclave::remove(&self.data_dir);
                 if !was_unlocked {
                     // Picks up a Touch ID setting turned off elsewhere before locking again.
                     let _ = h.with_store(|s| -> Result<(), Error> {
@@ -995,9 +1047,13 @@ impl App {
         *lock(&self.password) = Some(pw);
     }
 
+    /// After the settings or the password changed: the hint, and the sealed password.
     pub fn rewrite_touch_id_hint(&self) {
         if let Ok(s) = self.with_store(|s| Ok(s.settings()?.clone())) {
             self.write_touch_id_hint(&s);
+            if let Some(pw) = self.password() {
+                self.seal_for_touch_id(&s, &pw);
+            }
         }
     }
 

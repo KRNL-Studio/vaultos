@@ -129,20 +129,6 @@ pub fn normalize(
         }
         out.insert("touchId".into(), merged);
     }
-    // Touch ID unlock reads the remembered password, so it cannot outlive that setting.
-    let remembering = out
-        .get("rememberPassword")
-        .map_or_else(|| remember(current), |v| v == &json!(true));
-    let touch = out
-        .get("touchId")
-        .cloned()
-        .unwrap_or_else(|| touch_id(current));
-    if !remembering && touch["unlock"] == json!(true) {
-        let mut t = touch;
-        t["unlock"] = json!(false);
-        t["autoPrompt"] = json!(false);
-        out.insert("touchId".into(), t);
-    }
     Ok(out)
 }
 
@@ -162,8 +148,9 @@ pub fn weakens_security(patch: &Value, current: &Map<String, Value>) -> bool {
         || (on(&t["autoPrompt"]) && !on(&ct["autoPrompt"]))
 }
 
-/// Turning a Touch ID option on needs Touch ID and background access; turning one off
-/// always works.
+/// Turning a Touch ID option on needs Touch ID; turning one off always works. Touch ID
+/// unlock uses its own copy of the password, sealed to the Secure Enclave, so it does not
+/// need background access.
 pub fn check_touch_id(
     patch: &Value,
     current: &Map<String, Value>,
@@ -182,12 +169,6 @@ pub fn check_touch_id(
     if !available {
         return Err("Touch ID is not available on this device".into());
     }
-    let remembering = patch["rememberPassword"]
-        .as_bool()
-        .unwrap_or_else(|| remember(current));
-    if !remembering {
-        return Err("Touch ID needs background access (remembered password) to be on".into());
-    }
     Ok(())
 }
 
@@ -200,15 +181,13 @@ mod tests {
     }
 
     #[test]
-    fn touch_id_unlock_goes_with_background_access() {
+    fn touch_id_unlock_stays_without_background_access() {
         let current = map(
             json!({ "rememberPassword": true, "touchId": { "unlock": true, "autoPrompt": true } }),
         );
         let out = normalize(&json!({ "rememberPassword": false }), &current).expect("valid");
-        assert_eq!(
-            out["touchId"],
-            json!({ "unlock": false, "humanActions": false, "autoPrompt": false })
-        );
+        assert!(out.get("touchId").is_none());
+        assert_eq!(out["rememberPassword"], json!(false));
     }
 
     #[test]
@@ -239,12 +218,12 @@ mod tests {
     }
 
     #[test]
-    fn touch_id_needs_background_access() {
+    fn touch_id_needs_only_the_sensor() {
         let current = Map::new();
         let patch = json!({ "touchId": { "unlock": true } });
         assert!(check_touch_id(&patch, &current, false).is_err());
-        assert!(check_touch_id(&patch, &current, true).is_err());
-        let with = json!({ "rememberPassword": true, "touchId": { "unlock": true } });
-        assert!(check_touch_id(&with, &current, true).is_ok());
+        assert!(check_touch_id(&patch, &current, true).is_ok());
+        let off = json!({ "touchId": { "unlock": false } });
+        assert!(check_touch_id(&off, &current, false).is_ok());
     }
 }

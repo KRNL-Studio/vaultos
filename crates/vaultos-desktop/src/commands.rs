@@ -355,6 +355,7 @@ async fn change_password(app: &Arc<App>, a: &Args) -> Reply {
     })
     .await?;
     app.set_password(new_s.clone());
+    app.rewrite_touch_id_hint();
     let _ = app.keyring.clear(keyring::PASSWORD);
     let remember = store(app, |s| Ok(settings::remember(s.settings()?))).await?;
     let updated = remember && app.keyring.set(keyring::PASSWORD, &new_s).is_ok();

@@ -1504,21 +1504,21 @@ git config --global commit.gpgsign true`;
     if (showTouchId) scroll = panel(page, "Touch ID", {
         tag: TOUCH_ID.available ? "available" : "not available now"
     });
-    const touchBox = (text, checked, needsRemember) => {
+    const touchBox = (text, checked) => {
         const label = el(`<label class="toggle"><input type="checkbox" class="switch" /><span></span></label>`);
         label.querySelector("span").textContent = text;
         const box = label.querySelector("input");
         box.checked = checked;
-        box.disabled = !checked && (!TOUCH_ID.available || needsRemember && !s.rememberPassword);
+        box.disabled = !checked && !TOUCH_ID.available;
         if (showTouchId) scroll.appendChild(label);
         return box;
     };
     if (showTouchId) {
-        scroll.appendChild(el(`<p class="note">Off by default. Needs background access above, because Touch ID unlock uses the password the Keychain remembers.</p>`));
+        scroll.appendChild(el(`<p class="note">Off by default. Touch ID unlock keeps its own copy of the master password, sealed by a key in this Mac's Secure Enclave that only your fingerprint can use; it does not need background access. It starts after the next time you enter the password, and asks for the password again if fingerprints change.</p>`));
     }
-    const touchUnlock = touchBox("Unlock this window with Touch ID", t.unlock === true, true);
-    const touchAuto = touchBox("Ask for Touch ID when the window opens", t.autoPrompt === true, true);
-    const touchHuman = touchBox("Confirm reveal, copy, export, approvals, agent and security changes with Touch ID", t.humanActions === true, true);
+    const touchUnlock = touchBox("Unlock this window with Touch ID", t.unlock === true);
+    const touchAuto = touchBox("Ask for Touch ID when the window opens", t.autoPrompt === true);
+    const touchHuman = touchBox("Confirm reveal, copy, export, approvals, agent and security changes with Touch ID", t.humanActions === true);
     if (showTouchId) scroll.appendChild(el(`<p class="note">After Lock, the master password is required once. Confirmations cover the next 30 seconds; when Touch ID cannot be shown or is cancelled, the master password is asked instead. Touch ID guards this window only: anything running as your account can still use agent tokens and an unlocked API.</p>`));
     scroll = page;
     const err = el(`<div class="err"></div>`);
