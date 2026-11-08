@@ -270,9 +270,15 @@ pub fn assert(rp_id: &str, origin: &str, challenge: &[u8], private_key: &str) ->
 }
 
 /// Whether a page at `host` may use passkeys for `rp_id`: the host itself, or a parent
-/// domain of it that is not a public suffix (WebAuthn's "registrable domain suffix").
+/// domain of it that is not a public suffix (WebAuthn's "registrable domain suffix"). Never
+/// an IP address, which WebAuthn does not allow.
 pub fn rp_id_fits(rp_id: &str, host: &str) -> bool {
-    if rp_id.is_empty() || rp_id.len() > 253 || rp_id != rp_id.to_ascii_lowercase() {
+    if rp_id.is_empty()
+        || rp_id.len() > 253
+        || rp_id != rp_id.to_ascii_lowercase()
+        || rp_id.contains([':', '[', ']'])
+        || rp_id.parse::<std::net::Ipv4Addr>().is_ok()
+    {
         return false;
     }
     if rp_id == host {
@@ -396,6 +402,8 @@ mod tests {
         assert!(!rp_id_fits("Example.com", "example.com"));
         assert!(!rp_id_fits("", "example.com"));
         assert!(rp_id_fits("localhost", "localhost"));
+        assert!(!rp_id_fits("127.0.0.1", "127.0.0.1"));
+        assert!(!rp_id_fits("[::1]", "[::1]"));
     }
 
     #[test]

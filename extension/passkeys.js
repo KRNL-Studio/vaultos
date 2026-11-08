@@ -112,7 +112,7 @@
             getAuthenticatorData: () => buffer(r.authenticatorData),
             getPublicKey: () => buffer(r.publicKey),
             getPublicKeyAlgorithm: () => -7,
-            getTransports: () => [ "hybrid", "internal" ]
+            getTransports: () => [ "internal" ]
         });
         return credential(r, response, {
             clientDataJSON: r.clientDataJSON,
@@ -120,7 +120,7 @@
             authenticatorData: r.authenticatorData,
             publicKey: r.publicKey,
             publicKeyAlgorithm: -7,
-            transports: [ "hybrid", "internal" ]
+            transports: [ "internal" ]
         }, extensions);
     };
 

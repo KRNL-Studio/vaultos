@@ -184,10 +184,15 @@ async function passkey(m, s) {
     }
     const id = S.pairingCode(crypto.getRandomValues(new Uint8Array(8)));
     const done = new Promise(resolve => passkeyRequests.set(id, { kind, tabId: s.tab.id, pageId: m.id, url: s.url, q, passkeys, resolve }));
-    const w = await api.windows.create({ url: api.runtime.getURL(`${PASSKEY_WINDOW}#${id}`), type: "popup", width: 420, height: 480, focused: true });
-    const r = passkeyRequests.get(id);
-    if (r) r.windowId = w.id;
-    else api.windows.remove(w.id).catch(() => {});
+    try {
+        const w = await api.windows.create({ url: api.runtime.getURL(`${PASSKEY_WINDOW}#${id}`), type: "popup", width: 420, height: 480, focused: true });
+        const r = passkeyRequests.get(id);
+        if (r) r.windowId = w.id;
+        else api.windows.remove(w.id).catch(() => {});
+    } catch {
+        // No window, no choice: the browser's own WebAuthn instead.
+        finishPasskey(id, { ok: false, code: "fallback" });
+    }
     return done;
 }
 
