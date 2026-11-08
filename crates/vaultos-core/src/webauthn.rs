@@ -121,7 +121,7 @@ fn text(out: &mut Vec<u8>, s: &str) {
 
 /// The uncompressed point's coordinates.
 fn coordinates(key: &SigningKey) -> ([u8; 32], [u8; 32]) {
-    let point = key.verifying_key().to_encoded_point(false);
+    let point = key.verifying_key().to_sec1_point(false);
     let mut x = [0u8; 32];
     let mut y = [0u8; 32];
     if let (Some(px), Some(py)) = (point.x(), point.y()) {
@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(reg.public_key.len(), 91);
         let public = VerifyingKey::from_sec1_bytes(&reg.public_key[26..]).unwrap();
         assert_eq!(
-            &public.to_encoded_point(false).as_bytes()[1..33],
+            &public.to_sec1_point(false).as_bytes()[1..33],
             &cose[10..42]
         );
 
