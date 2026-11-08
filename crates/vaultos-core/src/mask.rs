@@ -1,6 +1,7 @@
 //! Masks secret values in a stream of output, as `vaultos run` and `run_with_secrets` print
 //! a program's output. A value split across two reads is still masked: the end of a read
-//! that could begin a value is held until the next one shows it is not.
+//! that could begin a value is held until the next one shows it is not. A value already
+//! complete is masked at once, even while a longer one could still follow it.
 
 use zeroize::Zeroizing;
 
@@ -13,6 +14,9 @@ pub struct Masker {
     /// Longest first, so a value that contains another is masked whole.
     needles: Vec<Zeroizing<Vec<u8>>>,
     pending: Zeroizing<Vec<u8>>,
+    /// The mask for a value at the start of `pending` is already out; held because a longer
+    /// value could still begin there, which would be masked the same way.
+    masked: bool,
 }
 
 impl std::fmt::Debug for Masker {
@@ -39,6 +43,7 @@ impl Masker {
         Masker {
             needles,
             pending: Zeroizing::new(Vec::new()),
+            masked: false,
         }
     }
 
@@ -61,8 +66,14 @@ impl Masker {
         let buf = &self.pending;
         let mut out = Vec::with_capacity(buf.len());
         let mut i = 0;
-        'scan: while i < buf.len() {
+        let mut masked = false;
+        while i < buf.len() {
             let rest = &buf[i..];
+            // The longest value complete here: the list is longest first.
+            let found = self.needles.iter().find(|n| rest.starts_with(n.as_slice()));
+            if found.is_some() && !(i == 0 && self.masked) {
+                out.extend_from_slice(MASK);
+            }
             // Hold while a longer value could still begin here, so the longest one is masked
             // however the output was cut into reads.
             if !last
@@ -71,20 +82,20 @@ impl Masker {
                     .iter()
                     .any(|n| n.len() > rest.len() && n.starts_with(rest))
             {
+                masked = found.is_some();
                 break;
             }
-            for n in &self.needles {
-                if rest.starts_with(n) {
-                    out.extend_from_slice(MASK);
-                    i += n.len();
-                    continue 'scan;
+            match found {
+                Some(n) => i += n.len(),
+                None => {
+                    out.push(buf[i]);
+                    i += 1;
                 }
             }
-            out.push(buf[i]);
-            i += 1;
         }
         let held = Zeroizing::new(self.pending[i..].to_vec());
         self.pending = held;
+        self.masked = masked;
         out
     }
 }
@@ -136,5 +147,24 @@ mod tests {
         let bytes: Vec<String> = "00000000!".chars().map(String::from).collect();
         let bytes: Vec<&str> = bytes.iter().map(String::as_str).collect();
         assert_eq!(run(&values, &bytes), whole);
+    }
+
+    #[test]
+    fn shows_a_complete_value_without_waiting_for_more() {
+        let m = "<concealed by VaultOS>";
+        let mut masker = Masker::new(["abcd", "abcde"]);
+        assert_eq!(
+            masker.push(b"abcd"),
+            m.as_bytes(),
+            "not held for a longer value"
+        );
+        assert_eq!(masker.push(b"e!"), b"!", "the longer value is masked once");
+        assert_eq!(masker.finish(), b"");
+        let mut masker = Masker::new(["abcd", "abcde"]);
+        assert_eq!(masker.push(b"abcd"), m.as_bytes());
+        assert_eq!(masker.push(b"x"), b"x");
+        let mut masker = Masker::new(["abcd", "abcde"]);
+        assert_eq!(masker.push(b"abcd"), m.as_bytes());
+        assert_eq!(masker.finish(), b"");
     }
 }

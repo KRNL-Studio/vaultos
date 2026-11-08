@@ -35,7 +35,7 @@ Keep authorization in the Rust process (the owner's API and the desktop's comman
 
 ## Releases
 
-The checked-in workflows test the source and packaged app on Apple Silicon and Intel macOS and on Ubuntu, and upload the macOS ZIPs and the Linux tarball as workflow artifacts. Nothing is published automatically on pull requests. To publish, create a reviewed version tag and dispatch the release workflow for that exact tag. The workflow rejects nonmatching version tags and attaches unsigned ZIPs, the Linux tarball, checksums, and dependency inventories to a GitHub prerelease.
+The checked-in workflows test the source and packaged app on Apple Silicon and Intel macOS and on Ubuntu, and upload the macOS ZIPs and the Linux tarball as workflow artifacts. Nothing is published automatically on pull requests. To publish, create a reviewed version tag and dispatch the release workflow from that tag (**Use workflow from → Tags**), naming the same tag as its input; build provenance records the commit the workflow ran from. The workflow rejects nonmatching version tags and attaches unsigned ZIPs, the Linux tarball, checksums, and dependency inventories to a GitHub prerelease.
 
 For a local build, use a clean checkout with the lockfiles, run checks on Linux and macOS, build both architectures, then verify the checksums, package inventory, and launch on supported hardware. Confirm that only synthetic screenshots are included and no runtime vault files, tokens, signing credentials, personal build paths or private history are in the source or artifacts. Record which architectures and OS versions were actually exercised; a cross-build is not a runtime test.
 

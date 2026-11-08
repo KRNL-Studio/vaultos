@@ -43,8 +43,13 @@ impl std::fmt::Debug for SshKey {
 impl SshKey {
     pub fn generate(comment: &str) -> SshKey {
         let seed = Zeroizing::new(crate::crypto::random_array::<32>());
+        SshKey::from_seed(&seed, comment)
+    }
+
+    /// The key pair for a 32-byte Ed25519 seed.
+    pub fn from_seed(seed: &[u8; 32], comment: &str) -> SshKey {
         SshKey {
-            key: SigningKey::from_bytes(&seed),
+            key: SigningKey::from_bytes(seed),
             comment: comment.to_owned(),
         }
     }

@@ -9,6 +9,10 @@ pub const SCHEME: &str = "vault://";
 /// Most references one call resolves.
 pub const MAX_REFS: usize = 200;
 
+/// Longest decoded part, in bytes. A name VaultOS stores is at most 256 UTF-16 units, 768
+/// bytes of UTF-8, and earlier versions read references up to 1,024 bytes long.
+pub const MAX_PART: usize = 1024;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretRef {
     pub project: String,
@@ -26,9 +30,9 @@ impl SecretRef {
             )
         };
         let rest = text.trim().strip_prefix(SCHEME).ok_or_else(bad)?;
-        // The limit is on the decoded parts, which `to_uri` may write three times as long;
-        // the text itself may be as long as that.
-        if rest.len() > 3 * 1024 + 2 {
+        // The limit is on each decoded part, which `to_uri` may write three times as long, so
+        // anything VaultOS writes it reads back.
+        if rest.len() > 3 * (3 * MAX_PART) + 2 {
             return Err(bad());
         }
         let parts: Vec<&str> = rest.split('/').collect();
@@ -37,28 +41,24 @@ impl SecretRef {
                 .decode_utf8()
                 .map_err(|_| bad())?
                 .into_owned();
-            if d.trim().is_empty() || d.chars().any(char::is_control) {
+            if d.len() > MAX_PART || d.trim().is_empty() || d.chars().any(char::is_control) {
                 return Err(bad());
             }
             Ok(d)
         };
-        let r = match parts.as_slice() {
-            [p, i] => SecretRef {
+        match parts.as_slice() {
+            [p, i] => Ok(SecretRef {
                 project: decode(p)?,
                 item: decode(i)?,
                 field: "value".into(),
-            },
-            [p, i, f] => SecretRef {
+            }),
+            [p, i, f] => Ok(SecretRef {
                 project: decode(p)?,
                 item: decode(i)?,
                 field: decode(f)?,
-            },
-            _ => return Err(bad()),
-        };
-        if r.project.len() + r.item.len() + r.field.len() > 1024 {
-            return Err(bad());
+            }),
+            _ => Err(bad()),
         }
-        Ok(r)
     }
 
     /// The reference as text, encoding what would not survive parsing.
@@ -167,6 +167,16 @@ mod tests {
         assert!(r.to_uri().len() > 3000);
         assert_eq!(SecretRef::parse(&r.to_uri()).unwrap(), r);
         assert!(SecretRef::parse(&format!("vault://P/I/{}", "x".repeat(1100))).is_err());
+        // What earlier versions read still parses.
+        assert!(SecretRef::parse(&format!("vault://P/{}", "x".repeat(1019))).is_ok());
+        // The longest names VaultOS stores: 256 UTF-16 units, three bytes each in UTF-8.
+        let long = "\u{8a9e}".repeat(256);
+        let r = SecretRef {
+            project: long.clone(),
+            item: long.clone(),
+            field: long,
+        };
+        assert_eq!(SecretRef::parse(&r.to_uri()).unwrap(), r);
     }
 
     #[test]

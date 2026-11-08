@@ -2,8 +2,11 @@
 
 This is the cryptographic part of VaultOS's on-disk and sync formats, precise enough to
 reimplement. [`v4-vectors.json`](../../crates/vaultos-core/tests/fixtures/v4-vectors.json) gives
-known answers for every derivation below; `crates/vaultos-core/tests/vectors.rs` checks them on
-every CI run, and they were reproduced independently (Python's standard library for HKDF, HMAC
+known answers for Argon2id, both Account Unlock Keys, the file MAC key with an HMAC over sample
+bytes, one sealed box with its associated data, and the Secret Key's encoding;
+`crates/vaultos-core/tests/vectors.rs` checks them on every CI run. They do not cover the file's
+canonical form, the audit or sync signatures, or the sync index keys. They were reproduced
+independently (Python's standard library for HKDF, HMAC
 and the Secret Key encoding; OpenSSL's Argon2id and ChaCha20-Poly1305, with HChaCha20 in
 Python, for the rest). The code is in `crates/vaultos-core/src/crypto.rs` and `format.rs`
 unless named.
@@ -81,23 +84,34 @@ one key. The associated data names what the box is and where it belongs:
 | Item secret (value, password, OTP, secret fields) | PK | `item-secret`, vault id, project id, item id |
 | Attachment | PK | `attachment`, vault id, project id, item id, attachment id |
 
-So a box copied to another item, project, purpose or vault fails to open. Plaintexts are JSON.
+So a box copied to another item, project, purpose or vault fails to open. A box's plaintext is
+compact JSON, except an attachment's, which is the file's bytes.
 Item secrets stay sealed while the vault is unlocked and are opened only when used.
 
 ## File MAC
 
-`vault.enc` is JSON with `"v":4` first and `"mac"` last. The MAC is
-HMAC-SHA256(file MAC key, `"vaultos/v4/file"` ‖ 0x00 ‖ the file's bytes without the `mac`
-field), base64. It is verified after VK is unwrapped and before anything else is read, so a
-file with its boxes reordered, removed or replaced by older ones (from the same vault), or with
-fields added, is refused. Replacing the whole file with an older copy is not detected (see
+`vault.enc` is JSON with `"v":4` first and `"mac"` last. It is parsed into fixed structures
+that refuse unknown fields at every level, boxes included. The MAC is HMAC-SHA256(file MAC key,
+`"vaultos/v4/file"` ‖ 0x00 ‖ C), base64, where C is the parsed file written again without `mac`:
+compact JSON (no whitespace, `serde_json` escaping) with fields in this order:
+
+```text
+v, vaultId, kdf {alg, m, t, p, salt}, secretKey ({id} or null), vaultKey, auditKey, auditSeed,
+meta, projects [{id, key, meta, items [{id, rev, meta, secret}]}], history
+```
+
+Each box is `{"n", "c"}`. VaultOS writes C followed by `,"mac":"…"` before the closing brace.
+Because the MAC covers C rather than the bytes read, the same values with other whitespace or
+field order still verify. It is verified after VK is unwrapped and before anything else is
+read, so a file with its boxes or entries reordered, removed or replaced by older ones (from
+the same vault) is refused, and one with fields added does not parse. Replacing the whole file with an older copy is not detected (see
 [SECURITY.md](../../SECURITY.md)). A file whose `v` is not 4 is refused before parsing (a newer one with a message to
 update VaultOS).
 
 ## Audit log
 
 `audit-v4.log` is one JSON entry per line: `seq`, `at`, `actor`, `action`, `detail` (control
-characters replaced, at most 1024 characters), `prev` (hex SHA-256 of the previous line, empty
+characters replaced, at most 1024 characters), `prev` (hex SHA-256 of the previous line; 64 zeros
 for the first) and `sig`: Ed25519 over `"vaultos/v4/audit"` ‖ 0x00 ‖ vault id ‖ 0x00 ‖ the
 entry's JSON without `sig`. The 32-byte signing seed is random and sealed in the vault
 (`auditSeed`); its public key is in the file in the clear (`auditKey`), so the log can be
@@ -108,11 +122,11 @@ rewriting it without the seed is detected when the vault is unlocked. Entries ho
 
 | What | Form | Stored as |
 | --- | --- | --- |
-| Session token (owner socket) | 32 random bytes, hex | `daemon.json` (0600), beside the socket |
+| Session token (owner socket) | 32 random bytes, hex | `daemon.json` (0600) in the data directory, where the socket is too unless that path is too long for one |
 | Agent token | 32 random bytes, hex | SHA-256 hex in the sealed vault metadata |
 | Browser pairing key | 32 random bytes, hex | SHA-256 hex in the sealed vault metadata, with the extension's origin |
 | Leak index key | 32 random bytes | `leak-index.json` (0600), beside 16-byte HMAC-SHA256 tags |
-| SSH keys | Ed25519 seed | inside an item's sealed secret |
+| SSH keys | Unencrypted OpenSSH Ed25519 private key (PEM) | inside an item's sealed secret |
 
 Token hashes are unsalted because tokens are 256-bit random values; a guess is no easier
 against the hash. The leak index key sits beside its tags, so anyone who can read that file
@@ -121,8 +135,10 @@ can test guesses for indexed values offline (see [SECURITY.md](../../SECURITY.md
 ## Sync format 2
 
 Each device keeps an age X25519 identity and an Ed25519 seed in the sealed vault metadata, and
-pins the other devices' public keys there. Every record, tombstone and machine file in the Git
-remote is age-encrypted to all trusted devices' recipients; the plaintext is canonical JSON.
+pins the other devices' public keys there. Every record and tombstone in the Git remote is
+age-encrypted to all trusted devices' recipients; the plaintext is canonical JSON. Machine files
+(each device's id, label and public keys), `recipients.txt`, manifests and heartbeats are in the
+clear; machine files are trusted only after their fingerprints are compared out of band.
 Each push signs a manifest (Ed25519 over `"vaultos/v4/sync-manifest"` ‖ 0x00 ‖ canonical JSON
 naming every file and its hash) and a heartbeat (`"vaultos/v4/sync-heartbeat"` ‖ 0x00 ‖ …), and
 a pull verifies them against the pins before applying anything. Manifests sign ciphertext
