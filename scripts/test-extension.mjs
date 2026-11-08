@@ -176,11 +176,22 @@ try {
     console.log("saved the new login");
 
     // The popup offers a submitted login only where the page shows no sign-in form again.
+    // The worker cannot read tabs' addresses, so the test's tab is the one whose content
+    // script answers.
+    const testTab = `(async () => {
+        for (const t of await api.tabs.query({})) {
+            try {
+                await api.tabs.sendMessage(t.id, { op: "signInShown" }, { frameId: 0 });
+                return t;
+            } catch {}
+        }
+        throw new Error("No tab has the content script");
+    })()`;
     const popupSave = async (url, op) => {
         await send("Page.navigate", { url }, tab);
         await until(url, () => evaluate(tab, `document.readyState === "complete" && location.href === ${JSON.stringify(url)}`));
         return evaluate(sw, `(async () => {
-            const [ t ] = await api.tabs.query({ url: "http://localhost:${port}/*" });
+            const t = await ${testTab};
             await session.set({ [\`save:\${t.id}\`]: { url: ${JSON.stringify(url)}, username: "carol", password: "synthetic-e2e-refused", at: Date.now() } });
             return popupOps.${op}({ tabId: t.id });
         })()`);
@@ -192,7 +203,7 @@ try {
     if (notSaved.ok) throw new Error("The popup saved a refused login");
     const offered = await popupSave(`http://localhost:${port}/done`, "tabPendingSave");
     if (!offered.ok || !offered.pending || offered.pending.username !== "carol") throw new Error(`The popup did not offer the login: ${JSON.stringify(offered)}`);
-    await evaluate(sw, `api.tabs.query({ url: "http://localhost:${port}/*" }).then(([ t ]) => popupOps.tabDismissSave({ tabId: t.id }))`);
+    await evaluate(sw, `${testTab}.then(t => popupOps.tabDismissSave({ tabId: t.id }))`);
     console.log("the popup offers saves only without a sign-in form");
     await send("Browser.close").catch(() => null);
 } catch (e) {
