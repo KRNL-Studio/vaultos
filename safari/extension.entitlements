@@ -4,13 +4,14 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+	<key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
 	<array>
-		<string>/Library/Application Support/VaultOS-Preview/</string>
+		<string>/Library/Application Support/VaultOS-Preview/daemon.json</string>
 	</array>
 	<key>com.apple.security.temporary-exception.sbpl</key>
 	<array>
 		<string>(allow network-outbound (home-literal "/Library/Application Support/VaultOS-Preview/vaultosd.sock"))</string>
+		<string>(allow network-outbound (regex #"^/private/var/folders/[^/]+/[^/]+/T/vaultos-[0-9]+/vaultosd-[0-9a-f]+\.sock$"))</string>
 	</array>
 </dict>
 </plist>

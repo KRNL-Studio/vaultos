@@ -305,10 +305,12 @@
         ui().append(b);
     }
 
-    api.runtime.onMessage.addListener((m, sender) => {
+    api.runtime.onMessage.addListener((m, sender, respond) => {
+        if (sender.id !== api.runtime.id || sender.tab || window !== top || !m) return;
         // The popup's Fill, relayed by the service worker.
-        if (sender.id !== api.runtime.id || sender.tab || window !== top || !m || m.op !== "fill") return;
-        fill(String(m.projectId), String(m.itemId), null);
+        if (m.op === "fill") fill(String(m.projectId), String(m.itemId), null);
+        // Before the popup offers or makes a save: whether a sign-in form is shown again.
+        else if (m.op === "signInShown") respond(signInShown());
     });
 
     // After a login form's page has gone; asked again in case its offer was still arriving.

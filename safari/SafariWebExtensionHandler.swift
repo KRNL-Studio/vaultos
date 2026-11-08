@@ -1,8 +1,9 @@
 // VaultOS's Safari app extension. Safari hands it each native message from the VaultOS web
 // extension packaged with it (no other extension can reach it), and it relays the message to
 // the app through vaultos-browser, the helper Chromium browsers start, run from this bundle
-// under this extension's sandbox, which allows only the VaultOS data folder and the owner's
-// socket in it. It keeps nothing between messages.
+// under this extension's sandbox, which lets it read only the data folder's session file and
+// connect only to the owner's socket (in that folder, or in the owner's short fallback folder
+// when the path is too long). It keeps nothing between messages.
 import Foundation
 import SafariServices
 
@@ -27,8 +28,9 @@ private func failure(_ text: String) -> [String: Any] {
     ["ok": false, "code": "no_host", "error": text]
 }
 
-/// The VaultOS data folder in the real home folder; inside the sandbox HOME is the
-/// extension's container.
+/// The default VaultOS data folder in the real home folder; inside the sandbox HOME is the
+/// extension's container. Safari has no way to learn another one, and the sandbox allows no
+/// other, so VaultOS run with another `VAULTOS_DATA_DIR` cannot be reached from Safari.
 private func dataDir() -> String? {
     guard let entry = getpwuid(getuid()), let home = entry.pointee.pw_dir else { return nil }
     return String(cString: home) + "/Library/Application Support/VaultOS-Preview"

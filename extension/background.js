@@ -109,6 +109,18 @@ async function target(p, tabId) {
     return same[0] || null;
 }
 
+/**
+ * Whether the tab's page shows a sign-in form again, which usually means the password was
+ * refused; true when its content script cannot say. The in-page offer checks the same.
+ */
+async function signInShown(tabId) {
+    try {
+        return await api.tabs.sendMessage(tabId, { op: "signInShown" }, { frameId: 0 }) !== false;
+    } catch {
+        return true;
+    }
+}
+
 const fromPopup = s => s.id === api.runtime.id && !s.tab && typeof s.url === "string" && s.url.startsWith(api.runtime.getURL(""));
 const fromPage = s => s.id === api.runtime.id && Boolean(s.tab) && typeof s.url === "string" && /^https?:\/\//.test(s.url);
 
@@ -169,9 +181,11 @@ const popupOps = {
     // A login submitted in the tab, offered here too (and only here where pages get no
     // controls). The tab's own records, as the page's top frame would see them.
     async tabPendingSave(m) {
+        if (await signInShown(m.tabId)) return { ok: true, pending: null };
         return pageOps.pendingSave(m, { tab: { id: m.tabId }, frameId: 0 });
     },
     async tabSave(m) {
+        if (await signInShown(m.tabId)) return { ok: false, code: "refused", error: "This page shows a sign-in form again, so the password may have been refused. Nothing was saved." };
         return pageOps.save(m, { tab: { id: m.tabId }, frameId: 0 });
     },
     async tabDismissSave(m) {

@@ -26,6 +26,7 @@ const server = http.createServer((req, res) => {
         req.on("end", () => res.end(page("Welcome", "<p>Signed in</p>")));
         return;
     }
+    if (req.url === "/done") return res.end(page("Welcome", "<p>Signed in</p>"));
     res.end(page("Sign in", `<form method="post" action="/welcome" style="margin:40px">
 <label>Email <input id="user" name="username" autocomplete="username" style="width:260px"></label><br><br>
 <label>Password <input id="pass" type="password" name="password" autocomplete="current-password" style="width:260px"></label><br><br>
@@ -173,6 +174,26 @@ try {
     await click(save);
     await until("the saved note", () => find("note", "Saved as"));
     console.log("saved the new login");
+
+    // The popup offers a submitted login only where the page shows no sign-in form again.
+    const popupSave = async (url, op) => {
+        await send("Page.navigate", { url }, tab);
+        await until(url, () => evaluate(tab, `document.readyState === "complete" && location.href === ${JSON.stringify(url)}`));
+        return evaluate(sw, `(async () => {
+            const [ t ] = await api.tabs.query({ url: "http://localhost:${port}/*" });
+            await session.set({ [\`save:\${t.id}\`]: { url: ${JSON.stringify(url)}, username: "carol", password: "synthetic-e2e-refused", at: Date.now() } });
+            return popupOps.${op}({ tabId: t.id });
+        })()`);
+    };
+    await send("Page.enable", {}, tab);
+    const refused = await popupSave(`http://localhost:${port}/login`, "tabPendingSave");
+    if (!refused.ok || refused.pending !== null) throw new Error(`The popup offered a refused login: ${JSON.stringify(refused)}`);
+    const notSaved = await popupSave(`http://localhost:${port}/login`, "tabSave");
+    if (notSaved.ok) throw new Error("The popup saved a refused login");
+    const offered = await popupSave(`http://localhost:${port}/done`, "tabPendingSave");
+    if (!offered.ok || !offered.pending || offered.pending.username !== "carol") throw new Error(`The popup did not offer the login: ${JSON.stringify(offered)}`);
+    await evaluate(sw, `api.tabs.query({ url: "http://localhost:${port}/*" }).then(([ t ]) => popupOps.tabDismissSave({ tabId: t.id }))`);
+    console.log("the popup offers saves only without a sign-in form");
     await send("Browser.close").catch(() => null);
 } catch (e) {
     console.error(e && e.stack || e);
