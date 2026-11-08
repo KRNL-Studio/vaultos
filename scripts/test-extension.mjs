@@ -98,6 +98,8 @@ try {
     // Pair, as the popup's button does; the owner's test confirmation says yes.
     const worker = await until("the extension's service worker", async () => [ ...targets.values() ].find(t => t.type === "service_worker" && t.url.startsWith(`chrome-extension://${EXTENSION_ID}/`)));
     const { sessionId: sw } = await send("Target.attachToTarget", { targetId: worker.targetId, flatten: true });
+    // The worker's target can appear before its script has run.
+    await until("the service worker's script", () => evaluate(sw, `typeof popupOps === "object"`));
     const status = await evaluate(sw, `popupOps.state()`);
     if (!status.ok || !status.running || !status.unlocked || status.paired) throw new Error(`Unexpected state before pairing: ${JSON.stringify(status)}`);
     const started = await evaluate(sw, `popupOps.pair({ name: "E2E Chromium" })`);

@@ -10,6 +10,10 @@ use vaultos_core::SecretString;
 pub const FILE: &str = "touch-id-unlock.json";
 
 pub enum Unsealed {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "only the Secure Enclave opens one")
+    )]
     Password(SecretString),
     /// Touch ID was not confirmed.
     Canceled,
