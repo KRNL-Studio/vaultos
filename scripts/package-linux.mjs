@@ -3,8 +3,9 @@
 // for that machine's architecture: the app links the system's WebKitGTK, so it cannot be
 // cross-built. scripts/install-linux.sh installs the result for the current user.
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { budget, build, checksum, sbom, TOOLS, version } from "./rust-dist.mjs";
 
 if (process.platform !== "linux") throw new Error("Build Linux artifacts on Linux; use npm run dist:mac on macOS");
@@ -36,10 +37,21 @@ cpSync("extension", path.join(folder, "extension"), {
     recursive: true
 });
 
+// The same build gives the same archive: names sorted, owners, modes and times fixed (to
+// SOURCE_DATE_EPOCH, else the last commit's time), and gzip without a timestamp.
 const archive = path.resolve("dist", `VaultOS-${v}-linux-${arch}-unsigned.tar.gz`);
-execFileSync("tar", [ "-czf", archive, "-C", path.dirname(folder), path.basename(folder) ], {
-    stdio: "inherit"
+let epoch = process.env.SOURCE_DATE_EPOCH;
+if (!epoch) {
+    try {
+        epoch = execFileSync("git", [ "log", "-1", "--format=%ct" ], { encoding: "utf8", stdio: [ "ignore", "pipe", "ignore" ] }).trim();
+    } catch {
+        epoch = "0";
+    }
+}
+const tar = execFileSync("tar", [ "--sort=name", "--format=gnu", "--owner=0", "--group=0", "--numeric-owner", "--mode=u+rwX,go+rX,go-w", `--mtime=@${epoch}`, "-cf", "-", "-C", path.dirname(folder), path.basename(folder) ], {
+    maxBuffer: 512 * 1024 * 1024
 });
+writeFileSync(archive, gzipSync(tar, { level: 9 }));
 budget(path.basename(folder), folder, 28);
 budget(path.basename(archive), archive, 10);
 checksum(archive);
