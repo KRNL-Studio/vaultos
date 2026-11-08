@@ -10,6 +10,8 @@ importScripts("shared.js");
 const HOST = "org.vaultos.preview.browser";
 const api = globalThis.browser ?? globalThis.chrome;
 const S = globalThis.VaultOSShared;
+/** Safari sends native messages to the app extension inside VaultOS.app; it has no ports to it. */
+const SAFARI = api.runtime.getURL("").startsWith("safari-web-extension:");
 /** How long a submitted login waits for the human to choose Save. */
 const SAVE_WINDOW_MS = 2 * 60 * 1000;
 /** How long the login filled in a tab is remembered, to know which one a new password is for. */
@@ -136,13 +138,18 @@ const popupOps = {
             pairing = r.ok ? null : { code, error: r.error || NO_HOST };
             setTimeout(() => { if (pairing && pairing.code === code) pairing = null; }, 30_000);
         };
+        const request = { op: "pair", name: String(m.name || "Browser").slice(0, 60), code };
+        if (SAFARI) {
+            native(request).then(finish);
+            return { ok: true, code };
+        }
         const port = api.runtime.connectNative(HOST);
         port.onMessage.addListener(r => {
             port.disconnect();
             finish(r || {});
         });
         port.onDisconnect.addListener(() => finish({ ok: false, error: NO_HOST }));
-        port.postMessage({ op: "pair", name: String(m.name || "Browser").slice(0, 60), code });
+        port.postMessage(request);
         return { ok: true, code };
     },
     async forget() {
@@ -158,6 +165,17 @@ const popupOps = {
         // The page's own script asks to fill, so its address comes from the browser.
         await api.tabs.sendMessage(m.tabId, { op: "fill", projectId: m.projectId, itemId: m.itemId }, { frameId: 0 });
         return { ok: true };
+    },
+    // A login submitted in the tab, offered here too (and only here where pages get no
+    // controls). The tab's own records, as the page's top frame would see them.
+    async tabPendingSave(m) {
+        return pageOps.pendingSave(m, { tab: { id: m.tabId }, frameId: 0 });
+    },
+    async tabSave(m) {
+        return pageOps.save(m, { tab: { id: m.tabId }, frameId: 0 });
+    },
+    async tabDismissSave(m) {
+        return pageOps.dismissSave(m, { tab: { id: m.tabId }, frameId: 0 });
     }
 };
 

@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 pub const HOST_NAME: &str = "org.vaultos.preview.browser";
 /// The extension's ID, fixed by the public key in its manifest.
 pub const EXTENSION_ID: &str = "dmimjgolkikglfcphbakbmkaafaadhnb";
+/// The origin `vaultos-browser` is given for Safari. Safari's own extension origin is a
+/// random UUID, and only the extension packaged with VaultOS's app extension can message
+/// it, so the app extension names itself with its bundle identifier.
+pub const SAFARI_ORIGIN: &str = "safari-web-extension://org.vaultos.preview.safari/";
 
 /// Chromium browsers and their user data folders, relative to the home folder.
 #[cfg(target_os = "macos")]

@@ -24,8 +24,12 @@ use vaultos_core::{Error, SecretString, Store};
 const DECLINED_PAUSE: Duration = Duration::from_secs(60);
 const CODE_ALPHABET: &str = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
-/// An extension origin as Chromium reports it: `chrome-extension://<32 letters a-p>/`.
+/// An extension origin as Chromium reports it: `chrome-extension://<32 letters a-p>/`, or the
+/// one VaultOS's Safari app extension gives.
 pub fn valid_origin(o: &str) -> bool {
+    if o == vaultos_core::native_host::SAFARI_ORIGIN {
+        return true;
+    }
     o.strip_prefix("chrome-extension://")
         .and_then(|r| r.strip_suffix('/'))
         .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b)))
@@ -254,6 +258,9 @@ mod tests {
     fn checks_origins_and_codes() {
         assert!(valid_origin(
             "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+        ));
+        assert!(valid_origin(
+            "safari-web-extension://org.vaultos.preview.safari/"
         ));
         for bad in [
             "chrome-extension://abcdefghijklmnopabcdefghijklmnoq/",

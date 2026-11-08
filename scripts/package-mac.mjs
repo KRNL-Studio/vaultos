@@ -1,14 +1,16 @@
 // Packages VaultOS.app: the Tauri desktop app in Contents/MacOS, with vaultos, vaultos-agent,
 // vaultos-mcp, vaultosd, vaultos-ssh-sign and vaultos-browser in Contents/Helpers (not beside
 // it: on a case-insensitive volume `vaultos` would replace `VaultOS`), and the unpacked
-// browser extension in Contents/Resources/extension. Writes a ZIP, its checksum and a CycloneDX inventory.
+// browser extension in Contents/Resources/extension, and the Safari app extension in
+// Contents/PlugIns (the same web extension, with a Safari manifest, and a sandboxed handler that
+// relays through its own copy of vaultos-browser). Writes a ZIP, its checksum and a CycloneDX inventory.
 // The build is ad-hoc signed ("unsigned") unless VAULTOS_SIGN_IDENTITY names a Developer ID
 // Application identity and notarization credentials are set, and signing and notarization
 // pass. Notarization takes a notarytool Keychain profile (VAULTOS_NOTARY_PROFILE) or an App
 // Store Connect API key: VAULTOS_NOTARY_KEY (absolute path of the .p8 file),
 // VAULTOS_NOTARY_KEY_ID and VAULTOS_NOTARY_ISSUER.
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { budget, build, checksum, sbom, TOOLS, version } from "./rust-dist.mjs";
 
@@ -51,6 +53,68 @@ cpSync("extension", path.join(resources, "extension"), {
     recursive: true
 });
 
+// Safari: VaultOS.app/Contents/PlugIns/VaultOS Safari.appex.
+const appex = path.join(app, "Contents", "PlugIns", "VaultOS Safari.appex");
+const appexMacos = path.join(appex, "Contents", "MacOS");
+const appexResources = path.join(appex, "Contents", "Resources");
+for (const dir of [ appexMacos, appexResources ]) mkdirSync(dir, {
+    recursive: true
+});
+execFileSync("/usr/bin/xcrun", [ "swiftc", "-O", "-target", `${arch === "arm64" ? "arm64" : "x86_64"}-apple-macos13.0`, "-module-name", "VaultOSSafari", "-parse-as-library", "-application-extension", "-framework", "SafariServices", "-Xlinker", "-e", "-Xlinker", "_NSExtensionMain", "-o", path.join(appexMacos, "VaultOSSafari"), "safari/SafariWebExtensionHandler.swift" ], {
+    stdio: "inherit"
+});
+copyFileSync(path.join(release, "vaultos-browser"), path.join(appexMacos, "vaultos-browser"));
+chmodSync(path.join(appexMacos, "vaultos-browser"), 0o755);
+cpSync("extension", appexResources, {
+    recursive: true
+});
+// Safari ignores Chromium's key and version floor; it needs MV3 service workers and session storage.
+const safariManifest = JSON.parse(readFileSync("extension/manifest.json", "utf8"));
+delete safariManifest.key;
+delete safariManifest.minimum_chrome_version;
+safariManifest.browser_specific_settings = {
+    safari: {
+        strict_min_version: "16.4"
+    }
+};
+writeFileSync(path.join(appexResources, "manifest.json"), JSON.stringify(safariManifest, null, 2) + "\n");
+writeFileSync(path.join(appex, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>CFBundleDevelopmentRegion</key>
+\t<string>en</string>
+\t<key>CFBundleDisplayName</key>
+\t<string>VaultOS</string>
+\t<key>CFBundleExecutable</key>
+\t<string>VaultOSSafari</string>
+\t<key>CFBundleIdentifier</key>
+\t<string>org.vaultos.preview.safari</string>
+\t<key>CFBundleInfoDictionaryVersion</key>
+\t<string>6.0</string>
+\t<key>CFBundleName</key>
+\t<string>VaultOS Safari</string>
+\t<key>CFBundlePackageType</key>
+\t<string>XPC!</string>
+\t<key>CFBundleShortVersionString</key>
+\t<string>${v.replace(/-.*$/, "")}</string>
+\t<key>CFBundleVersion</key>
+\t<string>1</string>
+\t<key>LSMinimumSystemVersion</key>
+\t<string>13.0</string>
+\t<key>NSHumanReadableDescription</key>
+\t<string>Fill and save website logins from the VaultOS app.</string>
+\t<key>NSExtension</key>
+\t<dict>
+\t\t<key>NSExtensionPointIdentifier</key>
+\t\t<string>com.apple.Safari.web-extension</string>
+\t\t<key>NSExtensionPrincipalClass</key>
+\t\t<string>VaultOSSafari.SafariWebExtensionHandler</string>
+\t</dict>
+</dict>
+</plist>
+`);
+
 const plist = {
     CFBundleDevelopmentRegion: "en",
     CFBundleDisplayName: "VaultOS",
@@ -77,11 +141,14 @@ ${Object.entries(plist).map(entry).join("\n")}
 </plist>
 `);
 
-// Inner programs first, then the bundle, each under its own identifier.
-const sign = (target, id) => execFileSync("/usr/bin/codesign", identity ? [ "--force", "--options", "runtime", "--timestamp", "--sign", identity, "--identifier", id, target ] : [ "--force", "--sign", "-", "--identifier", id, target ], {
+// Inner programs first, then the bundles, each under its own identifier. The Safari app
+// extension and its helper run sandboxed.
+const sign = (target, id, entitlements) => execFileSync("/usr/bin/codesign", [ "--force", ...identity ? [ "--options", "runtime", "--timestamp", "--sign", identity ] : [ "--sign", "-" ], "--identifier", id, ...entitlements ? [ "--entitlements", entitlements ] : [], target ], {
     stdio: "inherit"
 });
 for (const tool of TOOLS) sign(path.join(helpers, tool), `org.vaultos.preview.${tool}`);
+sign(path.join(appexMacos, "vaultos-browser"), "org.vaultos.preview.safari.vaultos-browser", "safari/helper.entitlements");
+sign(appex, "org.vaultos.preview.safari", "safari/extension.entitlements");
 sign(app, "org.vaultos.preview");
 execFileSync("/usr/bin/codesign", [ "--verify", "--deep", "--strict", app ], {
     stdio: "inherit"

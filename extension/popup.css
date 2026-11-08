@@ -18,3 +18,6 @@ li button:hover, li button:focus-visible { background: var(--hover); }
 .name { display: block; font-weight: 600; }
 .sub { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .error { color: #cf222e; }
+.offer { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
+.offer p { margin: 0 0 4px; }
+.offer .row { margin-top: 8px; justify-content: flex-end; }

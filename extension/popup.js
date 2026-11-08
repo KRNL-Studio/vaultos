@@ -1,4 +1,4 @@
-// The toolbar popup: pairing, and the logins for the current tab.
+// The toolbar popup: pairing, a login waiting to be saved, and the logins for the current tab.
 "use strict";
 
 const api = globalThis.browser ?? globalThis.chrome;
@@ -59,6 +59,8 @@ async function render() {
     }
     const nodes = [];
     const tab = await activeTab();
+    const pending = tab ? await ask({ op: "tabPendingSave", tabId: tab.id }) : null;
+    if (pending && pending.ok && pending.pending) nodes.push(saveOffer(tab, pending.pending));
     const r = tab ? await ask({ op: "tabLogins", tabId: tab.id }) : { ok: true, logins: [] };
     if (!r.ok) nodes.push(el("p", "error", r.error));
     else if (!r.logins.length) nodes.push(el("p", "muted", "No VaultOS logins for this page."));
@@ -83,10 +85,28 @@ async function render() {
     show(...nodes);
 }
 
+function saveOffer(tab, p) {
+    const box = el("div", "offer");
+    const who = p.username ? ` as ${p.username}` : "";
+    if (p.update) box.append(el("p", "name", "Update this password in VaultOS?"), el("p", "sub", `${p.update.name} in ${p.update.project}${who}`));
+    else box.append(el("p", "name", "Save this login in VaultOS?"), el("p", "sub", `${p.site}${who}`));
+    const row = el("div", "row");
+    row.append(button("Not now", null, async () => {
+        await ask({ op: "tabDismissSave", tabId: tab.id });
+        render();
+    }), button(p.update ? "Update" : "Save", "primary", async () => {
+        const s = await ask({ op: "tabSave", tabId: tab.id });
+        show(el("p", s && s.ok ? null : "error", s && s.ok ? `${s.updated ? "Updated" : "Saved as"} “${s.key}” in ${s.project}` : s && s.error || "VaultOS could not save the login"));
+    }));
+    box.append(row);
+    return box;
+}
+
 async function pair() {
     const brands = navigator.userAgentData ? navigator.userAgentData.brands : [];
     const isBrave = Boolean(navigator.brave);
-    const r = await ask({ op: "pair", name: S.browserName(brands, isBrave) });
+    const isSafari = api.runtime.getURL("").startsWith("safari-web-extension:");
+    const r = await ask({ op: "pair", name: S.browserName(brands, isBrave, isSafari) });
     if (!r.ok) return show(el("p", "error", r.error));
     render();
 }

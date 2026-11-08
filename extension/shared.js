@@ -13,8 +13,9 @@
     }
 
     /** What to call this browser when pairing. */
-    function browserName(brands, isBrave) {
+    function browserName(brands, isBrave, isSafari) {
         if (isBrave) return "Brave";
+        if (isSafari) return "Safari";
         const names = (brands || []).map(b => b.brand);
         for (const n of [ "Microsoft Edge", "Opera", "Arc", "Helium", "Google Chrome", "Chromium" ]) {
             if (names.includes(n)) return n === "Google Chrome" ? "Chrome" : n === "Microsoft Edge" ? "Edge" : n;

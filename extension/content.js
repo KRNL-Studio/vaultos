@@ -3,8 +3,10 @@
 // root, so the page cannot read them, and act only on a real click (`isTrusted`) on a
 // control that has been visible, unobscured and unaltered for a moment, so the page can
 // neither press them nor trick a person into pressing a hidden one. The toolbar popup, which
-// is the browser's own window, is the other way to fill. The service worker decides nothing
-// from what the page says about itself.
+// is the browser's own window, is the other way to fill. A browser that cannot report that a
+// control is unobscured (Safari has no Intersection Observer v2) gets no in-page controls:
+// there the popup fills and offers to save. The service worker decides nothing from what the
+// page says about itself.
 "use strict";
 
 (() => {
@@ -14,6 +16,7 @@
     S.started = true;
 
     const ask = m => api.runtime.sendMessage(m).catch(() => null);
+    const CONTROLS = typeof IntersectionObserverEntry === "function" && "isVisible" in IntersectionObserverEntry.prototype;
 
     let logins = null, fetchedAt = 0;
     async function loginsHere() {
@@ -155,6 +158,7 @@
 
     let current = null;
     function showButton(field) {
+        if (!CONTROLS) return;
         clear();
         current = field;
         const b = el("button", "button", "V");
@@ -186,6 +190,7 @@
     }
 
     function note(field, text) {
+        if (!CONTROLS) return;
         clear();
         const n = el("div", "menu");
         n.append(el("div", "note", text));
@@ -270,7 +275,7 @@
 
     let banner = null;
     async function showSaveOffer() {
-        if (banner || signInShown()) return;
+        if (!CONTROLS || banner || signInShown()) return;
         const r = await ask({ op: "pendingSave" });
         if (!r || !r.ok || !r.pending || banner || signInShown()) return;
         clear();

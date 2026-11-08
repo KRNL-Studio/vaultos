@@ -19,6 +19,7 @@ test("names the browser from its brands", () => {
     assert.equal(S.browserName([ { brand: "Chromium" }, { brand: "Microsoft Edge" } ], false), "Edge");
     assert.equal(S.browserName([ { brand: "Chromium" } ], true), "Brave");
     assert.equal(S.browserName([], false), "Browser");
+    assert.equal(S.browserName(undefined, false, true), "Safari");
 });
 
 test("finds username and one-time code fields", () => {
