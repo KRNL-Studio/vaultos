@@ -13,11 +13,15 @@
 //! - `POST /browser/passkeys` `{url, rpId, allow?}`: the passkeys that page may use, without
 //!   keys.
 //! - `POST /browser/passkey/create` `{url, rpId, user: {id, name}, challenge, algorithms,
-//!   exclude?, userVerification?}`: makes and saves a passkey; the credential, client data,
-//!   attestation object, authenticator data and public key (base64url).
+//!   exclude?, userVerification?, deadline?}`: makes and saves a passkey; the credential,
+//!   client data, attestation object, authenticator data and public key (base64url).
 //! - `POST /browser/passkey/get` `{url, rpId, challenge, projectId, itemId, credentialId,
-//!   userVerification?}`: signs in with that login's passkey, if it is still `credentialId`;
-//!   the credential id, client data, authenticator data, signature and user handle.
+//!   userVerification?, deadline?}`: signs in with that login's passkey, if it is still
+//!   `credentialId`; the credential id, client data, authenticator data, signature and user
+//!   handle.
+//!
+//! `deadline` (milliseconds since 1970) is when the page stops waiting: after it, 408 and
+//! nothing saved, so a passkey the site never received is not kept.
 //!
 //! The extension asks only after the human chose in its own window. `url` is the page's
 //! address as the browser reports it; the client data names its origin. Unless the site's
@@ -256,6 +260,23 @@ fn serve(
         Err(r) => return r,
     };
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if method == "POST" && path.starts_with("/browser/passkey/") {
+        // Here as well as before Touch ID: whatever the first check saw, a site that requires
+        // verification never gets an unverified answer.
+        if !verified && b.get("userVerification").and_then(Value::as_str) == Some("required") {
+            return Reply::error(
+                412,
+                "This site asks VaultOS to verify you, which needs Touch ID",
+            );
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let deadline = b.get("deadline").and_then(Value::as_u64);
+        if deadline.is_some_and(|d| now > u128::from(d)) {
+            return Reply::error(408, "The site stopped waiting for this passkey");
+        }
+    }
     let result = (|| -> Result<Value, Error> {
         match (method, path) {
             ("GET", "/browser/whoami") => Ok(json!({ "id": browser.id, "name": browser.name })),

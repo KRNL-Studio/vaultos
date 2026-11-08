@@ -197,7 +197,9 @@ async function passkey(m, s) {
     }
     const id = S.pairingCode(crypto.getRandomValues(new Uint8Array(8)));
     const done = new Promise(resolve => passkeyRequests.set(id, { kind, tabId: s.tab.id, pageId: m.id, url: s.url, q, passkeys, resolve }));
-    passkeyRequests.get(id).timer = setTimeout(() => finishPasskey(id, { ok: false, code: "cancel" }), q.timeout);
+    const r0 = passkeyRequests.get(id);
+    r0.deadline = Date.now() + q.timeout;
+    r0.timer = setTimeout(() => finishPasskey(id, { ok: false, code: "cancel" }), q.timeout);
     try {
         const w = await api.windows.create({ url: api.runtime.getURL(`${PASSKEY_WINDOW}#${id}`), type: "popup", width: 420, height: 480, focused: true });
         const r = passkeyRequests.get(id);
@@ -243,9 +245,11 @@ const passkeyWindowOps = {
             return { ok: true };
         }
         let result;
+        // The owner saves nothing after the page stops waiting, even while Touch ID is shown.
         const { timeout, ...q } = r.q;
+        const deadline = r.deadline;
         if (r.kind === "create") {
-            result = await call("passkeyCreate", { url: r.url, ...q });
+            result = await call("passkeyCreate", { url: r.url, ...q, deadline });
             if (!result.ok && result.code === "conflict") result = { ok: false, code: "exists", error: result.error };
         } else {
             const pick = r.passkeys.find(p => p.projectId === m.projectId && p.itemId === m.itemId);
@@ -257,7 +261,8 @@ const passkeyWindowOps = {
                 projectId: pick.projectId,
                 itemId: pick.itemId,
                 credentialId: pick.credentialId,
-                userVerification: q.userVerification
+                userVerification: q.userVerification,
+                deadline
             });
         }
         // The site requires verifying the human, and there is no Touch ID: the browser's own.

@@ -135,6 +135,7 @@ fn handle(
                 "algorithms",
                 "exclude",
                 "userVerification",
+                "deadline",
             ])),
             // The owner may wait for Touch ID.
             PAIR_TIMEOUT,
@@ -150,6 +151,7 @@ fn handle(
                 "itemId",
                 "credentialId",
                 "userVerification",
+                "deadline",
             ])),
             PAIR_TIMEOUT,
         ),

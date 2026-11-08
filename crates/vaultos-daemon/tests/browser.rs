@@ -224,6 +224,39 @@ fn pairs_after_confirmation_and_fills_only_matching_sites() {
     });
     assert!(audited);
 
+    // Passkeys, with no Touch ID here: a site that requires verification is refused (the
+    // extension hands it to the browser), and nothing is saved after the page stopped waiting.
+    let b64 = vaultos_core::webauthn::b64url;
+    let create = |uv: &str, deadline: u64| {
+        call(
+            "POST",
+            "/browser/passkey/create",
+            Some(json!({
+                "url": "https://example.com/", "rpId": "example.com",
+                "user": { "id": b64(b"user-1"), "name": "alice" },
+                "challenge": b64(b"synthetic-challenge-0123456789ab"), "algorithms": [-7],
+                "userVerification": uv, "deadline": deadline,
+            })),
+        )
+    };
+    let later = u64::MAX / 2;
+    assert_eq!(status(create("required", later)), Some(412));
+    assert_eq!(status(create("discouraged", 1)), Some(408));
+    let listed = |handle: &vaultos_daemon::server::Handle| {
+        handle.with_store(|s| {
+            s.passkeys_for("https://example.com/", "example.com", &[])
+                .unwrap()
+                .len()
+        })
+    };
+    assert_eq!(listed(&handle), 0);
+    let made = create("preferred", later).unwrap();
+    let auth =
+        vaultos_core::webauthn::unb64url(made["authenticatorData"].as_str().unwrap(), "a", 1024)
+            .unwrap();
+    assert_eq!(auth[32], 0x49, "present, not verified");
+    assert_eq!(listed(&handle), 1);
+
     // Declined: refused, and pairing pauses.
     allow.store(false, Ordering::SeqCst);
     assert_eq!(status(pair("WXYZ-6789")), Some(403));

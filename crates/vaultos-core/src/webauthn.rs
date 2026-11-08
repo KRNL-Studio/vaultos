@@ -3,10 +3,10 @@
 //! attestation and a zero AAGUID, and builds the client data itself from the page's origin
 //! as the browser reports it, so a page cannot have it sign for another origin.
 //!
-//! The authenticator data says the user was present and verified (the vault is unlocked and
-//! the human chose in the extension's own window), and that the passkey may be and is backed
-//! up (it is in the vault, which syncs). The signature counter is always 0, as for other
-//! synced passkeys.
+//! The authenticator data says the user was present (the human chose in the extension's own
+//! window), and verified only when the owner had Touch ID confirmed for that request. It says
+//! the passkey may be backed up (it is in the vault, which syncs), never that it is. The
+//! signature counter is always 0, as for other synced passkeys.
 
 use crate::crypto::{fill_random, sha256};
 use crate::error::{Error, Result};
