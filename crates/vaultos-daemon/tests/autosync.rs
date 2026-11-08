@@ -146,6 +146,11 @@ fn syncs_after_unlock_and_on_request_and_halts_on_a_refusal() {
         assert!(Instant::now() < deadline, "the daemon did not start");
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The socket can answer before autosync's loop has looked at the vault the first time.
+    while public_status(&data_a)["sync"]["state"] == "STOPPED" {
+        assert!(Instant::now() < deadline, "autosync did not start");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert_eq!(public_status(&data_a)["sync"]["state"], "PAUSED_LOCKED");
 
     // Unlocked, autosync runs its first round on its own.
