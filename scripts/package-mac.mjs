@@ -72,6 +72,11 @@ cpSync("extension", appexResources, {
 const safariManifest = JSON.parse(readFileSync("extension/manifest.json", "utf8"));
 delete safariManifest.key;
 delete safariManifest.minimum_chrome_version;
+// Passkeys run in the page's own world, which has not been tried in Safari: leave them out there.
+safariManifest.content_scripts = safariManifest.content_scripts.filter(c => c.world !== "MAIN");
+rmSync(path.join(appexResources, "passkeys.js"));
+rmSync(path.join(appexResources, "passkey.js"));
+rmSync(path.join(appexResources, "passkey.html"));
 safariManifest.browser_specific_settings = {
     safari: {
         strict_min_version: "16.4"

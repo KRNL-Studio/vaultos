@@ -1,5 +1,6 @@
 // The extension's service worker: the only part that talks to VaultOS, through the native
-// messaging host. It holds the pairing key in this extension's IndexedDB, which content
+// messaging host. It also holds the page's passkey requests while the human decides in the
+// extension's passkey window. It holds the pairing key in this extension's IndexedDB, which content
 // scripts (running in pages' origins) cannot open, and never gives it to a page. Page URLs
 // come from the browser (`sender.url`), never from the page; the app decides what may be
 // filled where.
@@ -121,6 +122,126 @@ async function signInShown(tabId) {
     }
 }
 
+/** Passkey requests waiting for the human in the extension's window, by request id. */
+const passkeyRequests = new Map();
+const PASSKEY_WINDOW = "passkey.html";
+
+const fromPasskeyWindow = s => s.id === api.runtime.id && typeof s.url === "string" && s.url.startsWith(api.runtime.getURL(PASSKEY_WINDOW));
+
+function finishPasskey(id, result) {
+    const r = passkeyRequests.get(id);
+    if (!r) return;
+    passkeyRequests.delete(id);
+    r.resolve(result);
+    if (r.windowId !== undefined) api.windows.remove(r.windowId).catch(() => {});
+}
+
+api.windows.onRemoved.addListener(windowId => {
+    for (const [ id, r ] of passkeyRequests) if (r.windowId === windowId) finishPasskey(id, { ok: false, code: "cancel" });
+});
+
+const b64urlOk = (v, max) => typeof v === "string" && v.length <= Math.ceil(max / 3) * 4 && /^[A-Za-z0-9_-]*$/.test(v);
+
+/** The parts of a page's request VaultOS uses, checked; null when it is not one. */
+function passkeyRequest(kind, q) {
+    if (!q || typeof q.rpId !== "string" || q.rpId.length > 253 || !b64urlOk(q.challenge, 1024)) return null;
+    if (kind === "get") {
+        const allow = Array.isArray(q.allow) ? q.allow.slice(0, 64) : [];
+        return allow.every(c => b64urlOk(c, 1023)) ? { rpId: q.rpId, challenge: q.challenge, allow } : null;
+    }
+    const u = q.user || {};
+    const exclude = Array.isArray(q.exclude) ? q.exclude.slice(0, 64) : [];
+    if (!b64urlOk(u.id, 64) || !exclude.every(c => b64urlOk(c, 1023))) return null;
+    return {
+        rpId: q.rpId,
+        rpName: String(q.rpName || "").slice(0, 100),
+        user: { id: u.id, name: String(u.name || "").slice(0, 256), displayName: String(u.displayName || "").slice(0, 256) },
+        challenge: q.challenge,
+        algorithms: Array.isArray(q.algorithms) ? q.algorithms.slice(0, 16).map(Number) : [],
+        exclude
+    };
+}
+
+// pageOps.passkey: from the top frame's content script.
+async function passkey(m, s) {
+    if (s.frameId !== 0) return { ok: false, code: "fallback" };
+    const kind = m.kind === "create" || m.kind === "get" ? m.kind : null;
+    const q = kind && passkeyRequest(kind, m.request);
+    if (!q) return { ok: false, code: "fallback" };
+    // One request per tab: a new one replaces the one before.
+    for (const [ id, r ] of passkeyRequests) if (r.tabId === s.tab.id) finishPasskey(id, { ok: false, code: "cancel" });
+    if (!await pairingKey()) return { ok: false, code: "fallback" };
+    let passkeys = [];
+    if (kind === "get") {
+        const r = await call("passkeys", { url: s.url, rpId: q.rpId, allow: q.allow });
+        if (!r.ok || !r.passkeys.length) return { ok: false, code: "fallback" };
+        passkeys = r.passkeys;
+    } else {
+        // VaultOS makes ES256 keys only; a site that takes none of them gets the browser's own.
+        if (!q.algorithms.includes(-7)) return { ok: false, code: "fallback" };
+        const status = await native({ op: "status" });
+        if (!status.ok || !status.running || !status.unlocked) return { ok: false, code: "fallback" };
+    }
+    const id = S.pairingCode(crypto.getRandomValues(new Uint8Array(8)));
+    const done = new Promise(resolve => passkeyRequests.set(id, { kind, tabId: s.tab.id, pageId: m.id, url: s.url, q, passkeys, resolve }));
+    const w = await api.windows.create({ url: api.runtime.getURL(`${PASSKEY_WINDOW}#${id}`), type: "popup", width: 420, height: 480, focused: true });
+    const r = passkeyRequests.get(id);
+    if (r) r.windowId = w.id;
+    else api.windows.remove(w.id).catch(() => {});
+    return done;
+}
+
+// pageOps.passkeyCancel: the page aborted its request.
+async function passkeyCancel(m, s) {
+    for (const [ id, r ] of passkeyRequests) if (r.tabId === s.tab.id && r.pageId === m.id) finishPasskey(id, { ok: false, code: "cancel" });
+    return { ok: true };
+}
+
+const passkeyWindowOps = {
+    /** What the window shows: the site the browser reports, never the page's own words alone. */
+    async passkeyShow(m) {
+        const r = passkeyRequests.get(String(m.id || ""));
+        if (!r) return { ok: false, code: "expired", error: "This request is no longer waiting." };
+        return {
+            ok: true,
+            kind: r.kind,
+            site: hostOf(r.url),
+            rpId: r.q.rpId,
+            user: r.kind === "create" ? { name: r.q.user.name, displayName: r.q.user.displayName } : null,
+            passkeys: r.passkeys.map(p => ({ projectId: p.projectId, itemId: p.itemId, name: p.name, username: p.username, project: p.project }))
+        };
+    },
+    async passkeyAnswer(m) {
+        const id = String(m.id || "");
+        const r = passkeyRequests.get(id);
+        if (!r) return { ok: false, code: "expired", error: "This request is no longer waiting." };
+        if (m.choice === "other") {
+            finishPasskey(id, { ok: false, code: "fallback" });
+            return { ok: true };
+        }
+        if (m.choice === "cancel") {
+            finishPasskey(id, { ok: false, code: "cancel" });
+            return { ok: true };
+        }
+        let result;
+        if (r.kind === "create") {
+            result = await call("passkeyCreate", { url: r.url, ...r.q });
+            if (!result.ok && result.code === "conflict") result = { ok: false, code: "exists", error: result.error };
+        } else {
+            const pick = r.passkeys.find(p => p.projectId === m.projectId && p.itemId === m.itemId);
+            if (!pick) return { ok: false, code: "usage", error: "Choose one of the passkeys shown." };
+            result = await call("passkeyGet", { url: r.url, rpId: r.q.rpId, challenge: r.q.challenge, projectId: pick.projectId, itemId: pick.itemId });
+        }
+        if (!result.ok && result.code !== "exists") return result;
+        finishPasskey(id, result);
+        return { ok: true };
+    },
+    /** The window's heartbeat, which keeps this worker running while the human decides. */
+    async passkeyWait(m) {
+        return { ok: true, waiting: passkeyRequests.has(String(m.id || "")) };
+    }
+};
+
 const fromPopup = s => s.id === api.runtime.id && !s.tab && typeof s.url === "string" && s.url.startsWith(api.runtime.getURL(""));
 const fromPage = s => s.id === api.runtime.id && Boolean(s.tab) && typeof s.url === "string" && /^https?:\/\//.test(s.url);
 
@@ -240,7 +361,9 @@ const pageOps = {
     async dismissSave(m, s) {
         await session.remove(`save:${s.tab.id}`);
         return { ok: true };
-    }
+    },
+    passkey,
+    passkeyCancel
 };
 
 api.runtime.onMessage.addListener((m, sender, respond) => {
@@ -248,6 +371,7 @@ api.runtime.onMessage.addListener((m, sender, respond) => {
     let handler = null;
     if (Object.hasOwn(popupOps, op) && fromPopup(sender)) handler = popupOps[op];
     else if (Object.hasOwn(pageOps, op) && fromPage(sender)) handler = pageOps[op];
+    else if (Object.hasOwn(passkeyWindowOps, op) && fromPasskeyWindow(sender)) handler = passkeyWindowOps[op];
     if (!handler) {
         respond({ ok: false, code: "refused", error: "Not allowed" });
         return false;

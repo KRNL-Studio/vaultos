@@ -65,7 +65,7 @@ pub struct Filled {
     pub otp: Option<SecretString>,
 }
 
-fn page_site(page: &str) -> Result<Site> {
+pub(super) fn page_site(page: &str) -> Result<Site> {
     let s = site(page).ok_or_else(|| Error::invalid("This page's address cannot hold logins"))?;
     if !s.secure {
         return Err(Error::Forbidden(
@@ -103,11 +103,11 @@ fn fitting_host(meta: &ItemMeta, page: &Site) -> Option<String> {
     Some(hosts.find(|h| *h == page.host).unwrap_or(first))
 }
 
-fn fits(meta: &ItemMeta, page: &Site) -> bool {
+pub(super) fn fits(meta: &ItemMeta, page: &Site) -> bool {
     fitting_host(meta, page).is_some()
 }
 
-fn browser_actor(b: &Browser) -> String {
+pub(super) fn browser_actor(b: &Browser) -> String {
     format!("browser {} ({})", b.name, b.id)
 }
 
@@ -347,7 +347,12 @@ impl Store {
     }
 
     /// `host`, or `host (username)`, or with a number, whichever is not taken.
-    fn free_login_name(&self, project_id: &str, host: &str, username: &str) -> Result<String> {
+    pub(super) fn free_login_name(
+        &self,
+        project_id: &str,
+        host: &str,
+        username: &str,
+    ) -> Result<String> {
         let st = self.state()?;
         let p = &st.projects[st.project(project_id)?];
         let taken = |k: &str| p.items.iter().any(|i| i.meta.key == k);

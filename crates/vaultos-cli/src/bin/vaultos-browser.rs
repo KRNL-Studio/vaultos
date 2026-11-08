@@ -71,6 +71,7 @@ fn handle(
             .map_err(|e| {
                 let code = match (e.code.as_str(), e.status) {
                     (_, Some(401)) => "unpaired",
+                    (_, Some(409)) => "conflict",
                     (c, _) => c,
                 };
                 (code.to_owned(), e.message)
@@ -116,6 +117,31 @@ fn handle(
             vaultos_core::secret::scrub_json(&mut body);
             r
         }
+        "passkeys" => call(
+            "POST",
+            "/browser/passkeys",
+            Some(&pick(&["url", "rpId", "allow"])),
+            TIMEOUT,
+        ),
+        "passkeyCreate" => call(
+            "POST",
+            "/browser/passkey/create",
+            Some(&pick(&[
+                "url",
+                "rpId",
+                "user",
+                "challenge",
+                "algorithms",
+                "exclude",
+            ])),
+            TIMEOUT,
+        ),
+        "passkeyGet" => call(
+            "POST",
+            "/browser/passkey/get",
+            Some(&pick(&["url", "rpId", "challenge", "projectId", "itemId"])),
+            TIMEOUT,
+        ),
         _ => Err(("usage".into(), "Unknown operation".into())),
     }
 }

@@ -20,6 +20,7 @@ unless named.
 | Encryption | XChaCha20-Poly1305 (192-bit random nonce, 128-bit tag) | `chacha20poly1305` |
 | File and index MACs | HMAC-SHA256 | `hmac` |
 | Audit and sync signatures | Ed25519 (from a 32-byte seed) | `ed25519-dalek` |
+| Passkeys | ECDSA P-256 with SHA-256 (ES256), deterministic nonces (RFC 6979) | `p256` |
 | Sync encryption | age (X25519 recipients) | `age` |
 | Randomness | the operating system's CSPRNG | `getrandom` (via `rand_core`) |
 
@@ -127,10 +128,23 @@ rewriting it without the seed is detected when the vault is unlocked. Entries ho
 | Browser pairing key | 32 random bytes, hex | SHA-256 hex in the sealed vault metadata, with the extension's origin |
 | Leak index key | 32 random bytes | `leak-index.json` (0600), beside 16-byte HMAC-SHA256 tags |
 | SSH keys | Unencrypted OpenSSH Ed25519 private key (PEM) | inside an item's sealed secret |
+| Passkeys | 32-byte P-256 scalar, base64url; a 16-byte random credential ID | the scalar in a concealed field (`passkey-key`) of the login's sealed secret; the credential ID, relying party and user handle in its metadata |
 
 Token hashes are unsalted because tokens are 256-bit random values; a guess is no easier
 against the hash. The leak index key sits beside its tags, so anyone who can read that file
 can test guesses for indexed values offline (see [SECURITY.md](../../SECURITY.md)).
+
+A passkey's authenticator data is the SHA-256 of the relying party ID, flags `0x5d` when
+made (user present and verified, backup eligible and backed up, attested credential data) or
+`0x1d` when used, and a counter of 0. The attested credential data has a zero AAGUID and the
+COSE key `{1: 2, 3: -7, -1: 1, -2: x, -3: y}`, and the attestation object is
+`{"fmt": "none", "attStmt": {}, "authData": …}`, both in CTAP2 canonical CBOR. The owner
+writes the client data JSON itself (`type`, `challenge`, `origin`, `crossOrigin: false`), with
+the origin of the page's address as the browser reported it. Signatures are DER-encoded, over
+the authenticator data followed by the SHA-256 of the client data. A test in
+`crates/vaultos-core/tests/passkeys.rs` checks them with `p256`, the browser test checks them
+with WebCrypto, and python-fido2's relying party server accepted a registration and an
+assertion during development.
 
 ## Sync format 2
 

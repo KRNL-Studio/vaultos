@@ -25,6 +25,12 @@
       "js": ["shared.js", "content.js"],
       "all_frames": true,
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*/*", "http://localhost/*", "http://*.localhost/*", "http://127.0.0.1/*"],
+      "js": ["passkeys.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
     }
   ],
   "content_security_policy": {

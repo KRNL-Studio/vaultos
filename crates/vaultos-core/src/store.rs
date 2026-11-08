@@ -35,6 +35,7 @@ use zeroize::Zeroizing;
 mod browser;
 mod items;
 mod leak;
+mod passkeys;
 mod run;
 mod ssh;
 mod sync;
@@ -44,6 +45,7 @@ pub use items::{
     TRASH_DAYS,
 };
 pub use leak::Named;
+pub use passkeys::{Created, NewPasskeyRequest, PasskeyMatch, Used};
 pub use run::EnvValues;
 pub use ssh::SshIdentity;
 pub use sync::{check_record, SyncChanges, SyncRecord};

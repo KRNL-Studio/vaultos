@@ -21,3 +21,5 @@ li button:hover, li button:focus-visible { background: var(--hover); }
 .offer { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
 .offer p { margin: 0 0 4px; }
 .offer .row { margin-top: 8px; justify-content: flex-end; }
+body.window { width: auto; }
+body.window main > button { display: block; width: 100%; margin-top: 8px; }

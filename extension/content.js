@@ -305,6 +305,25 @@
         ui().append(b);
     }
 
+    // Passkeys: the page-world script (passkeys.js) posts the page's WebAuthn requests here,
+    // and gets the extension's answer back. Only from this top frame's own window; the
+    // service worker takes the address from the browser.
+    if (window === top) {
+        window.addEventListener("message", async e => {
+            const d = e.data;
+            if (e.source !== window || e.origin !== location.origin || !d || typeof d.id !== "string" || d.id.length > 64) return;
+            if (d.type === "vaultos-passkey-cancel") {
+                ask({ op: "passkeyCancel", id: d.id });
+                return;
+            }
+            if (d.type !== "vaultos-passkey-request") return;
+            const r = await ask({ op: "passkey", id: d.id, kind: d.kind, request: d.request });
+            const keep = [ "ok", "code", "error", "credentialId", "clientDataJSON", "attestationObject", "authenticatorData", "publicKey", "signature", "userHandle" ];
+            const result = r ? Object.fromEntries(keep.filter(k => k in r).map(k => [ k, r[k] ])) : { ok: false, code: "cancel" };
+            window.postMessage({ type: "vaultos-passkey-reply", id: d.id, result }, location.origin);
+        });
+    }
+
     api.runtime.onMessage.addListener((m, sender, respond) => {
         if (sender.id !== api.runtime.id || sender.tab || window !== top || !m) return;
         // The popup's Fill, relayed by the service worker.

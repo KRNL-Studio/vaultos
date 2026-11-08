@@ -211,9 +211,22 @@ fn extension_end_to_end() {
         let (_, entries) = s.verify_audit().unwrap();
         entries.into_iter().map(|e| e.action).collect()
     });
-    for a in ["browser-pair", "browser-fill", "browser-save"] {
+    for a in [
+        "browser-pair",
+        "browser-fill",
+        "browser-save",
+        "browser-passkey-create",
+        "browser-passkey",
+    ] {
         assert!(actions.iter().any(|x| x == a), "{a} in {actions:?}");
     }
+    // The passkey went in Alice's login, the one for this site and username.
+    let passkeys = owner
+        .handle
+        .with_store(|s| s.passkeys_for(&page, "localhost", &[]))
+        .unwrap();
+    assert_eq!(passkeys.len(), 1);
+    assert_eq!(passkeys[0].username, "alice");
     owner.stop();
 }
 

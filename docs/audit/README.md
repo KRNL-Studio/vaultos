@@ -25,6 +25,7 @@ A starting point for an independent review of VaultOS 0.3. VaultOS has not had o
 | The desktop pages | Tauri v2 capabilities; every privileged command re-checked in Rust | `vaultos-desktop/src/commands.rs`, `app.rs`, `tauri.conf.json`, `capabilities/` |
 | Web pages and the browser extension | Native messaging host for one extension ID, pairing keys, site matching on the browser-reported origin, trusted clicks | `extension/`, `vaultos-cli/src/bin/vaultos-browser.rs`, `vaultos-daemon/src/browser.rs`, `vaultos-core/src/sites.rs` |
 | Safari | The app extension's sandbox (it reads only the session file and connects only to the owner's socket) and its fixed origin | `safari/`, `scripts/package-mac.mjs`, `vaultos-core/src/native_host.rs` |
+| Passkeys | Relying party IDs against the browser-reported host, client data built by the owner, the human's choice in the extension's window | `extension/passkeys.js`, `passkey.js`, `background.js`, `vaultos-core/src/webauthn.rs`, `store/passkeys.rs` |
 | SSH clients | The owner's agent socket, per-key approval, signing only | `vaultos-daemon/src/ssh_agent.rs`, `vaultos-core/src/ssh.rs`, `vaultos-cli/src/bin/vaultos-ssh-sign.rs` |
 | The sync remote | age encryption to pinned devices, signed manifests and heartbeats, rollback checks | `vaultos-sync/src/lib.rs`, `vaultos-core/src/store/sync.rs` |
 | Imported files | Size limits and a minimal ZIP reader; parsed into a preview without touching the vault | `vaultos-core/src/import.rs` |
@@ -51,6 +52,6 @@ Test only against new data directories (`VAULTOS_DATA_DIR`) and synthetic values
 
 ## Out of scope today
 
-Unsigned and unnotarized builds (see the release notes), passkeys, and a compromised
+Unsigned and unnotarized builds (see the release notes), passkeys in Safari, and a compromised
 account on the same computer: anything running as the user can read the session token and
 act as the owner (see SECURITY.md).

@@ -1,6 +1,7 @@
 // Drives the unpacked extension in a headless Chromium with a new, empty profile: pairs it
 // through the native messaging host, fills a login on a local page with real (trusted)
-// clicks on the extension's controls, and saves a new login after a form is submitted.
+// clicks on the extension's controls, saves a new login after a form is submitted, and
+// registers and signs in with a passkey through the extension's passkey window.
 // Run by the `extension_end_to_end` test in crates/vaultos-cli/tests/browser.rs, which
 // starts the owner with a synthetic vault and checks the vault afterwards. Environment:
 // VAULTOS_E2E_CHROMIUM (a Chromium or Chrome for Testing binary; branded Chrome ignores
@@ -19,6 +20,53 @@ const profile = env.VAULTOS_E2E_PROFILE;
 const port = Number(env.VAULTOS_E2E_PORT);
 
 const page = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`;
+const PASSKEY_PAGE = `<p>Passkeys</p><script>
+const enc = new TextEncoder(), dec = new TextDecoder();
+const b64 = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+const sha = async b => new Uint8Array(await crypto.subtle.digest("SHA-256", b));
+// WebAuthn's DER signature as the r || s that WebCrypto verifies.
+function p1363(der) {
+    const d = new Uint8Array(der), out = new Uint8Array(64);
+    let at = 2;
+    for (const half of [ 0, 1 ]) {
+        let v = d.slice(at + 2, at + 2 + d[at + 1]);
+        at += 2 + d[at + 1];
+        if (v.length === 33) v = v.slice(1);
+        out.set(v, half * 32 + 32 - v.length);
+    }
+    return out;
+}
+const created = () => ({ rp: { name: "E2E" }, user: { id: enc.encode("user-alice"), name: "alice", displayName: "Alice" },
+    challenge: crypto.getRandomValues(new Uint8Array(32)), pubKeyCredParams: [ { type: "public-key", alg: -7 } ], extensions: { credProps: true } });
+async function register() {
+    const c = await navigator.credentials.create({ publicKey: created() });
+    window.cred = c;
+    const client = JSON.parse(dec.decode(c.response.clientDataJSON));
+    const auth = new Uint8Array(c.response.getAuthenticatorData());
+    return { instance: c instanceof PublicKeyCredential && c.response instanceof AuthenticatorAttestationResponse, type: client.type, origin: client.origin,
+        alg: c.response.getPublicKeyAlgorithm(), rk: c.getClientExtensionResults().credProps.rk, flags: auth[32],
+        rp: b64(auth.slice(0, 32)) === b64(await sha(enc.encode("localhost"))), json: c.toJSON().rawId === c.id };
+}
+async function registerAgain() {
+    try {
+        await navigator.credentials.create({ publicKey: { ...created(), excludeCredentials: [ { type: "public-key", id: window.cred.rawId } ] } });
+        return "made a second one";
+    } catch (e) {
+        return e.name;
+    }
+}
+async function signIn() {
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const a = await navigator.credentials.get({ publicKey: { challenge, rpId: "localhost", allowCredentials: [ { type: "public-key", id: window.cred.rawId } ] } });
+    const key = await crypto.subtle.importKey("spki", window.cred.response.getPublicKey(), { name: "ECDSA", namedCurve: "P-256" }, false, [ "verify" ]);
+    const auth = new Uint8Array(a.response.authenticatorData);
+    const signed = new Uint8Array([ ...auth, ...await sha(a.response.clientDataJSON) ]);
+    const client = JSON.parse(dec.decode(a.response.clientDataJSON));
+    return { verified: await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, p1363(a.response.signature), signed),
+        sameId: a.id === window.cred.id, challenge: client.challenge === b64(challenge), type: client.type, origin: client.origin,
+        user: dec.decode(a.response.userHandle), instance: a.response instanceof AuthenticatorAssertionResponse };
+}
+</script>`;
 const server = http.createServer((req, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8");
     if (req.method === "POST") {
@@ -27,6 +75,7 @@ const server = http.createServer((req, res) => {
         return;
     }
     if (req.url === "/done") return res.end(page("Welcome", "<p>Signed in</p>"));
+    if (req.url === "/passkey") return res.end(page("Passkeys", PASSKEY_PAGE));
     res.end(page("Sign in", `<form method="post" action="/welcome" style="margin:40px">
 <label>Email <input id="user" name="username" autocomplete="username" style="width:260px"></label><br><br>
 <label>Password <input id="pass" type="password" name="password" autocomplete="current-password" style="width:260px"></label><br><br>
@@ -205,6 +254,29 @@ try {
     if (!offered.ok || !offered.pending || offered.pending.username !== "carol") throw new Error(`The popup did not offer the login: ${JSON.stringify(offered)}`);
     await evaluate(sw, `${testTab}.then(t => popupOps.tabDismissSave({ tabId: t.id }))`);
     console.log("the popup offers saves only without a sign-in form");
+    // Passkeys: the page's WebAuthn call opens the extension's window, where the human chooses.
+    await send("Page.enable", {}, tab);
+    await send("Page.navigate", { url: `http://localhost:${port}/passkey` }, tab);
+    await until("the passkey page", () => evaluate(tab, `document.readyState === "complete" && typeof register === "function"`));
+    const choose = async (call, selector) => {
+        const seen = new Set([ ...targets.values() ].filter(t => t.url.includes("/passkey.html")).map(t => t.targetId));
+        const pending = evaluate(tab, call);
+        const win = await until("the passkey window", async () => [ ...targets.values() ].find(t => t.type === "page" && t.url.startsWith(`chrome-extension://${EXTENSION_ID}/passkey.html`) && !seen.has(t.targetId)));
+        const { sessionId: w } = await send("Target.attachToTarget", { targetId: win.targetId, flatten: true });
+        await until(`${selector} in the passkey window`, () => evaluate(w, `Boolean(document.querySelector(${JSON.stringify(selector)}))`));
+        evaluate(w, `document.querySelector(${JSON.stringify(selector)}).click()`).catch(() => null);
+        return pending;
+    };
+    const made = await choose(`register()`, "button.primary");
+    const want = { instance: true, type: "webauthn.create", origin: `http://localhost:${port}`, alg: -7, rk: true, flags: 0x5d, rp: true, json: true };
+    if (JSON.stringify(made) !== JSON.stringify(want)) throw new Error(`Unexpected passkey: ${JSON.stringify(made)}`);
+    console.log("registered a passkey");
+    const again = await choose(`registerAgain()`, "button.primary");
+    if (again !== "InvalidStateError") throw new Error(`A second passkey for the account: ${again}`);
+    const signedIn = await choose(`signIn()`, "li button");
+    const wantIn = { verified: true, sameId: true, challenge: true, type: "webauthn.get", origin: `http://localhost:${port}`, user: "user-alice", instance: true };
+    if (JSON.stringify(signedIn) !== JSON.stringify(wantIn)) throw new Error(`Unexpected sign-in: ${JSON.stringify(signedIn)}`);
+    console.log("signed in with the passkey");
     await send("Browser.close").catch(() => null);
 } catch (e) {
     console.error(e && e.stack || e);

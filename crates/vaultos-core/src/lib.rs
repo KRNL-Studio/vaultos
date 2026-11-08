@@ -43,6 +43,7 @@ pub mod totp;
 pub mod upgrade;
 pub mod v3;
 pub mod validate;
+pub mod webauthn;
 
 pub use crypto::KdfParams;
 pub use error::{Error, Result};

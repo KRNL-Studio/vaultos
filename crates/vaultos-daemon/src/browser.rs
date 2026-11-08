@@ -10,6 +10,16 @@
 //! - `POST /browser/fill` `{url, projectId, itemId}`: `{username, password, otp}`.
 //! - `POST /browser/save` `{url, username, password, projectId?, itemId?}`: saves a login,
 //!   `{key, project, updated}`; with ids, a new password for that login only.
+//! - `POST /browser/passkeys` `{url, rpId, allow?}`: the passkeys that page may use, without
+//!   keys.
+//! - `POST /browser/passkey/create` `{url, rpId, user: {id, name}, challenge, algorithms,
+//!   exclude?}`: makes and saves a passkey; the credential, client data, attestation object,
+//!   authenticator data and public key (base64url).
+//! - `POST /browser/passkey/get` `{url, rpId, challenge, projectId, itemId}`: signs in with a
+//!   passkey; the credential id, client data, authenticator data, signature and user handle.
+//!
+//! The extension asks only after the human chose in its own window. `url` is the page's
+//! address as the browser reports it; the client data names its origin.
 
 use crate::api::{self, Reply};
 use crate::human::{clean, Peer};
@@ -18,6 +28,8 @@ use serde_json::{json, Map, Value};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
+use vaultos_core::store::NewPasskeyRequest;
+use vaultos_core::webauthn::{self, b64url};
 use vaultos_core::{Error, SecretString, Store};
 
 /// After the human declines a pairing, new ones are refused for this long.
@@ -61,6 +73,29 @@ fn text<'a>(b: &'a Map<String, Value>, k: &str) -> Result<&'a str, Error> {
         .ok_or_else(|| api::invalid(&format!("{k} is required")))
 }
 
+/// A list of base64url credential ids (at most 64), or none.
+fn credential_ids(b: &Map<String, Value>, k: &str) -> Result<Vec<Vec<u8>>, Error> {
+    let Some(list) = b.get(k) else {
+        return Ok(Vec::new());
+    };
+    let list = list
+        .as_array()
+        .filter(|l| l.len() <= 64)
+        .ok_or_else(|| api::invalid(&format!("{k} must be a list of at most 64 ids")))?;
+    list.iter()
+        .map(|v| {
+            let s = v
+                .as_str()
+                .ok_or_else(|| api::invalid("A credential id must be text"))?;
+            webauthn::unb64url(s, "credential id", webauthn::MAX_CREDENTIAL_ID)
+        })
+        .collect()
+}
+
+fn challenge(b: &Map<String, Value>) -> Result<Vec<u8>, Error> {
+    webauthn::unb64url(text(b, "challenge")?, "challenge", webauthn::MAX_CHALLENGE)
+}
+
 pub(crate) async fn route(
     shared: Arc<Shared>,
     method: String,
@@ -85,7 +120,8 @@ pub(crate) async fn route(
             "This browser is not paired with VaultOS. Pair it from the extension.",
         );
     };
-    let saving = method == "POST" && target == "/browser/save";
+    let saving =
+        method == "POST" && (target == "/browser/save" || target == "/browser/passkey/create");
     let s = shared.clone();
     let reply = tokio::task::spawn_blocking(move || {
         let mut body = body;
@@ -161,6 +197,66 @@ fn serve(
                     &browser,
                 )?;
                 Ok(json!({ "key": saved.key, "project": project, "updated": updated }))
+            }
+            ("POST", "/browser/passkeys") => Ok(json!({
+                "passkeys": store.passkeys_for(text(&b, "url")?, text(&b, "rpId")?, &credential_ids(&b, "allow")?)?
+            })),
+            ("POST", "/browser/passkey/create") => {
+                let algorithms = b.get("algorithms").and_then(Value::as_array);
+                if !algorithms
+                    .is_some_and(|a| a.iter().any(|v| v.as_i64() == Some(webauthn::ES256)))
+                {
+                    return Err(api::invalid("VaultOS makes ES256 passkeys only"));
+                }
+                let user = b
+                    .get("user")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| api::invalid("user is required"))?;
+                let handle = webauthn::unb64url(
+                    text(user, "id")?,
+                    "user handle",
+                    webauthn::MAX_USER_HANDLE,
+                )?;
+                let exclude = credential_ids(&b, "exclude")?;
+                let challenge = challenge(&b)?;
+                let c = store.create_passkey(
+                    text(&b, "url")?,
+                    &NewPasskeyRequest {
+                        rp_id: text(&b, "rpId")?,
+                        user_name: user.get("name").and_then(Value::as_str).unwrap_or(""),
+                        user_handle: &handle,
+                        challenge: &challenge,
+                        exclude: &exclude,
+                    },
+                    &browser,
+                )?;
+                let r = &c.registration;
+                Ok(json!({
+                    "credentialId": b64url(&r.credential_id),
+                    "clientDataJSON": b64url(r.client_data_json.as_bytes()),
+                    "attestationObject": b64url(&r.attestation_object),
+                    "authenticatorData": b64url(&r.authenticator_data),
+                    "publicKey": b64url(&r.public_key),
+                    "project": c.project,
+                    "name": c.name,
+                }))
+            }
+            ("POST", "/browser/passkey/get") => {
+                let u = store.use_passkey(
+                    text(&b, "url")?,
+                    text(&b, "rpId")?,
+                    text(&b, "projectId")?,
+                    text(&b, "itemId")?,
+                    &challenge(&b)?,
+                    &browser,
+                )?;
+                Ok(json!({
+                    "credentialId": b64url(&u.credential_id),
+                    "clientDataJSON": b64url(u.assertion.client_data_json.as_bytes()),
+                    "authenticatorData": b64url(&u.assertion.authenticator_data),
+                    "signature": b64url(&u.assertion.signature),
+                    "userHandle": b64url(&u.user_handle),
+                }))
             }
             _ => Err(Error::NotFound("Not found".into())),
         }
