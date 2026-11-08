@@ -1,13 +1,16 @@
 // Runs the desktop UI flow (scripts/desktop-ui-flow.js) in a `ui-test` debug build of the Tauri
 // app, against a new vault in a temporary folder. Needs an interactive desktop session.
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
 const dir = mkdtempSync(path.join(realpathSync(tmpdir()), "vaultos-desktop-ui-"));
 const data = path.join(dir, "data");
+// Where the save dialogs "save": the ui-test build saves there without asking.
+const saved = path.join(dir, "saved");
+mkdirSync(saved, { mode: 0o700 });
 
 // A sync checkout whose remote does not exist, so a pull fails before it touches the vault.
 const syncRepo = path.join(dir, "sync-repository");
@@ -34,13 +37,14 @@ if (!binary) {
     binary = path.join(root, "target", "debug", "vaultos-desktop");
 }
 
-const code = await new Promise(resolve => {
+let code = await new Promise(resolve => {
     const child = spawn(binary, [], {
         env: {
             ...process.env,
             VAULTOS_DATA_DIR: data,
             VAULTOS_SYNC_REPO: syncRepo,
-            VAULTOS_UI_TEST_SCRIPT: path.join(root, "scripts", "desktop-ui-flow.js")
+            VAULTOS_UI_TEST_SCRIPT: path.join(root, "scripts", "desktop-ui-flow.js"),
+            VAULTOS_UI_TEST_SAVE_DIR: saved
         },
         stdio: [ "ignore", "ignore", "pipe" ]
     });
@@ -64,6 +68,12 @@ const code = await new Promise(resolve => {
         resolve(status ?? 1);
     });
 });
+// Two Emergency Kits: one saved before the Secret Key was added, one saved later.
+const kits = readdirSync(saved).filter(f => readFileSync(path.join(saved, f)).subarray(0, 8).toString() === "%PDF-1.4");
+if (code === 0 && kits.length !== 2) {
+    console.error(`Expected two Emergency Kits, found ${kits.length}.`);
+    code = 1;
+}
 rmSync(dir, {
     recursive: true,
     force: true

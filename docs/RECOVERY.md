@@ -12,7 +12,7 @@ Quit VaultOS (and stop the background service if you installed it), then:
 vaultos backup /absolute/new/dated-backup-directory
 ```
 
-This copies `vault.enc`, the signed audit log (`audit-v4.log`) and the sync index, never tokens or other credentials. Choose a new dated directory for each snapshot. Restoring needs the master password and, if the vault has one, its Secret Key: keep both, separately from the backup. Do not send backups in bug reports or commit them to the public source repository.
+This copies `vault.enc`, the signed audit log (`audit-v4.log`) and the sync index, never tokens or other credentials. Choose a new dated directory for each snapshot. Restoring needs the master password and, if the vault has one, its Secret Key: keep both, separately from the backup. The Emergency Kit (Settings → Secret Key → Save Emergency Kit, or `vaultos secret-key kit FILE`) is a printable page with the key. Do not send backups in bug reports or commit them to the public source repository.
 
 A pull that changes the vault, and the upgrade from an 0.2 vault, keep their own copies of `vault.enc` in `backups/` inside the data directory. Only the newest 20 pull copies, plus any from the last 30 days, are kept, so they do not replace your own dated backups. Other files you place in `backups/` are never deleted.
 

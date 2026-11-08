@@ -5,12 +5,13 @@
 use crate::app::{blocking, lock, App};
 use crate::{export, items, keyring, login, platform, prefs, search, settings, ui};
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 use vaultos_core::agents::{Wildcards, ALL_SCOPES};
 use vaultos_core::model::HUMAN;
 use vaultos_core::validate::FieldInput;
-use vaultos_core::{Error, Fields, SecretString, Store};
+use vaultos_core::{Error, Fields, SecretKey, SecretString, Store};
 use vaultos_sync::Sync;
 
 const PROVIDERS: &str = include_str!("providers.json");
@@ -144,6 +145,8 @@ fn changes(channel: &str) -> bool {
             | "otp"
             | "copyOtp"
             | "saveAttachment"
+            | "secretKeyState"
+            | "saveEmergencyKit"
             | "itemHistory"
             | "watchtower"
             | "breachCheck"
@@ -360,6 +363,103 @@ async fn change_password(app: &Arc<App>, a: &Args) -> Reply {
     Ok(json!({ "backups": [], "warnings": [], "keyring": ring }))
 }
 
+/// The master password in argument 0, checked against the vault. Secret Key changes and the
+/// Emergency Kit always need it, whatever the Touch ID settings.
+async fn confirmed(app: &Arc<App>, a: &Args) -> Result<SecretString, String> {
+    let pw = a.str(0, "password")?;
+    let r = app.confirm_password(Some(pw.clone())).await;
+    if r["ok"] != json!(true) {
+        return Err(r["error"].as_str().unwrap_or("Wrong password").to_owned());
+    }
+    Ok(SecretString::new(pw))
+}
+
+async fn kit_target(handle: &AppHandle, title: &str) -> Result<Option<PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    // The UI test saves to its own folder instead of asking.
+    #[cfg(feature = "ui-test")]
+    if let Some(dir) = std::env::var_os("VAULTOS_UI_TEST_SAVE_DIR") {
+        static SAVED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SAVED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        return Ok(Some(PathBuf::from(dir).join(format!("kit-{n}.pdf"))));
+    }
+    let dialog = handle
+        .dialog()
+        .file()
+        .set_title(title)
+        .set_file_name("VaultOS Emergency Kit.pdf");
+    let picked = blocking(move || dialog.blocking_save_file()).await?;
+    Ok(picked.and_then(|p| p.into_path().ok()))
+}
+
+async fn write_kit(app: &Arc<App>, target: PathBuf, key: SecretKey) -> Result<(), String> {
+    let me = app.clone();
+    blocking(move || {
+        let vault = me.with_store(|s| Ok(s.vault_id()?.to_owned()))?;
+        let date = vaultos_core::model::now_iso();
+        let pdf = vaultos_core::emergency_kit::pdf(&key, &vault, &date[..10]);
+        export::write_file(&target, &me.data_dir, &pdf)
+    })
+    .await?
+}
+
+/// Adds or replaces the Secret Key. Its Emergency Kit is saved first, to a new file, so the
+/// vault never needs a key that exists only in this device's Keychain.
+async fn set_secret_key(app: &Arc<App>, handle: &AppHandle, a: &Args) -> Reply {
+    let password = confirmed(app, a).await?;
+    let Some(target) = kit_target(handle, "Save the Emergency Kit for the new Secret Key").await?
+    else {
+        return Ok(json!({ "ok": false, "canceled": true }));
+    };
+    if !app.human_unlocked() {
+        return Err("Vault is locked".into());
+    }
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return Err("Choose a new file: an existing kit may hold the current Secret Key".into());
+    }
+    let next = SecretKey::generate();
+    write_kit(app, target.clone(), next.clone()).await?;
+    let (current, new) = (app.secret_key(), next.clone());
+    if let Err(e) = store(app, move |s| {
+        s.set_secret_key(&password, current.as_ref(), Some(&new))
+    })
+    .await
+    {
+        let _ = std::fs::remove_file(&target);
+        return Err(e);
+    }
+    let kept = app.replace_secret_key(Some(next));
+    Ok(json!({ "ok": true, "keychain": kept }))
+}
+
+async fn remove_secret_key(app: &Arc<App>, a: &Args) -> Reply {
+    let password = confirmed(app, a).await?;
+    let current = app
+        .secret_key()
+        .ok_or("This vault does not use a Secret Key")?;
+    store(app, move |s| {
+        s.set_secret_key(&password, Some(&current), None)
+    })
+    .await?;
+    let kept = app.replace_secret_key(None);
+    Ok(json!({ "ok": true, "keychain": kept }))
+}
+
+async fn save_emergency_kit(app: &Arc<App>, handle: &AppHandle, a: &Args) -> Reply {
+    confirmed(app, a).await?;
+    let key = app
+        .secret_key()
+        .ok_or("This vault does not use a Secret Key")?;
+    let Some(target) = kit_target(handle, "Save the Emergency Kit").await? else {
+        return Ok(json!({ "ok": false, "canceled": true }));
+    };
+    if !app.human_unlocked() {
+        return Err("Vault is locked".into());
+    }
+    write_kit(app, target, key).await?;
+    Ok(json!({ "ok": true }))
+}
+
 async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) -> Reply {
     match channel {
         "confirmHuman" => Ok(app.confirm_password(a.opt_str(0)).await),
@@ -498,6 +598,13 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
         }
         "setSettings" => set_settings(app, a.get(0)).await,
         "changePassword" => change_password(app, a).await,
+        "secretKeyState" => {
+            let id = store(app, |s| s.secret_key_id()).await?;
+            Ok(json!({ "secretKey": id.is_some(), "id": id }))
+        }
+        "setSecretKey" => set_secret_key(app, handle, a).await,
+        "removeSecretKey" => remove_secret_key(app, a).await,
+        "saveEmergencyKit" => save_emergency_kit(app, handle, a).await,
         "export" => export::export_project(app, handle, a.str(0, "project")?).await,
         "agents" => store(app, |s| s.list_agents())
             .await

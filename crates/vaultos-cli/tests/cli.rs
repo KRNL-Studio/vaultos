@@ -602,12 +602,32 @@ fn init_secret_keys_and_upgrade() {
         &kit,
     ]);
     assert!(taken.stderr.contains("already exists"), "{}", taken.stderr);
+    // The Emergency Kit: a new private PDF with the current key, never over another file.
+    let pdf = env.path("kit/emergency-kit.pdf");
+    let saved = env.admin(&["--secret-key-file", &next, "secret-key", "kit", &pdf]);
+    assert_eq!(saved.json()["ok"], true);
+    let bytes = std::fs::read(&pdf).unwrap();
+    let next_key = std::fs::read_to_string(&next).unwrap();
+    assert!(bytes.starts_with(b"%PDF-1.4\n"));
+    assert!(bytes
+        .windows(next_key.trim_end().len())
+        .any(|w| w == next_key.trim_end().as_bytes()));
+    assert_eq!(mode(Path::new(&pdf)), 0o600);
+    assert!(!saved.stdout.contains(next_key.trim_end()));
+    let again = env.admin(&["--secret-key-file", &next, "secret-key", "kit", &pdf]);
+    assert!(again.stderr.contains("already exists"), "{}", again.stderr);
     assert_eq!(
         env.admin(&["--secret-key-file", &next, "secret-key", "remove"])
             .json()["secretKey"],
         false
     );
     assert_eq!(env.admin(&["projects"]).json(), json!([]));
+    let none = env.admin(&["secret-key", "kit", &env.path("kit/none.pdf")]);
+    assert!(
+        none.stderr.contains("does not use a Secret Key"),
+        "{}",
+        none.stderr
+    );
 
     // A v3 vault from the JavaScript app.
     let old = Env::new();

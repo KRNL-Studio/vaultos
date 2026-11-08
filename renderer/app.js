@@ -1617,6 +1617,68 @@ git config --global commit.gpgsign true`;
     scroll.appendChild(pwErr);
     scroll.appendChild(pwBtn);
     scroll.appendChild(pwOut);
+    scroll = panel(page, "Secret Key");
+    const sk = await window.vault.secretKeyState();
+    if (revision !== renderVersion) return;
+    scroll.appendChild(el(`<p class="note">${sk.secretKey ? `This vault needs the master password and Secret Key ${esc(sk.id)} to open on a new device. This device keeps the key in its ${isMacPlatform() ? "Keychain" : "keyring"}. The Emergency Kit is a PDF with the key to print or store offline.` : "A Secret Key is a second, random key that the vault also needs on a new device, so the master password alone cannot open a copy of the vault file. You save its Emergency Kit first, and this device keeps the key."}</p>`));
+    const skPw = el(`<input type="password" placeholder="Master password" autocomplete="current-password" />`);
+    const skErr = el(`<div class="err" role="alert"></div>`);
+    const skOut = el(`<div class="note" role="status"></div>`);
+    scroll.appendChild(labeled("Master password", skPw));
+    scroll.appendChild(skErr);
+    const skRow = el(`<div class="navrow"></div>`);
+    const skAction = (label, channel, done, cls = "ghost") => {
+        const b = el(`<button class="btn ${cls}"></button>`);
+        b.textContent = label;
+        b.onclick = async () => {
+            skErr.textContent = skOut.textContent = "";
+            if (!skPw.value) {
+                skErr.textContent = "Enter the master password.";
+                skPw.focus();
+                return;
+            }
+            b.disabled = true;
+            try {
+                const r = await window.vault[channel](skPw.value);
+                if (revision !== renderVersion) return;
+                if (r && r.canceled) return;
+                skPw.value = "";
+                const note = done + (r && r.keychain === false ? ` This device could not update its ${isMacPlatform() ? "Keychain" : "keyring"}, so it will ask for the key at the next unlock.` : "");
+                if (channel === "saveEmergencyKit") {
+                    skOut.textContent = note;
+                    announce(note);
+                } else {
+                    announce(note);
+                    render();
+                }
+            } catch (e) {
+                skErr.textContent = cleanError(e);
+            } finally {
+                b.disabled = false;
+            }
+        };
+        skRow.appendChild(b);
+        return b;
+    };
+    if (sk.secretKey) {
+        skAction("Save Emergency Kit", "saveEmergencyKit", "Emergency Kit saved.");
+        skAction("Replace Secret Key", "setSecretKey", "The vault now uses a new Secret Key. Its Emergency Kit is saved; the earlier kit no longer opens the vault.");
+        const remove = skAction("Remove Secret Key", "removeSecretKey", "The vault no longer uses a Secret Key.", "danger");
+        const run = remove.onclick;
+        remove.onclick = () => {
+            if (remove.dataset.armed) return run();
+            remove.dataset.armed = "1";
+            remove.textContent = "Click again to remove";
+            setTimeout(() => {
+                delete remove.dataset.armed;
+                remove.textContent = "Remove Secret Key";
+            }, 4000);
+        };
+    } else {
+        skAction("Add a Secret Key", "setSecretKey", "The vault now uses a Secret Key. Keep the Emergency Kit you saved somewhere safe.", "primary");
+    }
+    scroll.appendChild(skRow);
+    scroll.appendChild(skOut);
     scroll = panel(page, "Agents, sync and history");
     const nav = el(`<div class="navrow"></div>`);
     const agentsBtn = el(`<button class="btn ghost">Agents</button>`);

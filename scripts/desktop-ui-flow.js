@@ -151,6 +151,25 @@
             await click("Watchtower");
             await button("Check now");
             (await button("Projects", false)).click();
+            // The Secret Key: added after its Emergency Kit is saved, the kit saved again, removed.
+            await click("Settings");
+            fill(await field("Master password"), password);
+            await click("Add a Secret Key");
+            await button("Replace Secret Key");
+            assert((await window.vault.secretKeyState()).secretKey, "the vault uses a Secret Key");
+            fill(await field("Master password"), "wrong-" + password);
+            await click("Save Emergency Kit");
+            await text("Wrong password");
+            await sleep(1100); // a wrong password delays the next try by a second
+            fill(await field("Master password"), password);
+            await click("Save Emergency Kit");
+            await text("Emergency Kit saved.");
+            fill(await field("Master password"), password);
+            await click("Remove Secret Key");
+            await click("Click again to remove");
+            await button("Add a Secret Key");
+            assert(!(await window.vault.secretKeyState()).secretKey, "the Secret Key is removed");
+            (await button("Projects", false)).click();
             await button("Example App", false);
             press(document.body, "k", true);
             const box2 = await query(".searchbox input");
@@ -213,7 +232,7 @@
             }
             await ui("finish", {
                 ok: true,
-                report: "Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, typed items, Trash, Watchtower, Quick Access, close to menu bar, overlapping unlocks, lock before sleep."
+                report: "Desktop flow passed: setup, locked IPC, create, reveal, lock, unlock, blocked popups, sync pull reason, search, typed items, Trash, Watchtower, Secret Key and Emergency Kit, Quick Access, close to menu bar, overlapping unlocks, lock before sleep."
             });
         }
     };

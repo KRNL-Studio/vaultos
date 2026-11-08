@@ -360,6 +360,11 @@ enum SecretKeyCommand {
     },
     /// Stop requiring a Secret Key
     Remove,
+    /// Write the Emergency Kit, a printable PDF with the vault's Secret Key, to a new file
+    Kit {
+        #[arg(value_name = "PATH")]
+        file: PathBuf,
+    },
 }
 
 struct Ctx {
@@ -436,26 +441,29 @@ fn write_token(file: &Path, token: &SecretString) -> Result<()> {
 /// Writes a new Secret Key to a file that must not exist yet, so a key belonging to another
 /// vault is never overwritten.
 fn write_secret_key(file: &Path, key: &SecretKey) -> Result<()> {
-    prepare_private_file(file, "--new-secret-key-file")?;
+    let mut text = Zeroizing::new(key.display().expose().as_bytes().to_vec());
+    text.push(b'\n');
+    write_new_private(file, "--new-secret-key-file", "Secret Key file", &text)
+}
+
+/// Writes `bytes` to `file`, which must not exist yet, readable only by this user.
+fn write_new_private(file: &Path, flag: &str, what: &str, bytes: &[u8]) -> Result<()> {
+    prepare_private_file(file, flag)?;
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     opts.mode(0o600);
     let mut f = opts.open(file).map_err(|e| {
         if e.kind() == std::io::ErrorKind::AlreadyExists {
-            Fail::new("The Secret Key file already exists; choose a new path")
+            Fail::new(format!("The {what} already exists; choose a new path"))
         } else {
-            Fail::new("cannot create the Secret Key file")
+            Fail::new(format!("cannot create the {what}"))
         }
     })?;
-    let text = key.display();
-    let written = f
-        .write_all(text.expose().as_bytes())
-        .and_then(|()| f.write_all(b"\n"))
-        .and_then(|()| f.sync_all());
+    let written = f.write_all(bytes).and_then(|()| f.sync_all());
     if written.is_err() {
         let _ = std::fs::remove_file(file);
-        return Err(Fail::new("cannot write the Secret Key file"));
+        return Err(Fail::new(format!("cannot write the {what}")));
     }
     if let Some(dir) = file.parent() {
         fs_safe::sync_dir(dir)?;
@@ -1138,6 +1146,17 @@ fn secret_key(ctx: &Ctx, cmd: SecretKeyCommand) -> Result<()> {
             store.set_secret_key(password, secret_key.as_ref(), None)?;
             let audited = audited(store, "remove_secret_key");
             emit(&json!({ "ok": true, "secretKey": false, "warnings": warnings(audited) }))
+        }
+        SecretKeyCommand::Kit { file } => {
+            let Some(key) = secret_key else {
+                return Err(Fail::new("This vault does not use a Secret Key"));
+            };
+            let file = std::path::absolute(&file)
+                .map_err(|_| Fail::usage("cannot resolve the Emergency Kit path"))?;
+            let date = vaultos_core::model::now_iso();
+            let pdf = vaultos_core::emergency_kit::pdf(key, store.vault_id()?, &date[..10]);
+            write_new_private(&file, "The Emergency Kit path", "Emergency Kit file", &pdf)?;
+            emit(&json!({ "ok": true, "file": file, "secretKeyId": key.id() }))
         }
     }
 }

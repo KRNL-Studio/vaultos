@@ -107,6 +107,7 @@ vaultos pending deny PROJECT KEY                     # removes the agent-created
 vaultos approver set --token-file /absolute/private/approver.token   # also: approver status, approver clear
 vaultos rotate-password
 vaultos secret-key set --new-secret-key-file /absolute/private/vault.secret-key    # or: secret-key remove
+vaultos secret-key kit /absolute/private/emergency-kit.pdf   # the Emergency Kit: a printable PDF with the Secret Key
 vaultos backup /absolute/new/dated-backup-directory
 vaultos inject PROJECT /absolute/project/.env        # replaces the file
 vaultos import-items PROJECT /absolute/export.1pux   # or a Bitwarden .json or a .csv export

@@ -980,6 +980,17 @@ impl App {
         lock(&self.secret_key).clone()
     }
 
+    /// After the vault's Secret Key changed: keeps the new one on this device, or forgets it.
+    /// Returns whether the Keychain or keyring now matches.
+    pub fn replace_secret_key(&self, key: Option<SecretKey>) -> bool {
+        let kept = match &key {
+            Some(k) => self.keyring.set(keyring::SECRET_KEY, &k.display()),
+            None => self.keyring.clear(keyring::SECRET_KEY),
+        };
+        *lock(&self.secret_key) = key;
+        kept.is_ok()
+    }
+
     pub fn set_password(&self, pw: SecretString) {
         *lock(&self.password) = Some(pw);
     }

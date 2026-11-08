@@ -17,6 +17,7 @@ pub mod approvals;
 pub mod audit;
 pub mod canon;
 pub mod crypto;
+pub mod emergency_kit;
 pub mod env;
 pub mod error;
 pub mod format;

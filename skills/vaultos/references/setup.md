@@ -107,7 +107,9 @@ vaultos unlock
 `vaultos add` creates the project and asks for the value at a hidden prompt (or
 reads it from a pipe); the human types or pipes it, never an agent, and never as an
 argument. `vaultos init --new-secret-key-file PATH` also requires a Secret Key; then
-every command that opens the vault needs `--secret-key-file PATH`. Commands that
+every command that opens the vault needs `--secret-key-file PATH`, and
+`vaultos secret-key kit FILE` writes its Emergency Kit, a printable PDF with the
+key, to a new 0600 file. Commands that
 change the vault directly need it to themselves (`--stop-backend`, then `start` and
 `unlock` again). `vaultosd` starts locked, and no agent client starts it. Its log
 is `vaultosd.log` in the data directory.
