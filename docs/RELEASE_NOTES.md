@@ -15,7 +15,7 @@ This is an **unsigned evaluation preview** unless the download is named `notariz
 - **Vault format v4.** Argon2id, an optional Secret Key, per-project keys, separately sealed item metadata and secrets, a whole-file MAC and a signed audit chain.
 - **Agents over a private socket.** The app serves agents on a Unix socket that accepts only your user. Point MCP clients at `VaultOS.app/Contents/Helpers/vaultos-mcp`; tool names and schemas are unchanged.
 - **Background access** is `VaultOS --service`, installed only by `scripts/install-service-macos.sh` or `scripts/install-linux.sh --enable-service`.
-- **Sync format 2**, in the app and the CLI, with keys inside the vault and no `age` binary.
+- **Sync format 2**, in the app and the CLI, with keys inside the vault and no `age` binary. A lost or retired device can be removed (`vaultos sync untrust`), and each other device confirms the removal.
 
 ## Upgrading from 0.2
 

@@ -240,6 +240,14 @@ enum SyncCommand {
     /// Trust another device's identity file (its machines/<id>.json, or `sync identity`
     /// output) once its fingerprint matches what that device shows
     Trust { file: PathBuf },
+    /// The devices this vault trusts, with their ids, and the ones removed from sync
+    Devices,
+    /// Remove a device from sync (a lost or retired one), or confirm a removal another
+    /// device made: it stops being a recipient and every record is encrypted again
+    Untrust {
+        /// The device's id, from `sync devices`
+        id: String,
+    },
     /// Fetch, then report one state for the whole; exits 2 unless IN_SYNC
     Status,
     /// Encrypt, commit and push this device's changes; exits 2 unless delivered
@@ -1191,6 +1199,13 @@ fn sync(ctx: &Ctx, cmd: SyncCommand) -> Result<()> {
             );
             let _ = store.audit("sync_trust", &detail, HUMAN);
             emit(&trusted)
+        }
+        SyncCommand::Devices => emit(&engine.devices(store)?),
+        SyncCommand::Untrust { id } => {
+            let removed = engine.untrust_remote(store, &id)?;
+            let detail = format!("{} ({id})", removed["label"].as_str().unwrap_or_default());
+            let _ = store.audit("sync_untrust", &detail, HUMAN);
+            emit(&removed)
         }
         SyncCommand::Status => {
             let status = engine.status_remote(store)?;

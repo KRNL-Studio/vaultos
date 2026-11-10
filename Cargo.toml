@@ -7,7 +7,7 @@ exclude = ["fuzz"]
 version = "0.3.0-preview.1"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/rohit3a/vaultos"
+repository = "https://github.com/KRNL-Studio/vaultos"
 rust-version = "1.85"
 
 [workspace.lints.rust]

@@ -29,7 +29,7 @@ does not change the app's directory: both processes need the same setting.
 
 ## Install on macOS
 
-The easiest path is the [preview release](https://github.com/rohit3a/vaultos/releases).
+The easiest path is the [preview release](https://github.com/KRNL-Studio/vaultos/releases).
 Choose `arm64` for Apple Silicon or `x64` for Intel. The deployment target is
 macOS 13+; check the release notes for versions actually tested. Download the ZIP
 and matching checksum, and run this in the download directory, substituting the
@@ -53,7 +53,7 @@ command-line developer tools. From a chosen parent directory, use a new checkout
 name if `vaultos` already exists:
 
 ```sh
-git clone https://github.com/rohit3a/vaultos.git
+git clone https://github.com/KRNL-Studio/vaultos.git
 cd vaultos
 npm run dist:mac        # dist/VaultOS-darwin-<arch>/VaultOS.app, unsigned
 ```

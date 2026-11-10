@@ -4,7 +4,7 @@
 
 VaultOS is a local desktop vault with an MCP bridge. Organize credentials by project, approve an agent's projects and output folders, and let it write a working environment file without returning the secret values in its tool response.
 
-[Download the macOS preview](https://github.com/rohit3a/vaultos/releases) · [Agent setup](docs/AGENTS.md) · [Security model](SECURITY.md) · [Contribute](CONTRIBUTING.md)
+[Download the macOS preview](https://github.com/KRNL-Studio/vaultos/releases) · [Agent setup](docs/AGENTS.md) · [Security model](SECURITY.md) · [Contribute](CONTRIBUTING.md)
 
 > **Unsigned preview:** early software for evaluation, without Developer ID signing or Apple notarization. Start with test credentials and keep independent backups. Security regression tests are included; this project has not received an independent security audit.
 
@@ -26,7 +26,7 @@ Injection reduces accidental disclosure in tool transcripts. **It does not stop 
 
 ## Install on macOS
 
-1. Download the ZIP and matching `.sha256` from the [preview release](https://github.com/rohit3a/vaultos/releases). Choose `arm64` for Apple Silicon or `x64` for Intel. The deployment target is macOS 13 or later; see release notes for versions actually tested.
+1. Download the ZIP and matching `.sha256` from the [preview release](https://github.com/KRNL-Studio/vaultos/releases). Choose `arm64` for Apple Silicon or `x64` for Intel. The deployment target is macOS 13 or later; see release notes for versions actually tested.
 2. In the download folder, run `shasum -a 256 -c <download-name>.zip.sha256` and confirm `OK`. This checks file integrity; it does not authenticate a publisher independently of GitHub. Releases from the release workflow also carry signed build provenance: `gh attestation verify <download-name>.zip --repo KRNL-Studio/vaultos` checks that this repository's workflow built the file from the tagged source.
 3. Extract **VaultOS.app** and put it in a folder of your choice. It can coexist with other vault applications.
 4. Try opening it. If macOS blocks the unidentified developer, follow Apple's [per-app Open Anyway instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**, only after you have verified and decided to trust the download. Managed Macs may disallow this. Do not disable Gatekeeper globally.
@@ -80,7 +80,7 @@ Back up with `vaultos backup` (or copy `vault.enc`) and keep its password, and i
 Install Rust with rustup (it fetches the toolchain pinned in `rust-toolchain.toml`), Node.js 22+ for the build and test scripts, and on macOS the command-line developer tools:
 
 ```sh
-git clone https://github.com/rohit3a/vaultos.git
+git clone https://github.com/KRNL-Studio/vaultos.git
 cd vaultos
 npm start                # a debug build of the desktop
 ```

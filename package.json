@@ -9,12 +9,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/rohit3a/vaultos.git"
+    "url": "https://github.com/KRNL-Studio/vaultos.git"
   },
   "bugs": {
-    "url": "https://github.com/rohit3a/vaultos/issues"
+    "url": "https://github.com/KRNL-Studio/vaultos/issues"
   },
-  "homepage": "https://github.com/rohit3a/vaultos#readme",
+  "homepage": "https://github.com/KRNL-Studio/vaultos#readme",
   "scripts": {
     "start": "cargo run -p vaultos-desktop",
     "test": "node --test test/*.test.js",

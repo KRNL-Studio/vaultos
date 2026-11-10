@@ -37,14 +37,25 @@ const APP: &str = "VaultOS-Preview";
 const MARKER: &str = "vaultos-sync.json";
 const MARKER_VERSION: u64 = 2;
 const FORMAT: u64 = 4;
-const DIRS: [&str; 5] = ["records", "tombstones", "machines", "manifests", "peers"];
+const DIRS: [&str; 6] = [
+    "records",
+    "tombstones",
+    "machines",
+    "manifests",
+    "peers",
+    "revoked",
+];
 const MAX_SYNC_FILE: u64 = 4 * 1024 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024 * 1024;
 const MAX_SMALL: u64 = 64 * 1024;
 const MANIFEST_CONTEXT: &[u8] = b"vaultos/v4/sync-manifest\0";
 const HEARTBEAT_CONTEXT: &[u8] = b"vaultos/v4/sync-heartbeat\0";
+const REVOCATION_CONTEXT: &[u8] = b"vaultos/v4/sync-revocation\0";
 /// The local sync index, in the data folder.
 pub const INDEX_FILE: &str = "sync-index.json";
+/// The names a push is writing, in the data folder, so a push that stopped half way can be
+/// told from a tampered repository and finished.
+const JOURNAL_FILE: &str = "sync-push.journal";
 
 // A pull that changes the vault first copies vault.enc to backups/<ms>-<id>.enc. The newest
 // BACKUPS_KEPT of those, and any younger than BACKUP_DAYS, are kept; other files there are
@@ -154,7 +165,7 @@ fn sync_file(rel: &str) -> bool {
     };
     match dir {
         "records" | "tombstones" => named(file, 64, ".age"),
-        "machines" | "manifests" | "peers" => named(file, 16, ".json"),
+        "machines" | "manifests" | "peers" | "revoked" => named(file, 16, ".json"),
         _ => false,
     }
 }
@@ -466,6 +477,25 @@ struct Checked {
     problems: Vec<String>,
     valid: BTreeMap<String, Vec<Entry>>,
     latest: BTreeMap<String, u64>,
+    /// Devices removed from sync, with the last push of each that its remover had accepted.
+    retired: BTreeMap<String, u64>,
+}
+
+/// A device's removal from sync, signed by a device this one trusts.
+#[derive(Clone, Debug)]
+struct Revocation {
+    label: String,
+    by: String,
+    by_label: String,
+    last_counter: u64,
+}
+
+/// The names an unfinished push was writing or removing.
+#[derive(Serialize, Deserialize)]
+struct Journal {
+    format: u64,
+    names: BTreeSet<String>,
+    mac: String,
 }
 
 /// What this device last knew the repository held: per record file, the keyed hash of the
@@ -677,7 +707,7 @@ impl Sync {
 
     fn keys(&self, store: &Store) -> Result<Keys> {
         match store.sync_keys()? {
-            Some(v) => Keys::from_value(v.expose()),
+            Some(v) => Keys::from_value(&v.open()),
             None => Err(SyncError::new(
                 "NOT_CONFIGURED",
                 "Initialize sync on this device first: vaultos sync init <machine-label>",
@@ -766,7 +796,7 @@ impl Sync {
         }
         self.ensure_dirs()?;
         let mut keys = match store.sync_keys()? {
-            Some(v) => Keys::from_value(v.expose())?,
+            Some(v) => Keys::from_value(&v.open())?,
             None => Keys::generate(label),
         };
         if store.sync_keys()?.is_none() || keys.label != label {
@@ -867,6 +897,278 @@ impl Sync {
         Ok(json!({ "id": id, "fingerprint": fingerprint }))
     }
 
+    // ── Removing a device ───────────────────────────────────────────────────────────────
+
+    /// The removals in `revoked/` that a device in `trusted` signed, by removed device.
+    fn revocations(&self, trusted: &Map<String, Value>) -> BTreeMap<String, Revocation> {
+        let shown = |s: &str, fallback: &str| {
+            let s: String = s.chars().filter(|c| !c.is_control()).take(100).collect();
+            if s.is_empty() {
+                fallback.to_owned()
+            } else {
+                s
+            }
+        };
+        let mut out = BTreeMap::new();
+        for file in list_dir(&self.dir("revoked")) {
+            if !named(&file, 16, ".json") {
+                continue;
+            }
+            let Ok(signed) = read_json(&self.dir("revoked").join(&file), MAX_SMALL) else {
+                continue;
+            };
+            let r = signed.get("revocation").cloned().unwrap_or(Value::Null);
+            let id = str_of(&r, "machineId");
+            let by = str_of(&r, "revokedBy");
+            let Some(signer) = trusted.get(by) else {
+                continue;
+            };
+            if file != format!("{id}.json")
+                || id == by
+                || r.get("format").and_then(Value::as_u64) != Some(FORMAT)
+                || !verify_signed(
+                    str_of(signer, "signingPublicKey"),
+                    REVOCATION_CONTEXT,
+                    &r,
+                    str_of(&signed, "signature"),
+                )
+            {
+                continue;
+            }
+            out.insert(
+                id.to_owned(),
+                Revocation {
+                    label: shown(str_of(&r, "label"), id),
+                    by: by.to_owned(),
+                    by_label: shown(str_of(signer, "label"), by),
+                    last_counter: r.get("lastCounter").and_then(Value::as_u64).unwrap_or(0),
+                },
+            );
+        }
+        out
+    }
+
+    fn write_revocation(&self, keys: &Keys, id: &str, label: &str, last: u64) -> Result<()> {
+        let r = json!({
+            "format": FORMAT,
+            "machineId": id,
+            "label": label,
+            "revokedBy": keys.machine_id,
+            "revokedAt": now_iso(),
+            "lastCounter": last,
+        });
+        let signed = json!({ "revocation": r, "signature": keys.sign(REVOCATION_CONTEXT, &r) });
+        write_json(&self.dir("revoked").join(format!("{id}.json")), &signed)
+    }
+
+    /// The devices this vault trusts, and the ones removed from sync.
+    pub fn devices(&self, store: &Store) -> Result<Value> {
+        let keys = self.keys(store)?;
+        let trusted = store.sync_trust()?;
+        let devices: Vec<Value> = trusted
+            .iter()
+            .map(|(id, peer)| {
+                json!({
+                    "id": id,
+                    "label": str_of(peer, "label"),
+                    "fingerprint": sha256_hex(canonical_json(peer).as_bytes()),
+                    "thisDevice": *id == keys.machine_id,
+                })
+            })
+            .collect();
+        let removed: Vec<Value> = self
+            .revocations(&trusted)
+            .iter()
+            .map(|(id, r)| {
+                json!({
+                    "id": id,
+                    "label": r.label,
+                    "removedOn": r.by_label,
+                    "confirmedHere": !trusted.contains_key(id),
+                })
+            })
+            .collect();
+        Ok(json!({ "devices": devices, "removed": removed }))
+    }
+
+    /// Removes a device from sync: it is trusted no more, it is no longer a recipient, its
+    /// manifest, identity and heartbeat leave the repository, and a signed removal tells the
+    /// other devices, which each confirm it the same way. The next push encrypts every
+    /// record again for the devices that remain. Local only; [`Sync::untrust_remote`] sends it.
+    ///
+    /// What the removed device could already decrypt, in its own copy or in the repository's
+    /// history, it still can: change any secret that matters after removing a lost device.
+    pub fn untrust(&self, store: &mut Store, id: &str) -> Result<Value> {
+        let keys = self.keys(store)?;
+        if !is_hex(id, 16) {
+            return Err(SyncError::plain(
+                "Expected a device id of 16 hexadecimal characters; list them with: vaultos sync devices",
+            ));
+        }
+        if id == keys.machine_id {
+            return Err(SyncError::plain(
+                "A device cannot remove itself from sync; remove it from another device",
+            ));
+        }
+        self.ensure_dirs()?;
+        let mut trusted = store.sync_trust()?;
+        let revoked = self.revocations(&trusted);
+        let existing = revoked.get(id).cloned();
+        let Some(peer) = trusted.get(id).cloned() else {
+            return match existing {
+                Some(_) => Ok(json!({ "id": id, "removed": true, "alreadyRemoved": true })),
+                None => Err(SyncError::plain(
+                    "No trusted device has that id; list them with: vaultos sync devices",
+                )),
+            };
+        };
+        let label = str_of(&peer, "label").to_owned();
+        let mut idx = self.read_index(&keys)?;
+        // The newest push of the device that this one can vouch for: later manifests carry
+        // it, so everything that device wrote stays superseded once it is rewritten.
+        let in_repository = read_json(
+            &self.dir("manifests").join(format!("{id}.json")),
+            MAX_MANIFEST,
+        )
+        .ok()
+        .and_then(|signed| {
+            let m = signed.get("manifest").cloned().unwrap_or(Value::Null);
+            verify_signed(
+                str_of(&peer, "signingPublicKey"),
+                MANIFEST_CONTEXT,
+                &m,
+                str_of(&signed, "signature"),
+            )
+            .then(|| Accepted::parse(id, &m).ok().map(|a| a.counter))
+            .flatten()
+        })
+        .unwrap_or(0);
+        let last = in_repository
+            .max(idx.seen_manifests.get(id).map_or(0, |s| s.counter))
+            .max(existing.as_ref().map_or(0, |r| r.last_counter));
+        // The repository first and trust last: stopped half way, the signed removal is there
+        // while the device is still trusted, and sync says to run this again.
+        let recipients_path = self.dir("recipients.txt");
+        if regular_file(&recipients_path, true, MAX_SMALL)?.is_some() {
+            let text =
+                String::from_utf8_lossy(&read_regular(&recipients_path, MAX_SMALL)?).into_owned();
+            let key = str_of(&peer, "agePublicKey");
+            let lines: Vec<&str> = text.lines().collect();
+            let mut kept: Vec<&str> = Vec::new();
+            for (i, line) in lines.iter().enumerate() {
+                let comment_of_removed = line.trim_start().starts_with('#')
+                    && lines.get(i + 1).is_some_and(|next| next.trim() == key);
+                if line.trim() != key && !comment_of_removed {
+                    kept.push(line);
+                }
+            }
+            if kept.len() != lines.len() {
+                let mut out = kept.join("\n");
+                out.push('\n');
+                atomic_write(&recipients_path, out.as_bytes())?;
+            }
+        }
+        for dir in ["manifests", "machines", "peers"] {
+            let _ = std::fs::remove_file(self.dir(dir).join(format!("{id}.json")));
+        }
+        if existing.is_none() {
+            self.write_revocation(&keys, id, &label, last)?;
+        }
+        // A removal the departing device signed stops counting once it is not trusted. One
+        // this vault had already confirmed is signed again here, so it keeps holding; one it
+        // had not (the departing device removing another) is refused by deleting it.
+        for (other, r) in &revoked {
+            if r.by != id {
+                continue;
+            }
+            if trusted.contains_key(other) || *other == keys.machine_id {
+                let _ = std::fs::remove_file(self.dir("revoked").join(format!("{other}.json")));
+            } else {
+                self.write_revocation(&keys, other, &r.label, r.last_counter)?;
+            }
+        }
+        idx.seen_manifests.remove(id);
+        self.write_index(&keys, &mut idx)?;
+        trusted.remove(id);
+        store.set_sync_trust(trusted)?;
+        Ok(json!({
+            "id": id,
+            "label": label,
+            "removed": true,
+            "confirmedRemovalFrom": existing.map(|r| r.by_label),
+        }))
+    }
+
+    /// Removes a device and sends the removal, holding the store throughout (the CLI's way).
+    /// It starts from the remote's newest state when that can be reached, and removes the
+    /// device here even when it cannot; the next sync round then sends it.
+    pub fn untrust_remote(&self, store: &mut Store, id: &str) -> Result<Value> {
+        let _held = self.hold();
+        let fetch_error = if self.git.is_repo() {
+            let _ = self.commit_leftovers(store);
+            self.fetch().err().map(|e| e.message)
+        } else {
+            None
+        };
+        let mut out = self.untrust(store, id)?;
+        let staged = self.stage_push(store, Some(&format!("vault sync: removed device {id}")))?;
+        out["push"] = self.deliver(&staged);
+        if let Some(e) = fetch_error {
+            out["fetchError"] = json!(e);
+        }
+        Ok(out)
+    }
+
+    // ── The push journal ────────────────────────────────────────────────────────────────
+
+    fn journal_path(&self) -> PathBuf {
+        self.data_dir.join(JOURNAL_FILE)
+    }
+
+    fn journal_mac(keys: &Keys, names: &BTreeSet<String>) -> String {
+        b64(&hmac_sha256(
+            &keys.index_key("journal"),
+            canonical_json(&json!({ "format": FORMAT, "names": names })).as_bytes(),
+        ))
+    }
+
+    /// The files an unfinished push was writing. A journal that is missing, unreadable or
+    /// not this device's names none, and then nothing unsigned is excused.
+    fn read_journal(&self, keys: &Keys) -> BTreeSet<String> {
+        let path = self.journal_path();
+        let Ok(bytes) = read_regular(&path, MAX_MANIFEST) else {
+            return BTreeSet::new();
+        };
+        let Ok(j) = serde_json::from_slice::<Journal>(&bytes) else {
+            return BTreeSet::new();
+        };
+        let sound = j.format == FORMAT
+            && j.mac == Self::journal_mac(keys, &j.names)
+            && j.names.iter().all(|n| {
+                (n.starts_with("records/") || n.starts_with("tombstones/")) && sync_file(n)
+            });
+        if sound {
+            j.names
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    fn write_journal(&self, keys: &Keys, names: &BTreeSet<String>) -> Result<()> {
+        write_json(
+            &self.journal_path(),
+            &Journal {
+                format: FORMAT,
+                names: names.clone(),
+                mac: Self::journal_mac(keys, names),
+            },
+        )
+    }
+
+    fn clear_journal(&self) {
+        let _ = std::fs::remove_file(self.journal_path());
+    }
+
     /// Every recipient, all trusted: a recipient someone slipped into `recipients.txt` would
     /// otherwise receive every secret.
     fn recipients(&self, store: &Store) -> Result<Vec<age::x25519::Recipient>> {
@@ -928,13 +1230,46 @@ impl Sync {
     /// file is one a trusted device wrote and no later push replaced or removed. With
     /// `remember`, a clean result records the manifests seen, so none can go back later.
     pub fn verify_manifests(&self, store: &Store, remember: bool) -> Result<Vec<String>> {
-        Ok(self.check(store, remember)?.problems)
+        Ok(self.check(store, remember, &BTreeSet::new())?.problems)
     }
 
-    fn check(&self, store: &Store, remember: bool) -> Result<Checked> {
+    /// `excused` names the files an unfinished push of this device left: the push that
+    /// finishes it rewrites or removes each, so they are neither checked nor read.
+    fn check(&self, store: &Store, remember: bool, excused: &BTreeSet<String>) -> Result<Checked> {
         let keys = self.keys(store)?;
         let mut idx = self.read_index(&keys)?;
         let trusted = store.sync_trust()?;
+        // A removal a trusted device signed stops sync here until a human confirms it on this
+        // device too: one device must not be able to end another's trust on its own.
+        let revoked = self.revocations(&trusted);
+        let notices: Vec<String> = revoked
+            .iter()
+            .filter_map(|(id, r)| {
+                if *id == keys.machine_id {
+                    Some(format!(
+                        "This device was removed from sync on {}. If you did that, sync has ended for this device and its vault keeps its records. If you did not, that device may be compromised; see docs/SYNC.md",
+                        r.by_label
+                    ))
+                } else if trusted.contains_key(id) {
+                    Some(format!(
+                        "{} ({id}) was removed from sync on {}. If you did that, confirm it on this device: vaultos sync untrust {id}. If you did not, {} may be compromised; see docs/SYNC.md",
+                        r.label, r.by_label, r.by_label
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !notices.is_empty() {
+            return Ok(Checked {
+                problems: notices,
+                ..Checked::default()
+            });
+        }
+        let retired: BTreeMap<String, u64> = revoked
+            .iter()
+            .map(|(id, r)| (id.clone(), r.last_counter))
+            .collect();
         let mut problems: Vec<String> = Vec::new();
         let mut accepted: Vec<Accepted> = Vec::new();
         let mut present = BTreeSet::new();
@@ -1019,7 +1354,7 @@ impl Sync {
             accepted.push(a);
         }
         for id in idx.seen_manifests.keys() {
-            if !present.contains(id) {
+            if !present.contains(id) && !retired.contains_key(id) {
                 problem("Previously seen manifest is missing".into());
             }
         }
@@ -1038,6 +1373,9 @@ impl Sync {
                 match latest.get(device) {
                     Some(l) if counter <= *l => {}
                     Some(_) => problem("ROLLBACK or manifest equivocation".into()),
+                    // A removed device has no manifest; what it pushed stays superseded by
+                    // the manifests that saw it.
+                    None if retired.contains_key(device) => {}
                     None => problem("A signed manifest is missing".into()),
                 }
             }
@@ -1080,6 +1418,9 @@ impl Sync {
                     }
                     continue;
                 }
+                if excused.contains(&rel) {
+                    continue;
+                }
                 match file_digest(&self.rel(&rel)) {
                     Ok(h) if listed(&valid, &rel, &h) => {}
                     Ok(h) if listed(&superseded, &rel, &h) => problem(
@@ -1093,7 +1434,7 @@ impl Sync {
         // A push that removes a file lists it no more, which supersedes its entry; a file
         // with a current entry was never removed by a device, so it must be here.
         for name in valid.keys() {
-            if !self.rel(name).exists() {
+            if !excused.contains(name) && !self.rel(name).exists() {
                 problem("Signed ciphertext is missing".into());
             }
         }
@@ -1114,6 +1455,7 @@ impl Sync {
             problems,
             valid,
             latest,
+            retired,
         })
     }
 
@@ -1130,14 +1472,17 @@ impl Sync {
     /// files of records deleted here, and signs a new manifest. Local only.
     pub fn push_local(&self, store: &Store) -> Result<Wrote> {
         self.ensure_dirs()?;
-        let checked = self.check(store, true)?;
+        let keys = self.keys(store)?;
+        // What a push that stopped half way was writing: this device's own output, never
+        // signed. This push writes each of those again, or removes it.
+        let leftover = self.read_journal(&keys);
+        let checked = self.check(store, true, &leftover)?;
         if !checked.problems.is_empty() {
             return Err(SyncError::new(
                 "SIGNATURE_INVALID",
                 checked.problems.join("; "),
             ));
         }
-        let keys = self.keys(store)?;
         let mut idx = self.read_index(&keys)?;
         // A counter never goes back, even when the index was restored from an older backup
         // or lost: the manifest already in the repository says where this device got to.
@@ -1152,6 +1497,9 @@ impl Sync {
         let recipients = self.recipients(store)?;
         let recipients_hash = Some(file_digest(&self.dir("recipients.txt"))?);
         let changed = idx.recipients_hash.is_some() && idx.recipients_hash != recipients_hash;
+        // Taken before a recipient change clears the index, so a record deleted here still
+        // has its file removed rather than left encrypted to the old recipients.
+        let had: Vec<String> = idx.records.keys().cloned().collect();
         if changed {
             idx.records.clear();
             idx.tombstones.clear();
@@ -1160,14 +1508,66 @@ impl Sync {
             reencrypted_for_new_recipients: changed,
             ..Wrote::default()
         };
-        let mut names = BTreeSet::new();
+        // Every file this push will write or remove is named in the journal before the
+        // first of them changes, and the journal goes once the manifest signs them.
+        let tombstones = store.tombstones()?;
+        let record_rel = |name: &str| format!("records/{name}.age");
+        let tomb_rel = |name: &str| format!("tombstones/{name}.age");
+        let record_kept = |idx: &Index, name: &str, keyed: &str| {
+            idx.records.get(name).map(String::as_str) == Some(keyed)
+                && self.rel(&record_rel(name)).exists()
+                && !leftover.contains(&record_rel(name))
+        };
+        let tomb_kept = |idx: &Index, name: &str, at: &str| {
+            idx.tombstones.get(name).map(String::as_str) == Some(at)
+                && self.rel(&tomb_rel(name)).exists()
+                && !leftover.contains(&tomb_rel(name))
+        };
+        let names: BTreeSet<String> = local
+            .iter()
+            .map(|r| opaque(&format!("{}:{}", r.project_id, r.record.id)))
+            .collect();
+        let tomb_names: BTreeSet<String> =
+            tombstones.iter().map(|t| opaque(&t.reference)).collect();
+        let stem = |rel: &str, dir: &str| {
+            rel.strip_prefix(dir)
+                .and_then(|f| f.strip_suffix(".age"))
+                .map(str::to_owned)
+        };
+        let gone: BTreeSet<String> = had
+            .into_iter()
+            .chain(leftover.iter().filter_map(|rel| stem(rel, "records/")))
+            .filter(|n| !names.contains(n))
+            .collect();
+        let gone_tombs: BTreeSet<String> = leftover
+            .iter()
+            .filter_map(|rel| stem(rel, "tombstones/"))
+            .filter(|n| !tomb_names.contains(n))
+            .collect();
+        let mut pending = leftover.clone();
+        for r in &local {
+            let name = opaque(&format!("{}:{}", r.project_id, r.record.id));
+            if !record_kept(&idx, &name, &keys.keyed(&r.hash)) {
+                pending.insert(record_rel(&name));
+            }
+        }
+        for t in tombstones {
+            let name = opaque(&t.reference);
+            if !tomb_kept(&idx, &name, &t.deleted_at) {
+                pending.insert(tomb_rel(&name));
+            }
+        }
+        pending.extend(gone.iter().map(|n| record_rel(n)));
+        pending.extend(gone_tombs.iter().map(|n| tomb_rel(n)));
+        if !pending.is_empty() {
+            self.write_journal(&keys, &pending)?;
+        }
         for r in &local {
             let reference = format!("{}:{}", r.project_id, r.record.id);
             let name = opaque(&reference);
             let file = self.dir("records").join(format!("{name}.age"));
             let keyed = keys.keyed(&r.hash);
-            names.insert(name.clone());
-            if idx.records.get(&name) == Some(&keyed) && file.exists() {
+            if record_kept(&idx, &name, &keyed) {
                 wrote.unchanged += 1;
                 continue;
             }
@@ -1186,21 +1586,19 @@ impl Sync {
             idx.records.insert(name, keyed);
             wrote.written += 1;
         }
-        let gone: Vec<String> = idx
-            .records
-            .keys()
-            .filter(|n| !names.contains(*n))
-            .cloned()
-            .collect();
         for name in gone {
             let _ = std::fs::remove_file(self.dir("records").join(format!("{name}.age")));
             idx.records.remove(&name);
             wrote.removed += 1;
         }
-        for t in store.tombstones()? {
+        for name in gone_tombs {
+            let _ = std::fs::remove_file(self.dir("tombstones").join(format!("{name}.age")));
+            idx.tombstones.remove(&name);
+        }
+        for t in tombstones {
             let name = opaque(&t.reference);
             let file = self.dir("tombstones").join(format!("{name}.age"));
-            if idx.tombstones.get(&name) == Some(&t.deleted_at) && file.exists() {
+            if tomb_kept(&idx, &name, &t.deleted_at) {
                 continue;
             }
             let payload = json!({ "format": FORMAT, "ref": t.reference, "deletedAt": t.deleted_at, "by": t.by });
@@ -1234,9 +1632,12 @@ impl Sync {
                 files.insert(rel, entry.to_json());
             }
         }
+        // A removed device's last push stays seen, so what it wrote stays superseded.
         let seen: Map<String, Value> = checked
-            .latest
+            .retired
             .iter()
+            .filter(|(_, c)| **c >= 1)
+            .chain(checked.latest.iter())
             .filter(|(d, _)| **d != keys.machine_id)
             .map(|(d, c)| (d.clone(), json!(c)))
             .collect();
@@ -1264,6 +1665,7 @@ impl Sync {
         });
         idx.recipients_hash = recipients_hash;
         self.write_index(&keys, &mut idx)?;
+        self.clear_journal();
         wrote.counter = counter;
         Ok(wrote)
     }
@@ -1343,12 +1745,9 @@ impl Sync {
         }
         // Sync's own files by name, never whole folders. A stray file Git already tracks is
         // taken out of the repository instead; the local copy stays, untracked and ignored.
-        let tracked = self
-            .git
-            .tracked_paths(&["records", "tombstones", "machines", "manifests", "peers"])
-            .map_err(|e| {
-                SyncError::plain(format!("cannot list the sync repository's files: {e}"))
-            })?;
+        let tracked = self.git.tracked_paths(&DIRS).map_err(|e| {
+            SyncError::plain(format!("cannot list the sync repository's files: {e}"))
+        })?;
         let untrack: Vec<String> = changes
             .stray
             .iter()
@@ -1358,10 +1757,11 @@ impl Sync {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let heartbeat = format!("peers/{}.json", keys.machine_id);
         let own: Vec<String> = changes
             .own
             .into_iter()
-            .filter(|f| !f.starts_with("peers/"))
+            .filter(|f| *f != heartbeat)
             .collect();
         let commit = self.git.commit_paths(&own, &msg, &untrack);
         self.publish_heartbeat(store)?;
@@ -1486,6 +1886,15 @@ impl Sync {
     /// until they are committed. They are this device's own output, so the next round commits
     /// them before it fetches, if they verify and nothing else changed.
     pub fn commit_leftovers(&self, store: &Store) -> Result<()> {
+        // A push that stopped between its first file and its manifest left files no manifest
+        // signs. Finishing it here, before anything verifies the repository, keeps a crash
+        // from reading as tampering.
+        if self
+            .keys(store)
+            .is_ok_and(|keys| !self.read_journal(&keys).is_empty())
+        {
+            self.push_local(store)?;
+        }
         if !self.git.is_repo() {
             return Ok(());
         }
@@ -1496,11 +1905,23 @@ impl Sync {
             return Ok(());
         }
         let id = self.keys(store)?.machine_id;
+        let trusted = store.sync_trust()?;
+        // This device's own output: its manifest, heartbeat and ciphertext, and what removing
+        // a device leaves (the recipient list, the signed removal, and the files of a device
+        // that is no longer trusted, deleted).
         let own = |f: &str| {
             f == format!("manifests/{id}.json")
                 || f == format!("peers/{id}.json")
-                || f.split_once('/').is_some_and(|(d, n)| {
-                    matches!(d, "records" | "tombstones") && named(n, 64, ".age")
+                || f == "recipients.txt"
+                || f.split_once('/').is_some_and(|(d, n)| match d {
+                    "records" | "tombstones" => named(n, 64, ".age"),
+                    "revoked" => named(n, 16, ".json"),
+                    "machines" | "manifests" | "peers" => {
+                        named(n, 16, ".json")
+                            && !trusted.contains_key(&n[..16])
+                            && !self.rel(f).exists()
+                    }
+                    _ => false,
                 })
         };
         if !changes.own.iter().all(|f| own(f)) {
@@ -2189,6 +2610,137 @@ mod tests {
         assert!(git_control("records/.gitignore"));
         assert!(valid_reference("p1:r1") && valid_reference("project:p1"));
         assert!(!valid_reference("p1") && !valid_reference("a:b/c"));
+    }
+
+    fn device(root: &Path, name: &str, repo: &Path, label: &str) -> (Store, Sync, Value) {
+        let dir = root.join(name);
+        let mut store = Store::new(&dir).unwrap_or_else(|e| panic!("{e}"));
+        store
+            .create(
+                &vaultos_core::SecretString::new("synthetic-sync-password"),
+                None,
+                vaultos_core::KdfParams::FLOOR,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        let sync = Sync::new(&dir, repo);
+        let identity = sync
+            .init(&mut store, label)
+            .unwrap_or_else(|e| panic!("{e}"));
+        (store, sync, identity)
+    }
+
+    fn set(store: &mut Store, key: &str, value: &str) {
+        if store.find_project("Example").ok().flatten().is_none() {
+            store
+                .create_project("Example", "human")
+                .unwrap_or_else(|e| panic!("{e}"));
+        }
+        let f = vaultos_core::Fields {
+            key: key.into(),
+            value: Some(vaultos_core::SecretString::new(value)),
+            ..Default::default()
+        };
+        store
+            .set_item("Example", &f, "human")
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// The state a push leaves when it stops after writing ciphertext and before signing its
+    /// manifest: the new files, the journal that names them, the old manifest and index.
+    #[test]
+    fn a_push_that_stopped_before_its_manifest_is_finished_and_tampering_is_still_refused() {
+        let root = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let repo = root.path().join("repo");
+        let (mut a, sa, ia) = device(root.path(), "a", &repo, "Machine A");
+        let (mut b, sb, ib) = device(root.path(), "b", &repo, "Machine B");
+        sa.trust(&mut a, &ib).unwrap_or_else(|e| panic!("{e}"));
+        sb.trust(&mut b, &ia).unwrap_or_else(|e| panic!("{e}"));
+        set(&mut a, "KEPT", "kept-synthetic");
+        set(&mut a, "EDITED", "first-synthetic");
+        set(&mut a, "DELETED", "to-delete-synthetic");
+        sa.push_local(&a).unwrap_or_else(|e| panic!("{e}"));
+        sb.pull(&mut b, true, false)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let keys = sa.keys(&a).unwrap_or_else(|e| panic!("{e}"));
+        let manifest = sa
+            .dir("manifests")
+            .join(format!("{}.json", keys.machine_id));
+        let before_manifest = std::fs::read(&manifest).unwrap_or_default();
+        let before_index = std::fs::read(sa.index_path()).unwrap_or_default();
+        let before: BTreeMap<String, String> = sa
+            .sync_files("records")
+            .into_iter()
+            .map(|f| {
+                let digest = file_digest(&sa.dir("records").join(&f)).unwrap_or_default();
+                (f, digest)
+            })
+            .collect();
+
+        set(&mut a, "EDITED", "second-synthetic");
+        set(&mut a, "ADDED", "added-synthetic");
+        sa.push_local(&a).unwrap_or_else(|e| panic!("{e}"));
+        let changed: BTreeSet<String> = sa
+            .sync_files("records")
+            .into_iter()
+            .filter(|f| before.get(f) != file_digest(&sa.dir("records").join(f)).ok().as_ref())
+            .map(|f| format!("records/{f}"))
+            .collect();
+        assert_eq!(changed.len(), 2);
+        std::fs::write(&manifest, &before_manifest).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(sa.index_path(), &before_index).unwrap_or_else(|e| panic!("{e}"));
+        sa.write_journal(&keys, &changed)
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        // Nothing but the push that finishes it accepts the unsigned files.
+        let problems = sa.verify_manifests(&a, false).unwrap_or_default();
+        assert!(
+            problems.iter().any(|p| p.contains("Unsigned")),
+            "{problems:?}"
+        );
+        assert!(sb.pull(&mut b, true, false).is_err());
+
+        // A record removed in between has its unsigned file removed, not signed.
+        a.delete_item("Example", "ADDED", "human")
+            .unwrap_or_else(|e| panic!("{e}"));
+        a.purge_item("Example", "ADDED", "human")
+            .unwrap_or_else(|e| panic!("{e}"));
+        sa.commit_leftovers(&a).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!sa.journal_path().exists());
+        assert!(sa
+            .verify_manifests(&a, false)
+            .unwrap_or(vec!["?".into()])
+            .is_empty());
+        sb.pull(&mut b, true, false)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let value = b
+            .reveal("Example", "EDITED", "human")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(value.value.expose(), "second-synthetic");
+        assert!(b.find_item("Example", "ADDED").ok().flatten().is_none());
+
+        // A journal does not excuse a file it does not name, and one that fails its MAC
+        // excuses nothing.
+        let kept = sa
+            .sync_files("records")
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let named: BTreeSet<String> = [format!("records/{kept}")].into();
+        std::fs::write(sa.dir("records").join(&kept), b"tampered")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let other: BTreeSet<String> = [format!("records/{}.age", "0".repeat(64))].into();
+        sa.write_journal(&keys, &other)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(sa.push_local(&a).is_err());
+        sa.write_journal(&keys, &named)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let forged = std::fs::read_to_string(sa.journal_path())
+            .unwrap_or_default()
+            .replace(&kept, &"1".repeat(64));
+        std::fs::write(sa.journal_path(), forged).unwrap_or_else(|e| panic!("{e}"));
+        assert!(sa.read_journal(&keys).is_empty());
+        assert!(sa.push_local(&a).is_err());
     }
 
     #[test]

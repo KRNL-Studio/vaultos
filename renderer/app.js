@@ -2001,6 +2001,11 @@ async function renderSync() {
     const peer = el('<textarea placeholder="Paste verified peer identity JSON" rows="6"></textarea>');
     const trust = el('<button class="btn ghost">Trust verified peer</button>');
     trust.onclick = () => run(() => human("syncTrust", JSON.parse(peer.value)));
+    const devices = el('<button class="btn ghost">List trusted devices</button>');
+    devices.onclick = () => run(() => window.vault.syncDevices());
+    const removeId = el('<input placeholder="Device id (16 characters, from the list)" autocomplete="off" spellcheck="false" />');
+    const remove = el('<button class="btn danger outlined">Remove device from sync</button>');
+    remove.onclick = () => run(() => human("syncUntrust", removeId.value.trim()));
     const status = el('<button class="btn ghost">Check remote status and conflicts</button>');
     status.onclick = () => run(() => window.vault.syncStatus());
     const push = el('<button class="btn">Push to Git remote</button>');
@@ -2022,6 +2027,8 @@ async function renderSync() {
     thisMachine.appendChild(machineRow);
     const peers = group("Peers");
     for (const n of [ labeled("Peer identity", peer), trust ]) peers.appendChild(n);
+    const removal = group("Remove a device");
+    for (const n of [ el('<p class="note">For a lost or retired device, or to confirm a removal made on another device. It stops being a recipient and the next push encrypts every record again. It keeps what it already had, so change any secret that matters.</p>'), devices, labeled("Device to remove", removeId), remove ]) removal.appendChild(n);
     const records = group("Move records");
     const moveRow = el('<div class="btnrow halves"></div>');
     moveRow.appendChild(push);

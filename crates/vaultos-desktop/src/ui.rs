@@ -523,10 +523,10 @@ pub fn menu_event(app: &AppHandle, id: &str) {
         "search" => show_main(app, Some(json!({ "name": "search" }))),
         "pending" => show_main(app, Some(json!({ "name": "projects" }))),
         "github" => {
-            let _ = open_external("https://github.com/rohit3a/vaultos#readme");
+            let _ = open_external("https://github.com/KRNL-Studio/vaultos#readme");
         }
         "security" => {
-            let _ = open_external("https://github.com/rohit3a/vaultos/blob/main/SECURITY.md");
+            let _ = open_external("https://github.com/KRNL-Studio/vaultos/blob/main/SECURITY.md");
         }
         "quit" => quit(app),
         _ => {}

@@ -9,7 +9,7 @@
 # desktop asks it to stop and takes over; it takes over again when the desktop lets go.
 [Unit]
 Description=VaultOS background access
-Documentation=https://github.com/rohit3a/vaultos/blob/main/docs/AGENTS.md
+Documentation=https://github.com/KRNL-Studio/vaultos/blob/main/docs/AGENTS.md
 
 [Service]
 Type=simple

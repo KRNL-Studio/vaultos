@@ -786,3 +786,183 @@ fn refuses_git_rules_that_change_what_it_commits() {
         "{problems:?}"
     );
 }
+
+fn trio() -> (tempfile::TempDir, PathBuf, Dev, Dev, Dev) {
+    let (root, repo, mut a, mut b) = pair();
+    let mut c = Dev::new(root.path(), "c", &repo);
+    let ic = c.sync.init(&mut c.store, "Machine C").unwrap();
+    c.trust(&a.identity());
+    c.trust(&b.identity());
+    a.trust(&ic);
+    b.trust(&ic);
+    (root, repo, a, b, c)
+}
+
+fn id_of(d: &Dev) -> String {
+    d.identity()["id"].as_str().unwrap().to_owned()
+}
+
+fn record_files(repo: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    every_file(&repo.join("records"), &mut files);
+    files.sort();
+    files
+}
+
+#[test]
+fn a_removed_device_stops_being_a_recipient_and_each_other_device_confirms_it() {
+    let (_root, repo, mut a, mut b, mut c) = trio();
+    a.set("Example", "K", "before-removal-synthetic");
+    a.push();
+    b.pull();
+    c.pull();
+    c.set("Example", "FROM_C", "written-by-c-synthetic");
+    c.push();
+    a.pull();
+    b.pull();
+    b.push();
+    let cid = id_of(&c);
+    let c_age = c.identity()["agePublicKey"].as_str().unwrap().to_owned();
+    let c_manifest = repo.join("manifests").join(format!("{cid}.json"));
+    let old_manifest = std::fs::read(&c_manifest).unwrap();
+    let old_records: Vec<(PathBuf, Vec<u8>)> = record_files(&repo)
+        .into_iter()
+        .map(|f| {
+            let bytes = std::fs::read(&f).unwrap();
+            (f, bytes)
+        })
+        .collect();
+
+    // A device cannot remove itself, and an unknown id is refused.
+    let own = id_of(&a);
+    assert!(a.sync.untrust(&mut a.store, &own).is_err());
+    assert!(a.sync.untrust(&mut a.store, "0000000000000000").is_err());
+
+    let out = a.sync.untrust(&mut a.store, &cid).unwrap();
+    assert_eq!(out["label"], "Machine C");
+    assert!(out["confirmedRemovalFrom"].is_null());
+    let recipients = std::fs::read_to_string(repo.join("recipients.txt")).unwrap();
+    assert!(!recipients.contains(&c_age) && !recipients.contains("Machine C"));
+    assert!(!c_manifest.exists());
+    assert!(!repo.join("machines").join(format!("{cid}.json")).exists());
+    assert!(repo.join("revoked").join(format!("{cid}.json")).exists());
+
+    // The next push encrypts every record again, for the devices that remain.
+    let wrote = a.push();
+    assert!(wrote.reencrypted_for_new_recipients);
+    assert_eq!(wrote.written, 2);
+    for (f, bytes) in &old_records {
+        assert_ne!(&std::fs::read(f).unwrap(), bytes);
+    }
+
+    // The removed device is told, and can neither pull nor push.
+    let e = c.sync.pull(&mut c.store, true, false).unwrap_err();
+    assert!(e
+        .message
+        .contains("This device was removed from sync on Machine A"));
+    assert!(c.sync.push_local(&c.store).is_err());
+
+    // Another device stops until a human confirms the removal there too.
+    let e = b.sync.pull(&mut b.store, true, false).unwrap_err();
+    assert!(e.message.contains("Machine C"));
+    assert!(e.message.contains(&format!("vaultos sync untrust {cid}")));
+    assert!(b.sync.push_local(&b.store).is_err());
+    let out = b.sync.untrust(&mut b.store, &cid).unwrap();
+    assert_eq!(out["confirmedRemovalFrom"], "Machine A");
+    b.pull();
+    a.set("Example", "K", "after-removal-synthetic");
+    a.push();
+    b.pull();
+    assert_eq!(b.value("Example", "K"), "after-removal-synthetic");
+    assert_eq!(b.value("Example", "FROM_C"), "written-by-c-synthetic");
+    b.push();
+    a.pull();
+    assert_eq!(a.fingerprint(), b.fingerprint());
+    let devices = b.sync.devices(&b.store).unwrap();
+    assert_eq!(devices["devices"].as_array().unwrap().len(), 2);
+    assert_eq!(devices["removed"][0]["id"], cid.as_str());
+    assert_eq!(devices["removed"][0]["confirmedHere"], true);
+
+    // No manifest signs what was written before the removal: old ciphertext put back is refused.
+    let (f, bytes) = &old_records[0];
+    let current = std::fs::read(f).unwrap();
+    std::fs::write(f, bytes).unwrap();
+    let problems = a.sync.verify_manifests(&a.store, false).unwrap();
+    assert!(!problems.is_empty());
+    std::fs::write(f, current).unwrap();
+    assert!(a.sync.verify_manifests(&a.store, false).unwrap().is_empty());
+
+    // Its manifest coming back is an untrusted device's, and its key in the recipient list
+    // stops every push.
+    std::fs::write(&c_manifest, old_manifest).unwrap();
+    let problems = a.sync.verify_manifests(&a.store, false).unwrap();
+    assert!(problems
+        .iter()
+        .any(|p| p.contains("Untrusted sync machine")));
+    std::fs::remove_file(&c_manifest).unwrap();
+    std::fs::write(
+        repo.join("recipients.txt"),
+        format!(
+            "{}{c_age}\n",
+            std::fs::read_to_string(repo.join("recipients.txt")).unwrap()
+        ),
+    )
+    .unwrap();
+    a.set("Example", "K", "never-sent-synthetic");
+    let e = a.sync.push_local(&a.store).unwrap_err();
+    assert!(e.message.contains("Unapproved encryption recipient"));
+}
+
+#[test]
+fn a_device_being_removed_cannot_remove_the_others() {
+    let (_root, repo, mut a, mut b, mut c) = trio();
+    a.set("Example", "K", "synthetic");
+    a.push();
+    b.pull();
+    c.pull();
+    let (aid, cid) = (id_of(&a), id_of(&c));
+    // C, lost or stolen, removes A.
+    c.sync.untrust(&mut c.store, &aid).unwrap();
+    let e = b.sync.pull(&mut b.store, true, false).unwrap_err();
+    assert!(e.message.contains("Machine A") && e.message.contains("on Machine C"));
+    // B's human removes C instead: C's removal of A stops counting and A stays trusted.
+    b.sync.untrust(&mut b.store, &cid).unwrap();
+    assert!(!repo.join("revoked").join(format!("{aid}.json")).exists());
+    assert!(repo.join("revoked").join(format!("{cid}.json")).exists());
+    let devices = b.sync.devices(&b.store).unwrap();
+    let ids: Vec<&str> = devices["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&aid.as_str()) && !ids.contains(&cid.as_str()));
+}
+
+#[test]
+fn removing_the_device_that_signed_an_earlier_removal_keeps_that_removal() {
+    let (_root, repo, mut a, mut b, mut c) = trio();
+    a.set("Example", "K", "synthetic");
+    a.push();
+    b.pull();
+    c.pull();
+    c.push();
+    a.pull();
+    b.pull();
+    let (aid, cid) = (id_of(&a), id_of(&c));
+    a.sync.untrust(&mut a.store, &cid).unwrap();
+    a.push();
+    b.sync.untrust(&mut b.store, &cid).unwrap();
+    b.pull();
+    b.push();
+    // Later B removes A. A's signed removal of C is signed again by B, so C stays removed.
+    b.sync.untrust(&mut b.store, &aid).unwrap();
+    let signed: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo.join("revoked").join(format!("{cid}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(signed["revocation"]["revokedBy"], id_of(&b).as_str());
+    let wrote = b.push();
+    assert!(wrote.reencrypted_for_new_recipients);
+    assert!(b.sync.verify_manifests(&b.store, false).unwrap().is_empty());
+}
