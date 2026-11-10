@@ -21,7 +21,7 @@ secrets from an agent that can read the filesystem or run arbitrary shell comman
   behavior, troubleshooting, updates, recovery, and optional sync boundaries.
 
 For current implementation details, consult the installed version's tool schemas
-and the [public source](https://github.com/rohit3a/vaultos). Client tool names may
+and the [public source](https://github.com/KRNL-Studio/vaultos). Client tool names may
 have a namespace prefix. Discover available tools instead of inventing commands.
 
 ## Operating boundaries

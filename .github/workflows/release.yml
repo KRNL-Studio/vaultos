@@ -1,4 +1,4 @@
-name: Publish unsigned preview
+name: Publish preview
 on:
   workflow_dispatch:
     inputs:
@@ -107,4 +107,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
-        run: gh release create "$RELEASE_TAG" artifacts/* --verify-tag --prerelease --title "VaultOS $RELEASE_TAG — unsigned macOS and Linux preview" --notes-file docs/RELEASE_NOTES.md
+        run: gh release create "$RELEASE_TAG" artifacts/* --verify-tag --prerelease --title "VaultOS $RELEASE_TAG — macOS and Linux preview" --notes-file docs/RELEASE_NOTES.md

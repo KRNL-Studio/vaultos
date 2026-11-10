@@ -135,6 +135,7 @@ fn changes(channel: &str) -> bool {
             | "chooseFolder"
             | "syncStatus"
             | "syncIdentity"
+            | "syncDevices"
             | "confirmHuman"
             | "trash"
             | "generate"
@@ -727,6 +728,18 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
             app.gate("trust a sync peer").await?;
             let identity = a.get(0).clone();
             sync_call(app, move |sync, s| sync.trust(s, &identity)).await
+        }
+        "syncDevices" => sync_call(app, |sync, s| sync.devices(s)).await,
+        "syncUntrust" => {
+            app.gate("remove a device from sync").await?;
+            let id = a.str(0, "device id")?;
+            sync_call(app, move |sync, s| {
+                let removed = sync.untrust_remote(s, &id)?;
+                let detail = format!("{} ({id})", removed["label"].as_str().unwrap_or_default());
+                let _ = s.audit("sync_untrust", &detail, HUMAN);
+                Ok(removed)
+            })
+            .await
         }
         _ => Err("Unknown call".into()),
     }

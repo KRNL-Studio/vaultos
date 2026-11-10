@@ -53,6 +53,8 @@ A recipient in `recipients.txt` that this device has not trusted stops every pus
 
 | Command | What it does |
 | --- | --- |
+| `vaultos sync devices` | Lists the trusted devices with their ids, and the removed ones |
+| `vaultos sync untrust DEVICE_ID` | Removes a device, or confirms a removal made on another device; see [Remove a device](#remove-a-device) |
 | `vaultos sync status` | Fetches and reports one state for the whole group; exits 2 unless `IN_SYNC` |
 | `vaultos sync push` | Encrypts changed records, signs the manifest, commits only sync's own files, pushes and checks the remote ref; exits 2 unless delivered |
 | `vaultos sync pull` | Fetches, verifies and merges; stops on concurrent edits |
@@ -77,7 +79,28 @@ Autosync never accepts conflicts or bypasses a check. Network failures (`REMOTE_
 
 A signature, recipient, replay or unreadable-record error is a stop condition: restore trusted copies or investigate; do not bypass validation. Sync commits, reads and deletes only files under names it writes. A file such as Finder's `.DS_Store` that only your checkout has is left alone. One that arrives in a commit in `records/`, `tombstones/` or `manifests/` makes every device refuse to pull (`Unexpected file in the sync repository`) until someone removes it with `git rm`. A stray file Git tracks in `machines/` or `peers/` is taken out of the repository by the next push. A change to any other tracked file, a `.gitignore`, `.gitattributes` or `.gitmodules`, or an ignore rule outside the checkout that hides a file sync wrote, stops a push. Repository hooks are disabled for sync's Git commands.
 
-### Keys and removal
+### Remove a device
 
-Remote Git history keeps old ciphertext. Deleting a record, changing the password or adding a Secret Key does not erase that history, and there is no way yet to remove a device from a group or rotate its keys: to drop a device, start a new sync repository with new enrolments. See [SECURITY.md](../SECURITY.md#sync-format-2).
+To drop a lost or retired device, run this on a device you still have (or use **Settings → Sync → Remove a device** in the app):
+
+```sh
+vaultos sync devices            # ids, labels and fingerprints of the devices this vault trusts
+vaultos sync untrust DEVICE_ID
+```
+
+`untrust` fetches first when the remote can be reached. It then stops trusting the device, takes its key out of `recipients.txt`, deletes its manifest, identity and heartbeat, writes a signed removal to `revoked/<id>.json`, and pushes, which encrypts every record and tombstone again for the devices that remain. If the remote cannot be reached, the device is still removed here and the next sync round sends it. The removal is recorded in the signed audit log (`sync_untrust`).
+
+Every other device then stops syncing and says which device was removed and where. Run the same `vaultos sync untrust DEVICE_ID` there to confirm it. One device cannot end another's trust on its own: if the message names a removal you did not make, the device that signed it may be the compromised one. Remove that device instead, which also discards the removals it signed, and restore the repository to the commit before its changes with Git.
+
+A removed device is told so at its next sync and can no longer pull or push. Its manifest reappearing, or its key reappearing in `recipients.txt`, stops sync on the others.
+
+Removal protects what changes afterwards. The removed device keeps its own copy of the vault, and the repository's Git history keeps ciphertext it can still decrypt, so change every secret that matters after removing a lost device. A device cannot remove itself, and there is no key rotation for a device that stays.
+
+### History
+
+Remote Git history keeps old ciphertext. Deleting a record, removing a device, changing the password or adding a Secret Key does not erase that history. See [SECURITY.md](../SECURITY.md#sync-format-2).
+
+### An interrupted push
+
+A push names the files it is about to write in `sync-push.journal` in the data directory (authenticated with a key derived from this device's signing key, and holding file names only) and removes it once its manifest signs them. If the push stops in between (a crash, a power cut), the next `vaultos sync push`, `vaultos sync pull` or autosync round writes those files again and signs them before anything else is checked. They are never decrypted or trusted as they were left. Until then `vaultos sync plan` and `status` report `Unsigned or modified ciphertext`. A file the journal does not name is refused as before.
 

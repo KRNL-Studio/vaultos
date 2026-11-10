@@ -29,7 +29,7 @@ does not change the app's directory: both processes need the same setting.
 
 ## Install on macOS
 
-The easiest path is the [preview release](https://github.com/rohit3a/vaultos/releases).
+The easiest path is the [preview release](https://github.com/KRNL-Studio/vaultos/releases).
 Choose `arm64` for Apple Silicon or `x64` for Intel. The deployment target is
 macOS 13+; check the release notes for versions actually tested. Download the ZIP
 and matching checksum, and run this in the download directory, substituting the
@@ -41,8 +41,9 @@ shasum -a 256 -c <download-name>.zip.sha256
 
 Require `OK` before extraction. A checksum checks integrity, not publisher identity
 independently of GitHub. Extract and place the app in the chosen folder without
-replacing an existing different installation. The public preview is unsigned and
-not notarized unless the release notes say otherwise. If blocked, the human can use
+replacing an existing different installation. A download named `notarized` is
+signed and notarized and opens normally; one named `unsigned` is not. If that one
+is blocked, the human can use
 Apple's [per-app Open Anyway flow](https://support.apple.com/en-us/102445) after
 deciding to trust it. Do not disable Gatekeeper or strip quarantine as an
 installation shortcut. Managed Macs may prohibit opening it.
@@ -53,7 +54,7 @@ command-line developer tools. From a chosen parent directory, use a new checkout
 name if `vaultos` already exists:
 
 ```sh
-git clone https://github.com/rohit3a/vaultos.git
+git clone https://github.com/KRNL-Studio/vaultos.git
 cd vaultos
 npm run dist:mac        # dist/VaultOS-darwin-<arch>/VaultOS.app, unsigned
 ```
