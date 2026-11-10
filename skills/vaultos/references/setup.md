@@ -41,8 +41,9 @@ shasum -a 256 -c <download-name>.zip.sha256
 
 Require `OK` before extraction. A checksum checks integrity, not publisher identity
 independently of GitHub. Extract and place the app in the chosen folder without
-replacing an existing different installation. The public preview is unsigned and
-not notarized unless the release notes say otherwise. If blocked, the human can use
+replacing an existing different installation. A download named `notarized` is
+signed and notarized and opens normally; one named `unsigned` is not. If that one
+is blocked, the human can use
 Apple's [per-app Open Anyway flow](https://support.apple.com/en-us/102445) after
 deciding to trust it. Do not disable Gatekeeper or strip quarantine as an
 installation shortcut. Managed Macs may prohibit opening it.

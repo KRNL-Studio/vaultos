@@ -1,12 +1,12 @@
 VaultOS is a local vault for project credentials with scoped coding-agent access through MCP. Injection writes an approved environment file without returning values in the tool response. This preview runs on **macOS and Linux**.
 
-This is an **unsigned evaluation preview** unless the download is named `notarized`. The macOS app has an ad-hoc integrity signature, but no Developer ID identity or Apple notarization. Start with synthetic credentials and keep independent backups. It has not received an independent security audit.
+This is an **evaluation preview**. The macOS downloads named `notarized` are signed with a Developer ID and notarized by Apple, and open like any other app. The downloads named `unsigned`, and the Linux tarball, come from the public release workflow: the macOS ones carry only an ad-hoc integrity signature. Start with synthetic credentials and keep independent backups. VaultOS has not received an independent security audit.
 
 ## Downloads
 
 - macOS `arm64` (Apple Silicon) and `x64` (Intel) ZIPs with **VaultOS.app**. Deployment target: macOS 13+. The MCP bridge and CLIs are inside it, in `VaultOS.app/Contents/Helpers`.
 - Linux `x64` tarball. Install it per user with `scripts/install-linux.sh --from <tarball>` from a source checkout; it needs the system's WebKitGTK 4.1. See the README.
-- Verify the matching `.sha256` before opening. A CycloneDX JSON inventory of the Rust crates is attached for each build. Each archive and inventory also has signed GitHub build provenance: `gh attestation verify <download> --repo KRNL-Studio/vaultos` checks that the release workflow of this repository built it from the tagged source. Neither replaces Apple notarization; the builds remain unsigned.
+- Verify the matching `.sha256` before opening. A CycloneDX JSON inventory of the Rust crates is attached for each build. Each archive and inventory also has signed GitHub build provenance: `gh attestation verify <download> --repo KRNL-Studio/vaultos` checks that the release workflow of this repository built it from the tagged source. That provenance covers the `unsigned` ZIPs, the tarball and the inventories. The `notarized` ZIPs are built and signed on the maintainer's Mac from the same tag, because the signing identity is not in CI: they carry a checksum and Apple's notarization ticket, not GitHub provenance.
 - Builds use a separate preview data, Keychain and Secret Service namespace. Nothing installs a login service or imports another vault on its own.
 
 ## New in 0.3

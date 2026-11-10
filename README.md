@@ -6,7 +6,7 @@ VaultOS is a local desktop vault with an MCP bridge. Organize credentials by pro
 
 [Download the macOS preview](https://github.com/KRNL-Studio/vaultos/releases) · [Agent setup](docs/AGENTS.md) · [Security model](SECURITY.md) · [Contribute](CONTRIBUTING.md)
 
-> **Unsigned preview:** early software for evaluation, without Developer ID signing or Apple notarization. Start with test credentials and keep independent backups. Security regression tests are included; this project has not received an independent security audit.
+> **Preview:** early software for evaluation. Start with test credentials and keep independent backups. Security regression tests are included; this project has not received an independent security audit.
 
 <img src="docs/images/vaultos-preview.png" alt="VaultOS showing a synthetic example credential" width="480">
 
@@ -26,10 +26,10 @@ Injection reduces accidental disclosure in tool transcripts. **It does not stop 
 
 ## Install on macOS
 
-1. Download the ZIP and matching `.sha256` from the [preview release](https://github.com/KRNL-Studio/vaultos/releases). Choose `arm64` for Apple Silicon or `x64` for Intel. The deployment target is macOS 13 or later; see release notes for versions actually tested.
-2. In the download folder, run `shasum -a 256 -c <download-name>.zip.sha256` and confirm `OK`. This checks file integrity; it does not authenticate a publisher independently of GitHub. Releases from the release workflow also carry signed build provenance: `gh attestation verify <download-name>.zip --repo KRNL-Studio/vaultos` checks that this repository's workflow built the file from the tagged source.
+1. Download the ZIP and matching `.sha256` from the [preview release](https://github.com/KRNL-Studio/vaultos/releases). Choose `arm64` for Apple Silicon or `x64` for Intel, and the `notarized` ZIP when the release has one: it is signed with a Developer ID and notarized by Apple. The `unsigned` ZIP is the release workflow's own build. The deployment target is macOS 13 or later; see release notes for versions actually tested.
+2. In the download folder, run `shasum -a 256 -c <download-name>.zip.sha256` and confirm `OK`. This checks file integrity; it does not authenticate a publisher independently of GitHub. The `unsigned` ZIPs from the release workflow also carry signed build provenance: `gh attestation verify <download-name>.zip --repo KRNL-Studio/vaultos` checks that this repository's workflow built the file from the tagged source.
 3. Extract **VaultOS.app** and put it in a folder of your choice. It can coexist with other vault applications.
-4. Try opening it. If macOS blocks the unidentified developer, follow Apple's [per-app Open Anyway instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**, only after you have verified and decided to trust the download. Managed Macs may disallow this. Do not disable Gatekeeper globally.
+4. Open it. A `notarized` build opens normally. If macOS blocks an `unsigned` build as from an unidentified developer, follow Apple's [per-app Open Anyway instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**, only after you have verified and decided to trust the download. Managed Macs may disallow this. Do not disable Gatekeeper globally.
 5. Create a new vault using a unique passphrase of at least 12 characters. Optionally add a Secret Key, which the device keeps and a stolen vault file cannot be opened without. There is no password reset or recovery service.
 
 The app is a small native program (Rust, with the system's own web view for its pages). The MCP bridge (`vaultos-mcp`), the agent shell client (`vaultos-agent`), the CLI (`vaultos`), the headless owner (`vaultosd`), the Git signing helper (`vaultos-ssh-sign`) and the browser extension's helper (`vaultos-browser`) ship inside it, in `VaultOS.app/Contents/Helpers`, with the extension in `Contents/Resources/extension`. Git is needed only for optional sync. A vault from VaultOS 0.2 opens only to be upgraded, when you choose **Upgrade this vault**; read [Upgrading from 0.2](docs/RECOVERY.md#upgrading-from-02) first.
@@ -115,6 +115,6 @@ credentials and does not automatically change client configuration.
 
 ## Project status
 
-This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, Developer ID signing and notarization, broader macOS/Intel runtime coverage, accessibility review, and usability improvements to conflict resolution. No automatic updater is enabled; install future releases explicitly after backing up.
+This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, notarized builds from CI, broader macOS/Intel runtime coverage, accessibility review, and usability improvements to conflict resolution. No automatic updater is enabled; install future releases explicitly after backing up.
 
 Built and maintained by [@rohit3a](https://github.com/rohit3a). Contributions, reproducible bug reports using synthetic data, and security review are welcome. Licensed under [MIT](LICENSE); dependencies retain their own licenses.

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0-preview.1 (unreleased)
+## 0.3.0-preview.1 (2026-11-10)
 
 VaultOS is now Rust throughout. Electron, Chromium, Node.js and every npm runtime dependency are gone; Node.js is needed only to run the build and test scripts.
 
