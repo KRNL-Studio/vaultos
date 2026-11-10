@@ -27,7 +27,7 @@ vaultos-core = { path = "../vaultos-core" }
 vaultos-client = { path = "../vaultos-client" }
 vaultos-daemon = { path = "../vaultos-daemon" }
 vaultos-sync = { path = "../vaultos-sync" }
-aes = "0.8"
+aes = "0.9"
 cbc = { version = "0.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
