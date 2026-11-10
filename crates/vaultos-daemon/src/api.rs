@@ -1,0 +1,812 @@
+//! Request handling, ported from `api.js`. The transport (`server.rs`) has already checked the
+//! peer's user id, the size of the body and the owner's session token; everything here runs
+//! with the store locked. Agent permissions are enforced here, never in clients.
+
+use crate::access::Grant;
+use serde_json::{json, Map, Value};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use vaultos_client::run::Program;
+use vaultos_core::agents::Agent;
+use vaultos_core::env::{self, Format};
+use vaultos_core::model::agent_ref;
+use vaultos_core::{Error, Fields, SecretKey, SecretString, Store};
+
+pub const MAX_BODY: usize = 1024 * 1024;
+const RESERVED: [&str; 3] = ["__proto__", "constructor", "prototype"];
+
+/// What the transport hands over: the parts of a request routing needs.
+#[derive(Default)]
+pub struct Request {
+    pub method: String,
+    /// The path and query, as sent.
+    pub target: String,
+    pub agent_token: Option<String>,
+    pub approver: Option<String>,
+    pub content_type: Option<String>,
+    pub body: Vec<u8>,
+    /// Just-in-time grants in force (see [`crate::access`]).
+    pub grants: Vec<Grant>,
+}
+
+/// Tokens and the body (which can carry a value) are never printed.
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("method", &self.method)
+            .field("target", &self.target)
+            .field("body_len", &self.body.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(PartialEq)]
+pub struct Reply {
+    pub status: u16,
+    pub body: Value,
+}
+
+/// The body can carry a revealed value, so only the status is printed.
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reply")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A reply can carry values (a reveal, the human's values); its strings are zeroed when it
+/// goes, whether it was sent or not.
+impl Drop for Reply {
+    fn drop(&mut self) {
+        vaultos_core::secret::scrub_json(&mut self.body);
+    }
+}
+
+impl Reply {
+    pub fn ok(body: Value) -> Reply {
+        Reply { status: 200, body }
+    }
+
+    pub fn error(status: u16, message: impl Into<String>) -> Reply {
+        Reply {
+            status,
+            body: json!({ "error": message.into() }),
+        }
+    }
+
+    pub(crate) fn from_error(e: &Error) -> Reply {
+        let message = match e {
+            // OS errors can name paths or echo arguments.
+            Error::Io { .. } => "File operation failed; check permissions and retry".to_owned(),
+            other => other.to_string(),
+        };
+        let status = match e {
+            Error::NeedsUpgrade | Error::TooNew { .. } => 409,
+            other => other.status(),
+        };
+        Reply::error(status, message)
+    }
+}
+
+type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn invalid(msg: &str) -> Error {
+    Error::Invalid(msg.to_owned())
+}
+
+fn deny(msg: impl Into<String>) -> Error {
+    Error::Forbidden(msg.into())
+}
+
+/// `validation.js` `object`, applied to a request body.
+fn parse_body(req: &Request) -> std::result::Result<Map<String, Value>, Reply> {
+    if req.body.is_empty() {
+        return Ok(Map::new());
+    }
+    let json = req
+        .content_type
+        .as_deref()
+        .is_some_and(|c| c.starts_with("application/json"));
+    if !json {
+        return Err(Reply::error(415, "JSON required"));
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(&req.body) else {
+        return Err(Reply::error(400, "Invalid JSON"));
+    };
+    let Value::Object(map) = value else {
+        return Err(Reply::error(400, "Expected an object"));
+    };
+    if RESERVED.iter().any(|k| map.contains_key(*k)) {
+        return Err(Reply::error(400, "Reserved object key"));
+    }
+    Ok(map)
+}
+
+fn text<'a>(body: &'a Map<String, Value>, field: &str, label: &str) -> Result<&'a str> {
+    body.get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Invalid(format!("Invalid {label}")))
+}
+
+/// An optional string field: absent is `None`; present but not a string is an error, as in
+/// `validation.js` `secret`.
+fn optional(body: &Map<String, Value>, field: &str) -> Result<Option<String>> {
+    match body.get(field) {
+        None => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(Error::Invalid(format!("Invalid {field}"))),
+    }
+}
+
+fn fields_from(body: &Map<String, Value>) -> Result<Fields> {
+    Ok(Fields {
+        key: text(body, "key", "key name")?.to_owned(),
+        value: optional(body, "value")?.map(SecretString::new),
+        password: optional(body, "password")?.map(SecretString::new),
+        note: optional(body, "note")?,
+        username: optional(body, "username")?,
+        email: optional(body, "email")?,
+        url: optional(body, "url")?,
+        provider: optional(body, "provider")?,
+        permission: optional(body, "permission")?,
+        expires_at: optional(body, "expiresAt")?,
+        kind: optional(body, "kind")?,
+        tags: match body.get("tags") {
+            None => None,
+            Some(Value::Array(a)) => Some(
+                a.iter()
+                    .map(|t| t.as_str().map(str::to_owned))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| invalid("Invalid tags"))?,
+            ),
+            Some(_) => return Err(invalid("Invalid tags")),
+        },
+        // Favorites, archiving and custom fields are the app's.
+        ..Fields::default()
+    })
+}
+
+fn to_json<T: serde::Serialize>(v: &T) -> Result<Value> {
+    serde_json::to_value(v).map_err(|e| Error::Format(e.to_string()))
+}
+
+fn decode(segment: &str) -> Result<String> {
+    percent_encoding::percent_decode_str(segment)
+        .decode_utf8()
+        .map(|s| s.into_owned())
+        .map_err(|_| invalid("URI malformed"))
+}
+
+pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
+    form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+}
+
+/// Owner routes other than `/status`, `/shutdown` and `/sync`, which the transport answers.
+pub fn owner(store: &mut Store, req: &Request) -> Option<Reply> {
+    let route = (req.method.as_str(), req.target.as_str());
+    if !matches!(route, ("POST", "/unlock") | ("POST", "/lock")) {
+        return None;
+    }
+    if req.agent_token.is_some() {
+        return Some(Reply::error(403, "Agents cannot lock or unlock the vault"));
+    }
+    if route.1 == "/lock" {
+        store.lock();
+        return Some(Reply::ok(json!({ "ok": true, "locked": true })));
+    }
+    let body = match parse_body(req) {
+        Ok(b) => b,
+        Err(r) => return Some(r),
+    };
+    Some(unlock(store, &body).unwrap_or_else(|e| Reply::from_error(&e)))
+}
+
+fn unlock(store: &mut Store, body: &Map<String, Value>) -> Result<Reply> {
+    if store.is_unlocked() {
+        return Ok(Reply::ok(json!({ "ok": true, "locked": false })));
+    }
+    let password = SecretString::new(text(body, "password", "master password")?);
+    let secret_key = optional(body, "secretKey")?
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| SecretKey::parse(&s))
+        .transpose()?;
+    store.unlock(&password, secret_key.as_ref())?;
+    let _ = store.purge_expired_trash(vaultos_core::model::HUMAN);
+    Ok(Reply::ok(json!({
+        "ok": true,
+        "locked": false,
+        "auditProblem": store.audit_problem(),
+    })))
+}
+
+/// Everything after the owner's routes: agent requests and the approval relay.
+/// An unlocked store with the file on disk loaded.
+pub(crate) fn ready(store: &mut Store) -> std::result::Result<(), Reply> {
+    if !store.is_unlocked() {
+        return Err(Reply::error(423, "Vault is locked. Unlock the app."));
+    }
+    if let Err(e) = store.reload_if_changed() {
+        // A file this session can no longer open (a new password or Secret Key, or damage)
+        // ends the session; a writer holding the lock does not.
+        if !matches!(e, Error::Busy | Error::Io { .. } | Error::Conflict(_)) {
+            store.lock();
+        }
+        return Err(Reply::error(
+            409,
+            "The vault changed on disk and could not be reloaded. Unlock the app again.",
+        ));
+    }
+    Ok(())
+}
+
+/// The enrolled, active agent whose token the request carries.
+fn agent_of(store: &mut Store, req: &Request) -> std::result::Result<Agent, Reply> {
+    let token = req.agent_token.as_deref().unwrap_or("");
+    match store.authenticate_agent(token) {
+        Ok(Some(a)) => {
+            store.note_agent_seen(&a.id);
+            Ok(a)
+        }
+        Ok(None) => Err(Reply::error(
+            403,
+            "An enrolled, active agent token is required",
+        )),
+        Err(e) => Err(Reply::from_error(&e)),
+    }
+}
+
+pub fn handle(store: &mut Store, req: &Request) -> Reply {
+    if let Err(r) = ready(store) {
+        return r;
+    }
+    let relay = req.method == "POST" && req.target == "/pending/decide";
+    let agent = if relay {
+        None
+    } else {
+        match agent_of(store, req) {
+            Ok(a) => Some(a),
+            Err(r) => return r,
+        }
+    };
+    let body = match parse_body(req) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let result = match &agent {
+        None => relay_decision(store, req.approver.as_deref().unwrap_or(""), &body),
+        Some(a) => route(store, a, req, &body, &req.grants),
+    };
+    match result {
+        Ok(v) => Reply::ok(v),
+        Err(e) => Reply::from_error(&e),
+    }
+}
+
+fn relay_decision(store: &mut Store, presented: &str, body: &Map<String, Value>) -> Result<Value> {
+    if !store.approver_configured()? {
+        return Err(deny("The approval relay is not configured"));
+    }
+    if !store.verify_approver(presented)? {
+        return Err(deny(
+            "Only the configured approval relay can decide pending keys",
+        ));
+    }
+    let Some(approve) = body.get("approve").and_then(Value::as_bool) else {
+        return Err(invalid(
+            "project, key and approve (true/false) are required",
+        ));
+    };
+    let project = text(body, "project", "project")?;
+    let key = text(body, "key", "key name")?;
+    to_json(&store.relay_decision(presented, project, key, approve)?)
+}
+
+/// One request, as `api.js` `route` handles it. A just-in-time grant adds its scopes on
+/// its project only: everywhere else the agent has exactly what the human enrolled it with.
+struct Ctx<'a> {
+    agent: &'a Agent,
+    actor: String,
+    grants: Vec<&'a Grant>,
+    /// Projects this request created, which the store has already granted this agent.
+    created: std::cell::RefCell<Vec<String>>,
+}
+
+impl Ctx<'_> {
+    /// The agent has `name` somewhere: enrolled with it, or granted it on some project.
+    fn scope(&self, name: &str) -> Result<()> {
+        if self.agent.has_scope(name)
+            || self
+                .grants
+                .iter()
+                .any(|g| g.scopes.iter().any(|s| s == name))
+        {
+            Ok(())
+        } else {
+            Err(deny(format!("This agent does not have the {name} scope")))
+        }
+    }
+
+    fn can(&self, id: &str, scope: &str) -> bool {
+        (self.agent.has_scope(scope)
+            && (self.agent.allowed_project(id) || self.created.borrow().iter().any(|c| c == id)))
+            || self.grants.iter().any(|g| g.allows(id, scope))
+    }
+
+    /// The agent has `name` on this project.
+    fn scope_in(&self, name: &str, id: &str) -> Result<()> {
+        self.scope(name)?;
+        if self.can(id, name) {
+            Ok(())
+        } else {
+            Err(deny(format!("This agent does not have the {name} scope")))
+        }
+    }
+
+    fn allowed(&self, id: Option<&str>, scope: &str) -> bool {
+        id.is_some_and(|id| self.can(id, scope))
+    }
+
+    /// The project's id and name, if it exists and this agent may use it. Unknown and
+    /// unapproved projects are refused alike, so an agent cannot probe for names.
+    fn project(&self, store: &Store, name: Option<&str>) -> Result<(String, String)> {
+        let found = match name {
+            Some(n) => store.find_project(n)?,
+            None => None,
+        };
+        match found {
+            Some((id, name))
+                if self.agent.allowed_project(&id)
+                    || self.grants.iter().any(|g| g.project_id == id) =>
+            {
+                Ok((id, name))
+            }
+            _ => Err(deny("Project is not approved for this agent")),
+        }
+    }
+
+    /// [`Ctx::project`] for one scope, checked as before grants existed: the scope first.
+    fn project_for(
+        &self,
+        store: &Store,
+        name: Option<&str>,
+        scope: &str,
+    ) -> Result<(String, String)> {
+        self.scope(scope)?;
+        let (id, name) = self.project(store, name)?;
+        self.scope_in(scope, &id)?;
+        Ok((id, name))
+    }
+
+    fn file(&self, store: &Store, target: Option<&Value>) -> Result<std::path::PathBuf> {
+        let target = target
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("An absolute file path is required"))?;
+        self.agent.file_target(target, store.data_dir())
+    }
+
+    /// Creates a project and grants it to this agent in one save. Only an agent enrolled with
+    /// the add scope may: a just-in-time grant covers its own project, never new ones.
+    fn create_project(&self, store: &mut Store, name: Option<&Value>) -> Result<(String, String)> {
+        if !self.agent.has_scope("add") {
+            return Err(deny("This agent does not have the add scope"));
+        }
+        let name = name
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("Invalid project name"))?;
+        let agent_id = self.agent.id.clone();
+        let actor = self.actor.clone();
+        let (id, name) = store.batch(|s| {
+            let (id, name) = s.create_project(name, &actor)?;
+            s.grant_project(&agent_id, &id)?;
+            Ok((id, name))
+        })?;
+        self.created.borrow_mut().push(id.clone());
+        Ok((id, name))
+    }
+
+    fn write_secret(&self, store: &mut Store, project: &str, fields: &Fields) -> Result<Value> {
+        match store.find_item(project, &fields.key)? {
+            None => self.scope_in("add", project)?,
+            Some(item) if item.owner == self.actor => self.scope_in("edit:own", project)?,
+            Some(_) => self.scope_in("edit:delegated", project)?,
+        }
+        to_json(&store.set_item(project, fields, &self.actor)?)
+    }
+}
+
+fn route(
+    store: &mut Store,
+    agent: &Agent,
+    req: &Request,
+    body: &Map<String, Value>,
+    grants: &[Grant],
+) -> Result<Value> {
+    let cx = Ctx {
+        agent,
+        actor: agent_ref(&agent.id),
+        grants: grants.iter().filter(|g| g.agent_id == agent.id).collect(),
+        created: std::cell::RefCell::default(),
+    };
+    let (path, query) = req.target.split_once('?').unwrap_or((&req.target, ""));
+    let m = req.method.as_str();
+    match (m, path) {
+        ("GET", "/whoami") => {
+            return Ok(json!({
+                "identity": cx.actor,
+                "name": agent.name,
+                "scopes": agent.scopes,
+                "projects": agent.projects,
+                "roots": agent.roots,
+                "allProjects": agent.all_projects,
+                "anyRoot": agent.any_root,
+                "runCommands": agent.run_commands,
+                "grants": cx.grants,
+            }))
+        }
+        ("GET", "/projects") => {
+            cx.scope("read")?;
+            let all = store.list_projects_as(&cx.actor)?;
+            let mine: Vec<_> = all
+                .iter()
+                .filter(|p| cx.allowed(Some(&p.id), "read"))
+                .collect();
+            return to_json(&mine);
+        }
+        ("POST", "/projects") => {
+            let (id, name) = cx.create_project(store, body.get("name"))?;
+            return Ok(json!({ "id": id, "name": name }));
+        }
+        ("GET", "/search") => {
+            cx.scope("read")?;
+            let q = query_param(query, "q").unwrap_or_default();
+            let mut out = Vec::new();
+            for hit in store.search(&q)? {
+                let name = match &hit {
+                    vaultos_core::store::SearchHit::Project { project }
+                    | vaultos_core::store::SearchHit::Secret { project, .. } => project,
+                };
+                let id = store.find_project(name)?.map(|(id, _)| id);
+                if cx.allowed(id.as_deref(), "read") {
+                    out.push(hit);
+                }
+            }
+            return to_json(&out);
+        }
+        ("GET", "/pending") => {
+            cx.scope("read")?;
+            let mut out = Vec::new();
+            for p in store.pending_approvals_as(&cx.actor)? {
+                let id = store.find_project(&p.project)?.map(|(id, _)| id);
+                if cx.allowed(id.as_deref(), "read") {
+                    out.push(p);
+                }
+            }
+            return to_json(&out);
+        }
+        ("POST", "/reveal") => {
+            let project = body.get("project").and_then(Value::as_str);
+            let (id, _) = cx.project_for(store, project, "reveal")?;
+            let key = text(body, "key", "key name")?;
+            let r = store.reveal(&id, key, &cx.actor)?;
+            return Ok(json!({
+                "key": r.key,
+                "value": r.value.expose(),
+                "provider": r.provider,
+                "username": r.username,
+                "email": r.email,
+                "password": r.password.expose(),
+                "url": r.url,
+            }));
+        }
+        ("GET", "/compare") => {
+            cx.scope("reveal")?;
+            let all = store.fingerprints(&cx.actor)?;
+            let mine: Vec<_> = all
+                .iter()
+                .filter(|f| cx.allowed(Some(&f.project_id), "reveal"))
+                .collect();
+            return to_json(&mine);
+        }
+        ("POST", "/inject") => return inject(store, &cx, body),
+        ("POST", "/import") => return import(store, &cx, body),
+        _ => {}
+    }
+    if let Some(rest) = path.strip_prefix("/projects/") {
+        let mut parts = rest.split('/');
+        let (Some(p), Some("secrets"), key, None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(Error::NotFound("Not found".into()));
+        };
+        let (id, _) = cx.project(store, Some(&decode(p)?))?;
+        match (m, key) {
+            ("GET", None) => {
+                cx.scope_in("read", &id)?;
+                // Archived items are kept out of agents' way, as out of inject.
+                let mut items = store.list_items(&id)?;
+                if vaultos_core::model::is_agent(&cx.actor) {
+                    items.retain(|i| !i.archived);
+                }
+                return to_json(&items);
+            }
+            ("POST", None) => return cx.write_secret(store, &id, &fields_from(body)?),
+            ("DELETE", Some(k)) if !k.is_empty() => {
+                cx.scope_in("delete:own", &id)?;
+                let key = store.delete_item(&id, &decode(k)?, &cx.actor)?;
+                return Ok(json!({ "ok": true, "key": key }));
+            }
+            _ => {}
+        }
+    }
+    Err(Error::NotFound("Not found".into()))
+}
+
+fn key_list(body: &Map<String, Value>) -> Result<Option<Vec<String>>> {
+    match body.get("keys") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(a)) => Ok(Some(
+            a.iter()
+                .map(|k| k.as_str().map(str::to_owned))
+                .collect::<Option<_>>()
+                .ok_or_else(|| invalid("keys must be a list of names"))?,
+        )),
+        Some(_) => Err(invalid("keys must be a list of names")),
+    }
+}
+
+pub const RUN_DEFAULT_TIMEOUT: u64 = 120;
+pub const RUN_MAX_TIMEOUT: u64 = 600;
+
+/// What `POST /run` starts once the store is released.
+#[derive(Debug)]
+pub struct RunPlan {
+    pub program: Program,
+    pub timeout: Duration,
+    pub project: String,
+    pub held_for_approval: Vec<String>,
+    /// Keys left out because their values are too short to mask in the output.
+    pub too_short: Vec<String>,
+}
+
+/// The run scope, checked under the store: one of the agent's allowed commands, in an
+/// approved folder, with the project's approved values. The owner starts it (see
+/// `server.rs`), so the values go only to that program, never to the agent. Recorded with
+/// the matching allowed command, not the full arguments.
+pub fn run_plan(store: &mut Store, req: &Request) -> std::result::Result<RunPlan, Reply> {
+    ready(store)?;
+    let agent = agent_of(store, req)?;
+    let body = parse_body(req)?;
+    let cx = Ctx {
+        agent: &agent,
+        actor: agent_ref(&agent.id),
+        grants: req
+            .grants
+            .iter()
+            .filter(|g| g.agent_id == agent.id)
+            .collect(),
+        created: std::cell::RefCell::default(),
+    };
+    plan(store, &cx, &body).map_err(|e| Reply::from_error(&e))
+}
+
+fn plan(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<RunPlan> {
+    let (id, _) = cx.project_for(store, body.get("project").and_then(Value::as_str), "run")?;
+    let argv: Vec<String> = body
+        .get("command")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().map(|x| x.as_str().map(str::to_owned)).collect())
+        .filter(|a: &Vec<String>| !a.is_empty() && a.len() <= 256)
+        .ok_or_else(|| invalid("command must be a list: the program, then its arguments"))?;
+    let entry = cx.agent.run_entry(&argv).ok_or_else(|| {
+        deny("This command is not one the human allowed this agent to run with secrets")
+    })?;
+    let dir = body
+        .get("cwd")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("cwd must be an absolute folder path"))?;
+    let cwd = cx.agent.work_dir(dir, store.data_dir())?;
+    let keys = key_list(body)?;
+    let timeout = match body.get("timeout_seconds") {
+        None | Some(Value::Null) => RUN_DEFAULT_TIMEOUT,
+        Some(v) => v
+            .as_u64()
+            .filter(|t| (1..=RUN_MAX_TIMEOUT).contains(t))
+            .ok_or_else(|| invalid("timeout_seconds must be 1 to 600"))?,
+    };
+    // The caller's PATH finds the program, as it would in the caller's shell, less the
+    // folders an agent could put a program of the same name in.
+    let path = match body.get("path") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(p))
+            if !p.is_empty()
+                && p.len() <= 4096
+                && p.split(':').all(|d| Path::new(d).is_absolute()) =>
+        {
+            Some(p.clone())
+        }
+        Some(_) => return Err(invalid("path must list absolute folders, separated by :")),
+    };
+    let dirs = search_path(path.as_deref(), &cwd, cx.agent, store.data_dir());
+    let program = find_program(&argv[0], &dirs, &cwd)?;
+    let purpose = format!("{entry} in {} (as {})", cwd.display(), program.display());
+    let env = store.env_values(&id, keys.as_deref(), &purpose, &cx.actor)?;
+    // A value this short would be masked wherever its characters happen to appear, so the
+    // masker skips it; the command does not get it either.
+    let (pairs, short): (Vec<_>, Vec<_>) = env
+        .pairs
+        .into_iter()
+        .partition(|(_, v)| v.len() >= vaultos_core::mask::MIN_LEN);
+    let mut argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+    argv[0] = program.into_os_string();
+    let path = if dirs.is_empty() {
+        "/usr/bin:/bin".to_owned()
+    } else {
+        dirs.iter()
+            .filter_map(|d| d.to_str())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    Ok(RunPlan {
+        program: Program {
+            argv,
+            cwd: Some(cwd),
+            env: pairs,
+            plain: vec![("PATH".to_owned(), path)],
+        },
+        timeout: Duration::from_secs(timeout),
+        project: env.project,
+        held_for_approval: env.held_for_approval,
+        too_short: short.into_iter().map(|(k, _)| k).collect(),
+    })
+}
+
+/// The folders an agent's command and its children may be found in: the caller's PATH, else
+/// this process's, else the system's, less any that are missing, relative, temporary or
+/// writable by other users, or inside the working folder, the agent's folders or the vault's
+/// data. An agent could put a program named like an allowed command in any of those.
+fn search_path(given: Option<&str>, cwd: &Path, agent: &Agent, data_dir: &Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let own = std::env::var("PATH").ok();
+    let list = given
+        .or(own.as_deref())
+        .filter(|p| !p.is_empty())
+        .unwrap_or("/usr/bin:/bin:/usr/sbin:/sbin");
+    let avoid: Vec<PathBuf> = [
+        std::env::temp_dir(),
+        "/tmp".into(),
+        "/var/tmp".into(),
+        "/dev/shm".into(),
+        cwd.to_path_buf(),
+        data_dir.to_path_buf(),
+    ]
+    .into_iter()
+    .chain(agent.roots.iter().map(PathBuf::from))
+    .filter_map(|p| std::fs::canonicalize(p).ok())
+    .collect();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in list.split(':').filter(|d| Path::new(d).is_absolute()) {
+        let Ok(dir) = std::fs::canonicalize(entry) else {
+            continue;
+        };
+        let shared = std::fs::metadata(&dir)
+            .map(|m| !m.is_dir() || m.permissions().mode() & 0o002 != 0)
+            .unwrap_or(true);
+        let plain = dir.to_str().is_some_and(|d| !d.contains(':'));
+        if !shared && plain && !avoid.iter().any(|a| dir.starts_with(a)) && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// The program an agent's command starts: a path as given (against the working folder when
+/// relative), or the first one of that name in `dirs`.
+fn find_program(name: &str, dirs: &[PathBuf], cwd: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let runnable = |p: &Path| {
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if name.contains('/') {
+        let p = cwd.join(name);
+        return if runnable(&p) {
+            Ok(p)
+        } else {
+            Err(invalid(&format!("{name} is not a program that can be run")))
+        };
+    }
+    dirs.iter()
+        .map(|d| d.join(name))
+        .find(|p| runnable(p))
+        .ok_or_else(|| {
+            invalid(&format!(
+                "{name} was not found in the PATH folders an agent's command may come from \
+                 (not temporary, shared or agent folders); the human can allow it by its \
+                 absolute path"
+            ))
+        })
+}
+
+fn inject(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
+    let (id, _) = cx.project_for(store, body.get("project").and_then(Value::as_str), "inject")?;
+    let keys = key_list(body)?;
+    let merge = match body.get("merge") {
+        None => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(invalid("merge must be boolean")),
+    };
+    let format = match body.get("format") {
+        None | Some(Value::Null) => Format::Dotenv,
+        Some(Value::String(s)) if s.is_empty() => Format::Dotenv,
+        Some(Value::String(s)) => Format::parse(s)?,
+        Some(_) => return Err(invalid("Unsupported format")),
+    };
+    let target = cx.file(store, body.get("target_path"))?;
+    to_json(&store.inject(&id, &target, format, merge, keys.as_deref(), &cx.actor)?)
+}
+
+fn import(store: &mut Store, cx: &Ctx<'_>, body: &Map<String, Value>) -> Result<Value> {
+    cx.scope("add")?;
+    let create = match body.get("createProject") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(invalid("createProject must be boolean")),
+    };
+    let source = cx.file(store, body.get("env_path"))?;
+    let pairs = env::read_env_file(&source)?;
+    let name = body.get("project").and_then(Value::as_str);
+    let exists = match name {
+        Some(n) => store.find_project(n)?.is_some(),
+        None => false,
+    };
+    let (id, pname) = if create && !exists {
+        cx.create_project(store, body.get("project"))?
+    } else {
+        cx.project(store, name)?
+    };
+    let (keys, refused) = store.batch(|s| {
+        let (mut keys, mut refused) = (Vec::new(), Vec::new());
+        for (key, value) in &pairs {
+            let fields = Fields {
+                key: key.clone(),
+                value: Some(SecretString::new(value.as_str())),
+                ..Default::default()
+            };
+            match cx.write_secret(s, &id, &fields) {
+                Ok(_) => keys.push(key.clone()),
+                Err(_) => refused.push(key.clone()),
+            }
+        }
+        Ok((keys, refused))
+    })?;
+    store.audit(
+        "import",
+        &format!("{pname}: {} keys", keys.len()),
+        &cx.actor,
+    )?;
+    Ok(json!({ "project": pname, "keys": keys, "refused": refused }))
+}
+
+/// `/status`: answered without the session token, so it says nothing about the vault's
+/// contents.
+pub fn status(unlocked: bool, sync: Value) -> Value {
+    json!({
+        "app": "VaultOS-Preview",
+        "ok": true,
+        "server": "vaultosd",
+        "locked": !unlocked,
+        "formatVersion": vaultos_core::format::VERSION,
+        "deployment": deployment(),
+        "sync": sync,
+    })
+}
+
+pub fn deployment() -> Value {
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "formatVersion": vaultos_core::format::VERSION,
+        "minReaderVersion": vaultos_core::format::VERSION,
+    })
+}

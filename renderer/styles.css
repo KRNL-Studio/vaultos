@@ -11,6 +11,7 @@
   --hover: #f0f0f2;
   --field: #ffffff;
   --border: #dcdce0;
+  --control-border: #8a8a90; /* fields and chips: 3:1 against the page and cards */
   --divider: #e8e8eb;
 
   --ink: #1d1d1f;          /* text; 16:1 on the page */
@@ -47,6 +48,7 @@
     --hover: #2b2b2f;
     --field: #1b1b1d;
     --border: #3a3a3f;
+    --control-border: #6f6f78;
     --divider: #303034;
 
     --ink: #f2f2f4;          /* 14:1 on the page */
@@ -56,8 +58,8 @@
     --btn-hover: #38383d;
     --overlay: rgba(0, 0, 0, 0.6);
 
-    --accent: #2f7de1;
-    --accent-hover: #3f8aec;
+    --accent: #286fc9;       /* white text 5:1 */
+    --accent-hover: #3376ca;  /* 4.6:1 */
     --accent-text: #6aa8f7;
 
     --warn-text: #ff8a8f;
@@ -95,7 +97,8 @@ body {
 
 .mono { font-family: var(--font-mono); }
 strong { font-weight: 600; }
-h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+h2, h1.pageh { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .label { font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--soft); }
 .note { font-size: 12px; line-height: 1.5; color: var(--soft); }
 
@@ -140,7 +143,7 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 /* ── inputs ── */
 input, textarea {
   width: 100%; background: var(--field); color: var(--ink);
-  border: 1px solid var(--border); border-radius: var(--r);
+  border: 1px solid var(--control-border); border-radius: var(--r);
   padding: 6px 9px; font-size: 13px; font-family: inherit;
   -webkit-app-region: no-drag;
   user-select: text; -webkit-user-select: text;
@@ -188,7 +191,7 @@ input.chk:disabled { opacity: 0.5; cursor: default; }
 /* ── cards ── */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; }
 .card-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 0; }
-.card-title { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; }
+.card-title { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; margin: 0; }
 .card-body { padding: 8px 14px 14px; }
 .card-head .pname { font-size: 12px; color: var(--soft); }
 .card-body > *:last-child { margin-bottom: 0; }
@@ -249,6 +252,10 @@ button.badge { cursor: pointer; font-family: inherit; }
 .badge.exp-amber { color: var(--amber-text); background: var(--amber-tint); }
 .badge.exp-red { color: var(--warn-text); background: var(--warn-tint); }
 .badge.allaccess { color: var(--amber-text); background: var(--amber-tint); }
+/* Scopes to enrol an agent with: chosen ones are filled and ticked. */
+.badge.scope { border: 1px solid var(--control-border); background: var(--btn); color: var(--ink); padding: 1px 8px; }
+.badge.scope[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.badge.scope[aria-pressed="true"]::before { content: "✓ "; }
 /* Not scoped to .secret: the same block is used standalone for a freshly minted
    agent token, a rotation summary and sync output. */
 .val { font-family: var(--font-mono); font-size: 12px; color: var(--ink); margin-top: 10px; padding: 8px 10px; background: var(--bg); border-radius: var(--r); border: 1px solid var(--border); word-break: break-word; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
@@ -261,10 +268,13 @@ button.badge { cursor: pointer; font-family: inherit; }
 /* ── forms and pickers ── */
 .field { margin-bottom: 12px; }
 .field > .label { display: block; margin-bottom: 4px; }
+.center .field, .acct-box > .field { margin: 0; }
+.card-body.stack > .field { align-self: stretch; margin: 0; }
+.modal label.label { display: block; margin-bottom: -6px; }
 .field .optional { text-transform: none; letter-spacing: 0; color: var(--muted); font-weight: 400; }
 .acct-box { display: flex; flex-direction: column; gap: 6px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); }
 .provider-grid { display: flex; flex-wrap: wrap; gap: 4px; }
-.pchip { display: flex; align-items: center; gap: 5px; padding: 0 9px; height: 24px; background: var(--btn); border: 1px solid var(--border); border-radius: var(--r); cursor: pointer; font-family: inherit; font-size: 12px; color: var(--ink); }
+.pchip { display: flex; align-items: center; gap: 5px; padding: 0 9px; height: 24px; background: var(--btn); border: 1px solid var(--control-border); border-radius: var(--r); cursor: pointer; font-family: inherit; font-size: 12px; color: var(--ink); }
 .pchip:hover { background: var(--btn-hover); }
 .pchip.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
 
@@ -314,3 +324,80 @@ button.badge { cursor: pointer; font-family: inherit; }
   .status .st { display: none; }
   .scroll { padding-left: 12px; padding-right: 12px; }
 }
+
+/* The minimum window at 200% zoom (190 CSS pixels): the header wraps, the wordmark and status
+   go, custom fields stack, and names wrap instead of being cut off. */
+@media (max-width: 320px) {
+  .topbar { flex-wrap: wrap; height: auto; min-height: 44px; padding-top: 6px; padding-bottom: 6px; }
+  :root[data-platform="mac"] .topbar { padding-left: 12px; padding-top: 30px; }
+  .wordmark, .status { display: none; }
+  .cfield { grid-template-columns: 1fr; }
+  .row .name, .results .row .name, .results .row .sub { white-space: normal; overflow-wrap: anywhere; }
+  .center { padding: 16px; }
+}
+
+/* Search across projects (⌘K / ⌘F). While a query is active only the box and results show. */
+.searchbox { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; padding: 0 10px; border: 1px solid var(--control-border); border-radius: var(--r); background: var(--field); }
+.searchbox:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.searchbox input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 9px 0; font: inherit; color: var(--ink); box-shadow: none; }
+.searchbox kbd { font: 11px var(--font-ui); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; }
+.scroll.searching > :not(.searchbox):not(.results) { display: none; }
+.results { display: flex; flex-direction: column; gap: 2px; }
+.results .row.result { gap: 10px; }
+.results .row.result[aria-selected="true"] { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+.results .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.results .row .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.results .grow { min-width: 0; }
+
+/* The item Quick Access or search opened. */
+.secret.card.flash { box-shadow: 0 0 0 2px var(--accent); }
+.secret.card:focus { outline: none; }
+
+/* Stored passwords stay concealed until Show. */
+.concealed { display: flex; gap: 6px; align-items: stretch; }
+.concealed input { flex: 1; min-width: 0; }
+
+/* Revealed secret values are read, not selected: Copy uses the concealed, auto-clearing path. */
+.secret .val { user-select: none; -webkit-user-select: none; }
+
+/* ── typed items ── */
+select {
+  height: 28px; background: var(--field); color: var(--ink);
+  border: 1px solid var(--control-border); border-radius: var(--r);
+  padding: 0 6px; font-size: 13px; font-family: inherit; -webkit-app-region: no-drag;
+}
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.field > select { width: 100%; }
+.chkrow { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.badge.fav { color: var(--amber-text); background: var(--amber-tint); }
+.badge.tag { font-family: var(--font-mono); }
+.note.good { color: var(--good-text); }
+.note.bad { color: var(--warn-text); }
+
+.meter { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; color: var(--soft); min-height: 14px; }
+.meter .bar { flex: 0 0 72px; height: 4px; border-radius: 2px; background: var(--divider); overflow: hidden; }
+.meter .bar > span { display: block; height: 100%; width: 0; background: var(--warn-text); }
+.meter[data-rating=""] .bar { visibility: hidden; }
+.meter[data-rating=weak] .bar > span { width: 25%; }
+.meter[data-rating=fair] .bar > span { width: 50%; background: var(--amber-text); }
+.meter[data-rating=good] .bar > span { width: 75%; background: var(--good); }
+.meter[data-rating=strong] .bar > span { width: 100%; background: var(--good); }
+
+.cfields { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.cfield { display: grid; grid-template-columns: minmax(80px, 1fr) auto minmax(120px, 2fr) auto; gap: 6px; align-items: center; }
+.cfield .valslot { min-width: 0; }
+
+.filerow { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid var(--divider); }
+.filerow .grow { flex: 1; min-width: 0; }
+.filerow .name { font-size: 13px; overflow-wrap: anywhere; }
+.filerow .sub { font-size: 11px; color: var(--soft); }
+
+.otp { display: inline-flex; align-items: center; gap: 6px; }
+.otpcode { font-size: 13px; letter-spacing: 0.04em; color: var(--ink); }
+
+.modal .box.wide { max-width: 420px; }
+.gen-out { min-height: 34px; margin-top: 0; user-select: all; -webkit-user-select: all; }
+.gen-opts { display: flex; flex-direction: column; gap: 6px; }
+.slider { display: grid; grid-template-columns: 56px 1fr 28px; align-items: center; gap: 8px; font-size: 13px; }
+.slider input { padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+.slider b { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }

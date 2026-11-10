@@ -1,95 +1,59 @@
-import { cpSync, mkdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync, renameSync } from "node:fs";
-
-import { tmpdir } from "node:os";
-
-import path from "node:path";
-
+// Packages the Linux desktop app (vaultos-preview) with vaultos, vaultos-agent, vaultos-mcp,
+// vaultosd, vaultos-ssh-sign, vaultos-browser and the unpacked browser extension as an unsigned tar.gz with a checksum and a CycloneDX inventory. Build it on Linux
+// for that machine's architecture: the app links the system's WebKitGTK, so it cannot be
+// cross-built. scripts/install-linux.sh installs the result for the current user.
 import { execFileSync } from "node:child_process";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { gzipSync } from "node:zlib";
+import { budget, build, checksum, sbom, TOOLS, version } from "./rust-dist.mjs";
 
-import { createHash } from "node:crypto";
-
-import { packager } from "@electron/packager";
-
-import { flipFuses, FuseVersion, FuseV1Options } from "@electron/fuses";
-
-import { APP_FILES } from "./app-files.mjs";
-
-// The Linux build has no native helper, so it can be assembled on Linux or cross-built on macOS.
-// A cross-build is not a runtime test; launch it on the target distribution before relying on it.
+if (process.platform !== "linux") throw new Error("Build Linux artifacts on Linux; use npm run dist:mac on macOS");
 const arch = process.env.VAULTOS_ARCH || process.arch;
+if (arch !== process.arch) throw new Error(`Build ${arch} on a ${arch} machine; this one is ${process.arch}`);
+const triple = {
+    arm64: "aarch64-unknown-linux-gnu",
+    x64: "x86_64-unknown-linux-gnu"
+}[arch];
+if (!triple) throw new Error("Supported architectures: arm64, x64");
 
-if (![ "arm64", "x64" ].includes(arch)) throw new Error("Supported architectures: arm64, x64");
-
-const pkg = JSON.parse(readFileSync("package.json"));
-
+const v = version();
+const release = build();
 const executable = "vaultos-preview";
+const folder = path.resolve("dist", `${executable}-linux-${arch}`);
+rmSync(folder, {
+    recursive: true,
+    force: true
+});
+mkdirSync(folder, {
+    recursive: true
+});
+copyFileSync(path.join(release, "vaultos-desktop"), path.join(folder, executable));
+for (const tool of TOOLS) copyFileSync(path.join(release, tool), path.join(folder, tool));
+for (const file of [ executable, ...TOOLS ]) chmodSync(path.join(folder, file), 0o755);
+copyFileSync("build/icon_1024.png", path.join(folder, `${executable}.png`));
+for (const notice of [ "LICENSE", "THIRD_PARTY_NOTICES.md" ]) copyFileSync(notice, path.join(folder, notice));
+cpSync("extension", path.join(folder, "extension"), {
+    recursive: true
+});
 
-const stage = mkdtempSync(path.join(tmpdir(), "vaultos-package-"));
-
-try {
-    for (const file of APP_FILES) {
-        mkdirSync(path.dirname(path.join(stage, file)), {
-            recursive: true
-        });
-        cpSync(file, path.join(stage, file), {
-            recursive: true
-        });
+// The same build gives the same archive: names sorted, owners, modes and times fixed (to
+// SOURCE_DATE_EPOCH, else the last commit's time), and gzip without a timestamp.
+const archive = path.resolve("dist", `VaultOS-${v}-linux-${arch}-unsigned.tar.gz`);
+let epoch = process.env.SOURCE_DATE_EPOCH;
+if (!epoch) {
+    try {
+        epoch = execFileSync("git", [ "log", "-1", "--format=%ct" ], { encoding: "utf8", stdio: [ "ignore", "pipe", "ignore" ] }).trim();
+    } catch {
+        epoch = "0";
     }
-    execFileSync("npm", [ "ci", "--omit=dev", "--ignore-scripts" ], {
-        cwd: stage,
-        stdio: "inherit"
-    });
-    const [built] = await packager({
-        dir: stage,
-        name: "VaultOS",
-        executableName: executable,
-        platform: "linux",
-        arch: arch,
-        electronVersion: pkg.devDependencies.electron,
-        out: "dist",
-        overwrite: true,
-        asar: true,
-        prune: false,
-        appVersion: pkg.version,
-        buildVersion: "1"
-    });
-    const folder = path.resolve("dist", `${executable}-linux-${arch}`);
-    rmSync(folder, {
-        recursive: true,
-        force: true
-    });
-    renameSync(built, folder);
-    cpSync("build/icon_1024.png", path.join(folder, `${executable}.png`));
-    // Embedded ASAR integrity validation is implemented by Electron only on macOS and Windows,
-    // so that fuse is left off here rather than claiming a protection Linux does not enforce.
-    await flipFuses(path.join(folder, executable), {
-        version: FuseVersion.V1,
-        [FuseV1Options.RunAsNode]: false,
-        [FuseV1Options.EnableCookieEncryption]: true,
-        [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
-        [FuseV1Options.EnableNodeCliInspectArguments]: false,
-        [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: false,
-        [FuseV1Options.OnlyLoadAppFromAsar]: true
-    });
-    const archive = path.resolve("dist", `VaultOS-${pkg.version}-linux-${arch}-unsigned.tar.gz`);
-    execFileSync("tar", [ "-czf", archive, "-C", path.dirname(folder), path.basename(folder) ], {
-        stdio: "inherit",
-        env: {
-            ...process.env,
-            COPYFILE_DISABLE: "1"
-        }
-    });
-    writeFileSync(archive + ".sha256", createHash("sha256").update(readFileSync(archive)).digest("hex") + "  " + path.basename(archive) + "\n");
-    const sbom = execFileSync("npm", [ "sbom", "--package-lock-only", "--sbom-format=cyclonedx", "--omit=dev" ], {
-        cwd: stage,
-        encoding: "utf8",
-        maxBuffer: 16 * 1024 * 1024
-    });
-    writeFileSync(archive.replace(/\.tar\.gz$/, ".cdx.json"), sbom);
-    console.log("Built " + archive);
-} finally {
-    rmSync(stage, {
-        recursive: true,
-        force: true
-    });
 }
+const tar = execFileSync("tar", [ "--sort=name", "--format=gnu", "--owner=0", "--group=0", "--numeric-owner", "--mode=u+rwX,go+rX,go-w", `--mtime=@${epoch}`, "-cf", "-", "-C", path.dirname(folder), path.basename(folder) ], {
+    maxBuffer: 512 * 1024 * 1024
+});
+writeFileSync(archive, gzipSync(tar, { level: 9 }));
+budget(path.basename(folder), folder, 28);
+budget(path.basename(archive), archive, 10);
+checksum(archive);
+sbom(triple, archive.replace(/\.tar\.gz$/, ".cdx.json"));
+console.log("Built " + archive);

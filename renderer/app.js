@@ -23,6 +23,73 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({
     '"': "&quot;"
 }[c]));
 
+// Outcomes (copied, saved, errors that are not in a form) for screen readers, through a polite
+// live region outside #app so a re-render does not cut it off.
+function announce(text) {
+    const live = document.getElementById("announcer");
+    if (!live) return;
+    live.textContent = "";
+    setTimeout(() => {
+        live.textContent = text;
+    }, 60);
+}
+
+// A field with a label that stays visible while typing; the placeholder is only an example.
+let fieldIds = 0;
+
+function labeled(text, control, input = control) {
+    const wrap = el(`<div class="field"><label class="label"></label></div>`);
+    const label = wrap.querySelector("label");
+    label.textContent = text;
+    input.id ||= `field-${++fieldIds}`;
+    label.htmlFor = input.id;
+    wrap.appendChild(control);
+    return wrap;
+}
+
+// A modal dialog: named by its title, the window behind it inert, Tab kept inside, Escape
+// cancelling, and focus back where it was when it closes. Returns the function that closes it.
+function openModal(modal, onCancel) {
+    const opener = document.activeElement;
+    const title = modal.querySelector(".card-title");
+    if (title) {
+        title.id ||= `dialog-title-${++fieldIds}`;
+        modal.setAttribute("aria-labelledby", title.id);
+        modal.removeAttribute("aria-label");
+    }
+    modal.addEventListener("keydown", e => {
+        if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            onCancel();
+        } else if (e.key === "Tab") {
+            const stops = [ ...modal.querySelectorAll("button, input, select, textarea, [tabindex]") ].filter(n => !n.disabled && n.tabIndex >= 0 && n.getClientRects().length);
+            if (!stops.length) return;
+            const first = stops[0], last = stops[stops.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
+    });
+    $app.inert = true;
+    document.body.appendChild(modal);
+    return () => {
+        modal.remove();
+        if (!document.querySelector(".modal")) $app.inert = false;
+        if (opener && opener.isConnected && typeof opener.focus === "function") opener.focus();
+    };
+}
+
+// A toggle chip: its look and its pressed state together.
+function press(chip, on) {
+    chip.classList.toggle("sel", on);
+    chip.setAttribute("aria-pressed", String(on));
+}
+
 const providerById = id => PROVIDERS.find(p => p.id === id) || PROVIDERS.find(p => p.id === "custom");
 
 let AGENTS = [];
@@ -43,7 +110,7 @@ const initialOf = name => (String(name || "").trim().match(/[\p{L}\p{N}]/u) || [
 
 // A titled card. Returns its body.
 function panel(parent, title, {tag: tag = ""} = {}) {
-    const card = el(`<section class="card"><div class="card-head"><h3 class="card-title"></h3>${tag ? `<span class="pname"></span>` : ""}</div><div class="card-body"></div></section>`);
+    const card = el(`<section class="card"><div class="card-head"><h2 class="card-title"></h2>${tag ? `<span class="pname"></span>` : ""}</div><div class="card-body"></div></section>`);
     card.querySelector(".card-title").textContent = title;
     if (tag) card.querySelector(".pname").textContent = tag;
     parent.appendChild(card);
@@ -67,13 +134,71 @@ async function boot() {
     document.documentElement.dataset.platform = s.isMac ? "mac" : "other";
     TOUCH_ID = s.touchId || TOUCH_ID;
     // Touch ID is offered automatically only when the window opens, never right after Lock.
-    view = s.exists ? {
+    view = !s.exists ? {
+        name: "setup"
+    } : s.unlocked ? {
+        name: "projects"
+    } : {
         name: "unlock",
         auto: TOUCH_ID.autoPrompt
-    } : {
-        name: "setup"
     };
     render();
+    runCommand();
+}
+
+// A field for a stored password: concealed until the human chooses Show.
+function concealedRow(input) {
+    const row = el(`<div class="concealed"></div>`);
+    const toggle = el(`<button type="button" class="iconbtn" aria-pressed="false">Show</button>`);
+    toggle.onclick = () => {
+        const show = input.type === "password";
+        input.type = show ? "text" : "password";
+        toggle.textContent = show ? "Hide" : "Show";
+        toggle.setAttribute("aria-pressed", String(show));
+    };
+    row.appendChild(input);
+    row.appendChild(toggle);
+    return row;
+}
+
+const isUnlockedView = () => ![ "setup", "unlock", "loading" ].includes(view.name);
+
+// Navigation requests from the menu bar, app menu and Quick Access. A locked window keeps
+// the latest one and follows it after unlock.
+let queuedCommand = null;
+
+async function runCommand() {
+    let cmd = null;
+    try {
+        cmd = await window.vault.takeCommand();
+    } catch {}
+    if (cmd) queuedCommand = cmd;
+    if (!queuedCommand || !isUnlockedView()) return;
+    cmd = queuedCommand;
+    queuedCommand = null;
+    if (cmd.name === "settings") view = {
+        name: "settings"
+    }; else if (cmd.name === "project" && typeof cmd.project === "string") view = {
+        name: "project",
+        project: cmd.project,
+        focusKey: typeof cmd.focusKey === "string" ? cmd.focusKey : null
+    }; else if (cmd.name === "search") view = {
+        name: "projects",
+        query: view.name === "projects" ? view.query || "" : "",
+        focusSearch: true
+    }; else view = {
+        name: "projects"
+    };
+    render();
+}
+
+function afterUnlockRoute() {
+    if (isUnlockedView()) return;
+    view = {
+        name: "projects"
+    };
+    render();
+    runCommand();
 }
 
 async function refreshAgents() {
@@ -87,13 +212,16 @@ async function refreshAgents() {
 function topbar({crumb: crumb} = {}) {
     const bar = el(`<div class="topbar"></div>`);
     if (crumb) {
-        const c = el(`<span class="crumb">‹ ${esc(crumb.label)}</span>`);
+        const c = el(`<span class="crumb" aria-label="Back to ${esc(crumb.label)}"><span aria-hidden="true">‹ </span>${esc(crumb.label)}</span>`);
         c.onclick = crumb.onClick;
         bar.appendChild(c);
     }
     bar.appendChild(el(`<div class="wordmark">VaultOS</div>`));
     bar.appendChild(el(`<div class="status" title="Vault unlocked"><span class="led"></span><span class="st">Unlocked</span></div>`));
-    const gear = el(`<button class="iconbtn gear" title="Settings"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>`);
+    const find = el(`<button class="iconbtn" title="Search (${modKey()}K)" aria-label="Search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>`);
+    find.onclick = () => openSearch();
+    bar.appendChild(find);
+    const gear = el(`<button class="iconbtn gear" title="Settings" aria-label="Settings"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>`);
     gear.onclick = () => {
         view = {
             name: "settings"
@@ -113,8 +241,11 @@ function topbar({crumb: crumb} = {}) {
     return bar;
 }
 
+let focusHeading = false;
+
 function render() {
     renderVersion++;
+    focusHeading = true;
     $app.innerHTML = "";
     const fn = {
         loading: renderLoading,
@@ -127,7 +258,10 @@ function render() {
         settings: renderSettings,
         agents: renderAgents,
         delegate: renderDelegate,
-        sync: renderSync
+        sync: renderSync,
+        trash: renderTrash,
+        watchtower: renderWatchtower,
+        versions: renderVersions
     }[view.name] || renderLoading;
     fn();
 }
@@ -158,15 +292,12 @@ function renderSetup() {
             return;
         }
         pw.value = pw2.value = "";
-        view = {
-            name: "projects"
-        };
-        render();
+        afterUnlockRoute();
     };
     pw2.addEventListener("keydown", e => {
         if (e.key === "Enter") btn.click();
     });
-    [ pw, pw2, err, btn ].forEach(n => wrap.appendChild(n));
+    [ labeled("Master password", pw), labeled("Confirm password", pw2), err, btn ].forEach(n => wrap.appendChild(n));
     $app.appendChild(wrap);
     pw.focus();
 }
@@ -174,31 +305,59 @@ function renderSetup() {
 async function renderUnlock() {
     const revision = renderVersion;
     // Touch ID can come and go (lid closed, lockout, a manual Lock), so ask each time.
-    TOUCH_ID = (await window.vault.state()).touchId || TOUCH_ID;
+    const st = await window.vault.state();
+    TOUCH_ID = st.touchId || TOUCH_ID;
     if (revision !== renderVersion) return;
     const wrap = el(`<div class="center"></div>`);
     wrap.appendChild(el(`<h1>VaultOS is locked</h1>`));
     wrap.appendChild(el(`<p>Unlock to let approved agents use your keys. Locks after 15 minutes of inactivity, when the Mac locks, or when you press Lock.</p>`));
     const pw = el(`<input type="password" placeholder="Master password" />`);
+    // A vault with a Secret Key needs it once on each device; the app then keeps it in the
+    // keychain. The earlier app's vaults are upgraded only when the human chooses to.
+    const key = el(`<input type="password" placeholder="Secret Key (VK1-…)" autocomplete="off" spellcheck="false" />`);
+    const keyRow = labeled("Secret Key", key);
+    keyRow.style.display = st.needsSecretKey ? "" : "none";
     const err = el(`<div class="err"></div>`);
     const btn = el(`<button class="btn primary">Unlock</button>`);
-    btn.onclick = async () => {
-        const r = await window.vault.unlock(pw.value);
-        if (!r.ok) {
-            err.textContent = r.error;
-            pw.value = "";
-            pw.focus();
+    const upgrade = el(`<button class="btn ghost">Upgrade this vault</button>`);
+    upgrade.style.display = st.needsUpgrade ? "" : "none";
+    const upgradeNote = el(`<p class="note">This vault was made by an earlier VaultOS. Upgrading converts it to the new format with the same password and keeps the earlier file as a backup. The earlier app cannot open the upgraded vault.</p>`);
+    upgradeNote.style.display = st.needsUpgrade ? "" : "none";
+    const refused = r => {
+        err.textContent = r.error;
+        if (r.needsSecretKey) {
+            keyRow.style.display = "";
+            key.focus();
             return;
         }
-        view = {
-            name: "projects"
-        };
-        render();
+        if (r.needsUpgrade) upgrade.style.display = upgradeNote.style.display = "";
+        pw.value = "";
+        pw.focus();
     };
-    pw.addEventListener("keydown", e => {
+    btn.onclick = async () => {
+        const r = await window.vault.unlock(pw.value, key.value || undefined);
+        if (!r.ok) return refused(r);
+        key.value = "";
+        afterUnlockRoute();
+    };
+    upgrade.onclick = async () => {
+        if (!window.vault.upgrade) return;
+        upgrade.disabled = true;
+        err.textContent = "Upgrading…";
+        try {
+            const r = await window.vault.upgrade(pw.value);
+            if (!r.ok) return refused(r);
+            afterUnlockRoute();
+        } catch (e) {
+            err.textContent = cleanError(e);
+        } finally {
+            upgrade.disabled = false;
+        }
+    };
+    for (const n of [ pw, key ]) n.addEventListener("keydown", e => {
         if (e.key === "Enter") btn.click();
     });
-    [ pw, err, btn ].forEach(n => wrap.appendChild(n));
+    [ labeled("Master password", pw), keyRow, err, btn, upgrade, upgradeNote ].forEach(n => wrap.appendChild(n));
     if (TOUCH_ID.ready) {
         const touch = el(`<button class="btn ghost">Unlock with Touch ID</button>`);
         touch.onclick = async () => {
@@ -207,10 +366,7 @@ async function renderUnlock() {
             try {
                 const r = await window.vault.unlockTouchId();
                 if (r.ok) {
-                    view = {
-                        name: "projects"
-                    };
-                    render();
+                    afterUnlockRoute();
                     return;
                 }
                 err.textContent = r.error;
@@ -237,6 +393,64 @@ const cleanError = e => String(e?.message || e || "The operation failed. Please 
 // Human-only actions. With Touch ID confirmation on, the main process asks for Touch ID; when
 // it cannot (unavailable, cancelled, or not a Mac) it refuses with NEED_PASSWORD, and the
 // master password collected here confirms the action instead. The main process verifies it.
+// Settings → Browsers: the extension's helper, and the browsers paired with this vault.
+async function browsersPanel(page) {
+    const b = await window.vault.browsers();
+    const box = panel(page, "Browsers", {
+        tag: b.paired.length ? `${b.paired.length} paired` : "none paired"
+    });
+    box.appendChild(el(`<p class="note">The VaultOS extension fills and saves website logins in Chrome, Brave, Edge, Arc, Helium, Vivaldi and Chromium. It talks only to this app, through a helper the browser starts, and offers a login only on its own site (HTTPS, or http on localhost). Pairing shows a code in the extension and here; confirm only when they match.</p>`));
+    const hosts = b.hosts.length ? b.hosts.map(h => `${esc(h.browser)} ${h.installed ? "(set up)" : "(not set up)"}`).join(", ") : "none found";
+    box.appendChild(el(`<p class="note">Browsers: ${hosts}</p>`));
+    const status = el(`<p class="note" role="status"></p>`);
+    const actions = el(`<div class="actions"></div>`);
+    const setUp = el(`<button type="button" class="btn ghost sm">Set up browsers</button>`);
+    setUp.disabled = !b.hosts.length;
+    setUp.onclick = async () => {
+        setUp.disabled = true;
+        try {
+            const r = await window.vault.setUpBrowsers();
+            status.textContent = `Set up in ${r.installed.map(h => h.browser).join(", ")}. Restart those browsers if they were open.`;
+            status.classList.remove("err");
+        } catch (e) {
+            status.textContent = cleanError(e);
+            status.classList.add("err");
+        }
+        setUp.disabled = false;
+    };
+    actions.appendChild(setUp);
+    if (b.hosts.some(h => h.installed)) {
+        const remove = el(`<button type="button" class="iconbtn">Remove helper</button>`);
+        remove.onclick = async () => {
+            await window.vault.removeBrowserHelper();
+            render();
+        };
+        actions.appendChild(remove);
+    }
+    box.appendChild(actions);
+    box.appendChild(status);
+    const load = el(`<pre class="val" style="white-space:pre-wrap"></pre>`);
+    load.textContent = `# Load the extension (once per browser)
+Open the browser's extensions page (chrome://extensions), turn on Developer mode,
+choose Load unpacked and pick:
+${b.extension || "the extension folder inside VaultOS.app/Contents/Resources"}
+
+Its ID is ${b.extensionId}.`;
+    box.appendChild(load);
+    for (const p of b.paired) {
+        const card = el(`<div class="secret card"><div class="head"><span class="key"></span><span class="pname">paired</span></div><div class="note"></div><div class="actions"></div></div>`);
+        card.querySelector(".key").textContent = p.name;
+        card.querySelector(".note").textContent = `paired ${(p.pairedAt || "").slice(0, 10)}${p.lastSeenAt ? ` · last used ${p.lastSeenAt.slice(0, 16).replace("T", " ")}` : " · never used"}`;
+        const unpair = el(`<button type="button" class="iconbtn danger">Unpair</button>`);
+        unpair.onclick = async () => {
+            await window.vault.unpairBrowser(p.id);
+            render();
+        };
+        card.querySelector(".actions").appendChild(unpair);
+        box.appendChild(card);
+    }
+}
+
 async function human(name, ...args) {
     try {
         return await window.vault[name](...args);
@@ -250,13 +464,17 @@ async function human(name, ...args) {
 
 function askPassword(why) {
     return new Promise(resolve => {
-        const modal = el(`<div class="modal" role="dialog" aria-modal="true"><div class="box card"><div class="card-head"><h3 class="card-title">Confirm it's you</h3></div><div class="card-body"><div class="note"></div><input type="password" placeholder="Master password" /><div class="err"></div><div class="row2"><button class="btn ghost">Cancel</button><button class="btn primary">Confirm</button></div></div></div></div>`);
-        modal.querySelector(".note").textContent = why;
+        const modal = el(`<div class="modal" role="dialog" aria-modal="true"><div class="box card"><div class="card-head"><h2 class="card-title">Confirm it's you</h2></div><div class="card-body"><div class="note"></div><label class="label" for="confirm-password">Master password</label><input id="confirm-password" type="password" placeholder="Master password" /><div class="err" role="alert"></div><div class="row2"><button class="btn ghost">Cancel</button><button class="btn primary">Confirm</button></div></div></div></div>`);
+        const why_ = modal.querySelector(".note");
+        why_.textContent = why;
+        why_.id = "confirm-why";
+        modal.setAttribute("aria-describedby", why_.id);
         const input = modal.querySelector("input"), err = modal.querySelector(".err");
         const [cancel, ok] = modal.querySelectorAll("button");
+        let close = () => {};
         const done = result => {
             input.value = "";
-            modal.remove();
+            close();
             resolve(result);
         };
         cancel.onclick = () => done(false);
@@ -275,9 +493,8 @@ function askPassword(why) {
         };
         input.addEventListener("keydown", e => {
             if (e.key === "Enter") ok.click();
-            if (e.key === "Escape") cancel.click();
         });
-        document.body.appendChild(modal);
+        close = openModal(modal, () => done(false));
         input.focus();
     });
 }
@@ -290,7 +507,21 @@ async function renderProjects() {
     if (revision !== renderVersion) return;
     await refreshAgents();
     if (revision !== renderVersion) return;
-    scroll.appendChild(el(`<div class="section"><span class="label">Projects</span><span class="label">${projects.length}</span></div>`));
+    searchPanel(scroll, revision);
+    const tools = el(`<div class="actionrow"></div>`);
+    for (const [label, name] of [ [ "Watchtower", "watchtower" ], [ "Trash", "trash" ] ]) {
+        const b = el(`<button class="btn ghost sm"></button>`);
+        b.textContent = label;
+        b.onclick = () => {
+            view = {
+                name: name
+            };
+            render();
+        };
+        tools.appendChild(b);
+    }
+    scroll.appendChild(tools);
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Projects</h1><span class="label">${projects.length}</span></div>`));
     const pending = await window.vault.pending();
     if (revision !== renderVersion) return;
     if (pending.length) {
@@ -371,7 +602,7 @@ async function renderProjects() {
         scroll.appendChild(el(`<div class="empty"><div class="big">No projects yet</div><p>Create one, then add its API keys. To let an agent use them, enrol it under Settings, then Agents. Reveal is off by default.</p></div>`));
     }
     for (const p of projects) {
-        const row = el(`<div class="row">\n      <span class="tile" aria-hidden="true">${esc(initialOf(p.name))}</span>\n      <div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.secretCount} ${p.secretCount === 1 ? "key" : "keys"}</div></div>\n      <div class="chev">›</div></div>`);
+        const row = el(`<div class="row">\n      <span class="tile" aria-hidden="true">${esc(initialOf(p.name))}</span>\n      <div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.secretCount} ${p.secretCount === 1 ? "key" : "keys"}</div></div>\n      <div class="chev" aria-hidden="true">›</div></div>`);
         row.onclick = () => {
             view = {
                 name: "project",
@@ -382,6 +613,154 @@ async function renderProjects() {
         scroll.appendChild(row);
     }
     $app.appendChild(scroll);
+}
+
+const isMacPlatform = () => document.documentElement.dataset.platform === "mac";
+
+const modKey = () => isMacPlatform() ? "⌘" : "Ctrl+";
+
+function openSearch() {
+    if (!isUnlockedView()) return;
+    const input = document.querySelector(".searchbox input");
+    if (view.name === "projects" && input) {
+        input.focus();
+        input.select();
+        return;
+    }
+    view = {
+        name: "projects",
+        focusSearch: true
+    };
+    render();
+}
+
+// Search across every project. The query lives in `view` so a re-render keeps it; while it
+// is non-empty the project list is hidden and ranked results show instead.
+function searchPanel(scroll, revision) {
+    const box = el(`<div class="searchbox"><input type="search" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-haspopup="listbox" placeholder="Search keys, projects, usernames, websites" aria-label="Search all keys" aria-controls="search-results" aria-describedby="search-hint" /><kbd aria-hidden="true"></kbd><span class="sr-only" id="search-hint"></span></div>`);
+    box.querySelector("kbd").textContent = `${modKey()}K`;
+    box.querySelector("#search-hint").textContent = `Up and down arrows choose a result, Return opens it, ${modKey()}Return copies its value.`;
+    const input = box.querySelector("input");
+    const results = el(`<div class="results" id="search-results" role="listbox" aria-label="Search results"></div>`);
+    const none = el(`<div class="empty" role="status"></div>`);
+    let found = [], sel = 0, token = 0;
+    const open = item => {
+        view = {
+            name: "project",
+            project: item.project,
+            focusKey: item.key
+        };
+        render();
+    };
+    const mark = () => {
+        [ ...results.children ].forEach((row, i) => row.setAttribute("aria-selected", String(i === sel)));
+        const row = results.children[sel];
+        if (row) {
+            input.setAttribute("aria-activedescendant", row.id);
+            row.scrollIntoView({
+                block: "nearest"
+            });
+        } else input.removeAttribute("aria-activedescendant");
+    };
+    const copySelected = async item => {
+        await human("copy", item.project, item.key);
+        announce(`Copied ${item.key}`);
+    };
+    const draw = () => {
+        results.textContent = "";
+        none.textContent = "";
+        input.setAttribute("aria-expanded", String(found.length > 0));
+        if (!found.length) {
+            input.removeAttribute("aria-activedescendant");
+            none.textContent = `No keys match "${input.value.trim()}". Try a project, username or website.`;
+            return;
+        }
+        none.textContent = `${found.length} ${found.length === 1 ? "result" : "results"}`;
+        found.forEach((item, i) => {
+            const row = el(`<div class="row result" role="option" tabindex="-1"><span class="tile" aria-hidden="true"></span><div class="grow"><div class="name mono"></div><div class="sub"></div></div></div>`);
+            row.id = `search-result-${i}`;
+            row.querySelector(".tile").textContent = initialOf(item.key);
+            row.querySelector(".name").textContent = item.key;
+            row.querySelector(".sub").textContent = [ item.project, item.username || item.email, item.host ].filter(Boolean).join(" · ");
+            if (item.hasValue) {
+                // Inside an option a button would not be reachable, so the keyboard copies with
+                // ⌘⏎ (described on the search field) and this one is for the pointer.
+                const copy = el(`<button class="iconbtn" tabindex="-1" aria-hidden="true">Copy</button>`);
+                copy.onclick = async e => {
+                    e.stopPropagation();
+                    await copySelected(item);
+                    copy.textContent = "Copied";
+                    copy.classList.add("copied");
+                    setTimeout(() => {
+                        copy.textContent = "Copy";
+                        copy.classList.remove("copied");
+                    }, 1200);
+                };
+                row.appendChild(copy);
+            }
+            row.onclick = () => open(item);
+            row.onmousemove = () => {
+                if (sel !== i) {
+                    sel = i;
+                    mark();
+                }
+            };
+            results.appendChild(row);
+        });
+        mark();
+    };
+    const run = async () => {
+        view.query = input.value;
+        const active = !!input.value.trim();
+        scroll.classList.toggle("searching", active);
+        // Every keystroke, clearing included, makes older answers stale.
+        const t = ++token, query = input.value;
+        if (!active) {
+            results.textContent = "";
+            none.textContent = "";
+            found = [];
+            input.setAttribute("aria-expanded", "false");
+            input.removeAttribute("aria-activedescendant");
+            return;
+        }
+        const r = await window.vault.search(query);
+        if (t !== token || revision !== renderVersion || input.value !== query) return;
+        found = r;
+        sel = 0;
+        draw();
+    };
+    input.addEventListener("input", run);
+    input.addEventListener("keydown", e => {
+        if ((e.key === "ArrowDown" || e.key === "ArrowUp") && found.length) {
+            e.preventDefault();
+            sel = (sel + (e.key === "ArrowDown" ? 1 : -1) + found.length) % found.length;
+            mark();
+        } else if (e.key === "Enter" && found[sel] && (isMacPlatform() ? e.metaKey : e.ctrlKey)) {
+            e.preventDefault();
+            if (found[sel].hasValue) copySelected(found[sel]);
+        } else if (e.key === "Enter" && found[sel]) {
+            e.preventDefault();
+            open(found[sel]);
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            if (input.value) {
+                input.value = "";
+                run();
+            } else input.blur();
+        }
+    });
+    scroll.appendChild(box);
+    scroll.appendChild(results);
+    scroll.appendChild(none);
+    input.value = view.query || "";
+    if (input.value) run();
+    if (view.focusSearch) {
+        view.focusSearch = false;
+        requestAnimationFrame(() => {
+            input.focus();
+            input.select();
+        });
+    }
 }
 
 async function renderProject() {
@@ -401,9 +780,11 @@ async function renderProject() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    const secrets = await window.vault.secrets(project);
+    const all = await window.vault.secrets(project);
     if (revision !== renderVersion) return;
-    scroll.appendChild(el(`<div class="section"><span class="label">${esc(project)}</span><span class="label">${secrets.length} ${secrets.length === 1 ? "key" : "keys"}</span></div>`));
+    const archivedCount = all.filter(s => s.archived).length;
+    const secrets = all.filter(s => !!view.showArchived === !!s.archived).sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">${esc(project)}${view.showArchived ? " · Archived" : ""}</h1><span class="label">${secrets.length} ${secrets.length === 1 ? "item" : "items"}</span></div>`));
     const actionRow = el(`<div class="actionrow"></div>`);
     const add = el(`<button class="btn primary"><span aria-hidden="true">+</span> Add key</button>`);
     add.onclick = () => {
@@ -433,16 +814,46 @@ async function renderProject() {
             exp.classList.remove("copied");
         }, 2e3);
     };
+    const imp = el(`<button class="btn ghost" title="Import from 1Password, Bitwarden or a CSV file">Import…</button>`);
+    imp.onclick = async () => {
+        if (await importInto(project, importStatus) && revision === renderVersion) {
+            const keep = importStatus.textContent;
+            render();
+            requestAnimationFrame(() => {
+                const n = document.querySelector(".import-status");
+                if (n) n.textContent = keep;
+            });
+        }
+    };
     actionRow.appendChild(add);
     actionRow.appendChild(exp);
+    actionRow.appendChild(imp);
+    if (archivedCount || view.showArchived) {
+        const arch = el(`<button class="btn ghost"></button>`);
+        arch.textContent = view.showArchived ? "Back to items" : `Archived (${archivedCount})`;
+        arch.onclick = () => {
+            view = {
+                name: "project",
+                project: project,
+                showArchived: !view.showArchived
+            };
+            render();
+        };
+        actionRow.appendChild(arch);
+    }
     scroll.appendChild(actionRow);
+    const importStatus = el(`<div class="note import-status" role="status" style="margin:-4px 2px 8px"></div>`);
+    scroll.appendChild(importStatus);
     const expErr = el(`<div class="err" style="margin-top:-8px"></div>`);
     scroll.appendChild(expErr);
-    if (!secrets.length) scroll.appendChild(el(`<div class="empty"><div class="big">No keys yet</div><p>No keys stored here yet.</p></div>`));
+    if (!secrets.length) scroll.appendChild(view.showArchived ? el(`<div class="empty"><div class="big">Nothing archived</div></div>`) : el(`<div class="empty"><div class="big">No keys yet</div><p>No keys stored here yet.</p></div>`));
     for (const s of secrets) {
         const prov = providerById(s.provider);
         const sub = [ s.username && `@${esc(s.username)}`, s.email && esc(s.email), s.url && esc(s.url) ].filter(Boolean).join(" · ");
         const badges = [];
+        if (s.favorite) badges.push(`<span class="badge fav" title="Favorite">★ Favorite</span>`);
+        if (s.kind && s.kind !== "api_key") badges.push(`<span class="badge">${esc(kindLabel(s.kind))}</span>`);
+        for (const t of s.tags || []) badges.push(`<span class="badge tag">#${esc(t)}</span>`);
         if (s.owner && s.owner !== "human") {
             badges.push(`<span class="badge agent">${esc(agentLabel(s.owner))}</span>`);
         }
@@ -455,15 +866,20 @@ async function renderProject() {
             badges.push(`<span class="badge ${cls}">${txt}</span>`);
         }
         const card = el(`<div class="secret card">\n      <div class="head">${prov.svg}<span class="key mono">${esc(s.key)}</span><span class="pname">${esc(prov.name)}</span></div>\n      ${badges.length ? `<div class="badges">${badges.join("")}</div>` : ""}\n      ${sub ? `<div class="note">${sub}</div>` : ""}\n      ${s.note ? `<div class="note">${esc(s.note)}</div>` : ""}\n      <div class="val" data-val style="display:none"></div>\n      <div class="actions"></div></div>`);
+        card.dataset.key = s.key;
         const valEl = card.querySelector("[data-val]");
+        valEl.id = `value-${++fieldIds}`;
+        const ownActions = [];
         const actions = card.querySelector(".actions");
-        const showBtn = el(`<button class="iconbtn">Reveal</button>`);
+        const showBtn = el(`<button class="iconbtn" aria-expanded="false">Reveal</button>`);
+        showBtn.setAttribute("aria-controls", valEl.id);
         let shown = false;
         showBtn.onclick = async () => {
             if (shown) {
                 valEl.textContent = "";
                 valEl.style.display = "none";
                 showBtn.textContent = "Reveal";
+                showBtn.setAttribute("aria-expanded", "false");
                 shown = false;
                 return;
             }
@@ -474,12 +890,14 @@ async function renderProject() {
             valEl.textContent = lines.join("\n");
             valEl.style.display = "block";
             showBtn.textContent = "Hide";
+            showBtn.setAttribute("aria-expanded", "true");
             shown = true;
         };
         const copyBtn = el(`<button class="iconbtn">Copy</button>`);
         copyBtn.onclick = async () => {
             await human("copy", project, s.key);
             if (revision !== renderVersion) return;
+            announce(`Copied ${s.key}`);
             copyBtn.textContent = "Copied";
             copyBtn.classList.add("copied");
             setTimeout(() => {
@@ -496,23 +914,28 @@ async function renderProject() {
             };
             render();
         };
-        const delBtn = el(`<button class="iconbtn danger">Delete</button>`);
-        let armed = false;
+        const delBtn = el(`<button class="iconbtn danger" title="Move to the Trash; restore it there within 30 days">Move to Trash</button>`);
         delBtn.onclick = async () => {
-            if (!armed) {
-                armed = true;
-                delBtn.textContent = "Confirm?";
-                setTimeout(() => {
-                    armed = false;
-                    delBtn.textContent = "Delete";
-                }, 2500);
-                return;
-            }
             await window.vault.deleteSecret(project, s.key);
             render();
-            if (revision !== renderVersion) return;
         };
-        const ownActions = [];
+        const favBtn = el(`<button class="iconbtn" aria-pressed="${!!s.favorite}">${s.favorite ? "Unfavorite" : "Favorite"}</button>`);
+        favBtn.onclick = async () => {
+            await window.vault.setSecret(project, {
+                key: s.key,
+                favorite: !s.favorite
+            });
+            render();
+        };
+        const archBtn = el(`<button class="iconbtn" title="${s.archived ? "Back in the list, search and .env" : "Hide from the list, search, agents and .env"}">${s.archived ? "Unarchive" : "Archive"}</button>`);
+        archBtn.onclick = async () => {
+            await window.vault.setSecret(project, {
+                key: s.key,
+                archived: !s.archived
+            });
+            render();
+        };
+        if (s.hasOtp) ownActions.push(otpButton(project, s.key, revision));
         if (s.injectApproved === false) {
             const okBtn = el(`<button class="iconbtn">Approve for .env</button>`);
             okBtn.onclick = async () => {
@@ -542,7 +965,7 @@ async function renderProject() {
             };
             ownActions.push(dlg);
         }
-        [ showBtn, copyBtn, editBtn, ...ownActions, delBtn ].forEach(b => actions.appendChild(b));
+        [ showBtn, copyBtn, editBtn, ...ownActions, favBtn, archBtn, delBtn ].forEach(b => actions.appendChild(b));
         scroll.appendChild(card);
     }
     const del = el(`<button class="btn danger" style="margin-top:24px">Delete project</button>`);
@@ -566,6 +989,20 @@ async function renderProject() {
     };
     scroll.appendChild(del);
     $app.appendChild(scroll);
+    if (view.focusKey) {
+        const card = [ ...scroll.querySelectorAll(".secret.card") ].find(c => c.dataset.key === view.focusKey);
+        view.focusKey = null;
+        if (card) {
+            card.scrollIntoView({
+                block: "center"
+            });
+            card.classList.add("flash");
+            card.tabIndex = -1;
+            card.focus({
+                preventScroll: true
+            });
+        }
+    }
 }
 
 function renderProviderPicker(project) {
@@ -582,7 +1019,7 @@ function renderProviderPicker(project) {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label">Add to ${esc(project)}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Add to ${esc(project)}</h1></div>`));
     scroll.appendChild(el(`<div class="note" style="margin:-4px 2px 12px">Which service is this for?</div>`));
     const grid = el(`<div class="picker-grid"></div>`);
     for (const p of PROVIDERS) {
@@ -616,6 +1053,8 @@ async function renderSecret() {
         current = {
             ...meta,
             ...revealed,
+            fields: meta.fields || [],
+            secretFields: revealed.fields || [],
             key: editing
         };
         if (!view.provider) view.provider = current.provider;
@@ -640,8 +1079,9 @@ async function renderSecret() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label" style="display:flex;align-items:center;gap:7px">${prov.svg}${esc(prov.name)}</span><span class="label">${editing ? "Edit" : "New"}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label" style="display:flex;align-items:center;gap:7px">${prov.svg}${esc(prov.name)}</h1><span class="label">${editing ? "Edit" : "New"}</span></div>`));
     if (prov.type === "password") buildPasswordForm(scroll, project, prov, editing, current); else if (prov.type === "custom") buildCustomForm(scroll, project, prov, editing, current); else buildKeysForm(scroll, project, prov, editing, current);
+    if (editing) itemTail(scroll, project, editing, current);
     $app.appendChild(scroll);
 }
 
@@ -651,14 +1091,21 @@ function fieldBlock(labelHtml) {
 
 const OPTIONAL = ` <span class="optional">(optional)</span>`;
 
-async function persist(project, payload, editing) {
+async function persist(project, payload, editing, err) {
     const key = payload.key.trim();
-    if (editing && editing !== key) throw new Error("Key names cannot change during an edit; create a new entry instead");
-    await window.vault.setSecret(project, {
-        ...payload,
-        key: key
-    });
-    if (editing && editing !== key) throw new Error("Create a separate key to rename an existing entry");
+    if (editing && editing !== key) {
+        err.textContent = "Key names cannot change during an edit; create a new entry instead";
+        return;
+    }
+    try {
+        await window.vault.setSecret(project, {
+            ...payload,
+            key: key
+        });
+    } catch (e) {
+        err.textContent = cleanError(e);
+        return;
+    }
     view = {
         name: "project",
         project: project
@@ -671,9 +1118,9 @@ function accountFields(current) {
     const box = el(`<div class="field acct-box"></div>`);
     const user = el(`<input type="text" placeholder="Username" value="${esc(current ? current.username : "")}" />`);
     const email = el(`<input type="text" placeholder="Email" value="${esc(current ? current.email : "")}" />`);
-    const pass = el(`<input type="password" placeholder="Account password" value="${esc(current ? current.password : "")}" />`);
+    const pass = el(`<input type="password" placeholder="Account password" autocomplete="off" value="${esc(current ? current.password : "")}" />`);
     const url = el(`<input type="text" placeholder="URL" value="${esc(current ? current.url : "")}" />`);
-    [ user, email, pass, url ].forEach(n => box.appendChild(n));
+    [ labeled("Username", user), labeled("Email", email), labeled("Account password", passwordRow(pass), pass), labeled("URL", url) ].forEach(n => box.appendChild(n));
     return {
         nodes: [ head, box ],
         get: () => ({
@@ -687,10 +1134,10 @@ function accountFields(current) {
 
 function metaFields(prov, current) {
     const permBlock = fieldBlock("Permission level" + OPTIONAL);
-    const permGrid = el(`<div class="provider-grid"></div>`);
+    const permGrid = el(`<div class="provider-grid" role="group" aria-label="Permission levels"></div>`);
     const permInput = el(`<input type="text" placeholder="e.g. service_role (full)" value="${esc(current ? current.permission : "")}" style="margin-top:8px" />`);
     for (const lvl of prov.permissions || []) {
-        const chip = el(`<div class="pchip"><span>${esc(lvl)}</span></div>`);
+        const chip = el(`<button type="button" class="pchip" aria-label="Set permission to ${esc(lvl)}"><span>${esc(lvl)}</span></button>`);
         chip.onclick = () => {
             permInput.value = lvl;
         };
@@ -699,13 +1146,13 @@ function metaFields(prov, current) {
     permBlock.appendChild(permGrid);
     permBlock.appendChild(permInput);
     const expBlock = fieldBlock("Expires" + OPTIONAL);
-    const expGrid = el(`<div class="provider-grid"></div>`);
+    const expGrid = el(`<div class="provider-grid" role="group" aria-label="Expires"></div>`);
     const dateInput = el(`<input type="date" style="margin-top:8px;display:none" />`);
     let expiresAt = current && current.expiresAt ? current.expiresAt : "";
     const presets = [ [ "No expiry", 0 ], [ "24 hours", 1 ], [ "7 days", 7 ], [ "30 days", 30 ], [ "90 days", 90 ], [ "Custom…", -1 ] ];
-    const setActive = label => [ ...expGrid.children ].forEach(c => c.classList.toggle("sel", c.dataset.label === label));
+    const setActive = label => [ ...expGrid.children ].forEach(c => press(c, c.dataset.label === label));
     for (const [label, days] of presets) {
-        const chip = el(`<div class="pchip" data-label="${esc(label)}"><span>${esc(label)}</span></div>`);
+        const chip = el(`<button type="button" class="pchip" aria-pressed="false" data-label="${esc(label)}"><span>${esc(label)}</span></button>`);
         chip.onclick = () => {
             if (days === 0) {
                 expiresAt = "";
@@ -742,7 +1189,7 @@ function metaFields(prov, current) {
 
 function buildKeysForm(scroll, project, prov, editing, current) {
     const whichField = fieldBlock("Which key");
-    const opts = el(`<div class="provider-grid"></div>`);
+    const opts = el(`<div class="provider-grid" role="group" aria-label="Which key"></div>`);
     whichField.appendChild(opts);
     const keyField = fieldBlock('Key name <span class="optional">(the env variable)</span>');
     const keyInput = el(`<input type="text" placeholder="${esc(prov.fields[0] ? prov.fields[0].key : "API_KEY")}" value="${esc(current ? current.key : "")}" />`);
@@ -750,7 +1197,8 @@ function buildKeysForm(scroll, project, prov, editing, current) {
     function paintOpts() {
         opts.innerHTML = "";
         for (const f of prov.fields) {
-            const chip = el(`<div class="pchip ${f.key === keyInput.value ? "sel" : ""}" title="${esc(f.key)}"><span>${esc(f.label)}</span></div>`);
+            const chip = el(`<button type="button" class="pchip" title="${esc(f.key)}"><span>${esc(f.label)}</span></button>`);
+            press(chip, f.key === keyInput.value);
             chip.onclick = () => {
                 keyInput.value = f.key;
                 paintOpts();
@@ -768,6 +1216,7 @@ function buildKeysForm(scroll, project, prov, editing, current) {
     noteField.appendChild(noteInput);
     const meta = metaFields(prov, current);
     const acct = accountFields(current);
+    const extra = itemExtras(prov, current);
     const err = el(`<div class="err"></div>`);
     const save = el(`<button class="btn primary">Save key</button>`);
     save.onclick = () => {
@@ -781,10 +1230,11 @@ function buildKeysForm(scroll, project, prov, editing, current) {
             provider: prov.id,
             note: noteInput.value.trim(),
             ...meta.get(),
-            ...acct.get()
-        }, editing);
+            ...acct.get(),
+            ...extra.get()
+        }, editing, err);
     };
-    [ whichField, keyField, valField, ...meta.nodes, noteField, ...acct.nodes, err, save ].forEach(n => scroll.appendChild(n));
+    [ whichField, keyField, valField, ...meta.nodes, noteField, ...acct.nodes, ...extra.nodes, err, save ].forEach(n => scroll.appendChild(n));
     paintOpts();
 }
 
@@ -799,14 +1249,15 @@ function buildPasswordForm(scroll, project, prov, editing, current) {
     const emailInput = el(`<input type="text" placeholder="login@example.com" value="${esc(current ? current.email : "")}" />`);
     emailField.appendChild(emailInput);
     const passField = fieldBlock("Password");
-    const passInput = el(`<input type="text" placeholder="the password" value="${esc(current ? current.value : "")}" />`);
-    passField.appendChild(passInput);
+    const passInput = el(`<input type="password" placeholder="the password" autocomplete="off" value="${esc(current ? current.value : "")}" />`);
+    passField.appendChild(passwordRow(passInput));
     const urlField = fieldBlock("URL" + OPTIONAL);
     const urlInput = el(`<input type="text" placeholder="https://…" value="${esc(current ? current.url : "")}" />`);
     urlField.appendChild(urlInput);
     const noteField = fieldBlock("Note" + OPTIONAL);
     const noteInput = el(`<input type="text" placeholder="extra context" value="${esc(current ? current.note : "")}" />`);
     noteField.appendChild(noteInput);
+    const extra = itemExtras(prov, current);
     const err = el(`<div class="err"></div>`);
     const save = el(`<button class="btn primary">Save password</button>`);
     save.onclick = () => {
@@ -827,10 +1278,11 @@ function buildPasswordForm(scroll, project, prov, editing, current) {
             note: noteInput.value.trim(),
             username: userInput.value.trim(),
             email: emailInput.value.trim(),
-            url: urlInput.value.trim()
-        }, editing);
+            url: urlInput.value.trim(),
+            ...extra.get()
+        }, editing, err);
     };
-    [ labelField, userField, emailField, passField, urlField, noteField, err, save ].forEach(n => scroll.appendChild(n));
+    [ labelField, userField, emailField, passField, urlField, noteField, ...extra.nodes, err, save ].forEach(n => scroll.appendChild(n));
     labelInput.focus();
 }
 
@@ -846,7 +1298,37 @@ function buildCustomForm(scroll, project, prov, editing, current) {
     noteField.appendChild(noteInput);
     const meta = metaFields(prov, current);
     const acct = accountFields(current);
+    const extra = itemExtras(prov, current);
     const err = el(`<div class="err"></div>`);
+    // An SSH key item: a new Ed25519 key, which the app's SSH agent can serve.
+    const sshGen = el(`<button type="button" class="btn sm ghost">Generate an SSH key</button>`);
+    const showSshGen = () => sshGen.style.display = extra.kind.value === "ssh_key" ? "" : "none";
+    extra.kind.addEventListener("change", showSshGen);
+    showSshGen();
+    let armed = false;
+    sshGen.onclick = async () => {
+        err.textContent = "";
+        if (valInput.value.trim() && !armed) {
+            armed = true;
+            sshGen.textContent = "Replace the value with a new key?";
+            setTimeout(() => {
+                armed = false;
+                sshGen.textContent = "Generate an SSH key";
+            }, 2500);
+            return;
+        }
+        armed = false;
+        sshGen.textContent = "Generate an SSH key";
+        try {
+            const k = await window.vault.generateSshKey(keyInput.value.trim());
+            valInput.value = k.privateKey;
+            extra.setField("public key", k.publicKey);
+            extra.setField("fingerprint", k.fingerprint);
+        } catch (e) {
+            err.textContent = cleanError(e);
+        }
+    };
+    valField.appendChild(sshGen);
     const save = el(`<button class="btn primary">Save</button>`);
     save.onclick = () => {
         if (!keyInput.value.trim()) {
@@ -860,10 +1342,11 @@ function buildCustomForm(scroll, project, prov, editing, current) {
             provider: "custom",
             note: noteInput.value.trim(),
             ...meta.get(),
-            ...acct.get()
-        }, editing);
+            ...acct.get(),
+            ...extra.get()
+        }, editing, err);
     };
-    [ keyField, valField, ...meta.nodes, noteField, ...acct.nodes, err, save ].forEach(n => scroll.appendChild(n));
+    [ keyField, valField, ...meta.nodes, noteField, ...acct.nodes, ...extra.nodes, err, save ].forEach(n => scroll.appendChild(n));
     keyInput.focus();
 }
 
@@ -882,7 +1365,7 @@ async function renderSettings() {
     }));
     const page = el(`<div class="scroll"></div>`);
     let scroll = page;
-    page.appendChild(el(`<div class="section"><span class="label">Settings</span></div>`));
+    page.appendChild(el(`<div class="section"><h1 class="label">Settings</h1></div>`));
     const s = await window.vault.getSettings();
     if (revision !== renderVersion) return;
     scroll = panel(page, "Export password");
@@ -904,6 +1387,104 @@ async function renderSettings() {
     soft.checked = s.lockPolicy === "soft";
     scroll.appendChild(softLabel);
     scroll.appendChild(el(`<p class="note">Off by default. With soft lock, the vault stays decrypted in memory and enrolled agents keep working while your Mac is locked, asleep or idle; anyone or anything that can act as your account in that time can use their grants. The Lock button always stops the API and clears the remembered password.</p>`));
+    const dp = await window.vault.getDesktopPrefs();
+    if (revision !== renderVersion) return;
+    const mac = document.documentElement.dataset.platform === "mac";
+    scroll = panel(page, mac ? "Menu bar & Quick Access" : "Tray & Quick Access");
+    const desktopBox = (text, checked, disabled = false) => {
+        const label = el(`<label class="toggle"><input type="checkbox" class="switch" /><span></span></label>`);
+        label.querySelector("span").textContent = text;
+        const box = label.querySelector("input");
+        box.checked = checked;
+        box.disabled = disabled;
+        scroll.appendChild(label);
+        return box;
+    };
+    const menuBar = desktopBox(mac ? "Keep VaultOS in the menu bar when the window closes" : "Keep VaultOS in the system tray when the window closes", dp.menuBar);
+    scroll.appendChild(el(`<p class="note">Closing the window still locks the vault. VaultOS then waits, locked, ${mac ? "in the menu bar" : "in the tray"} so Quick Access and Open are one click away. Quit from its menu.</p>`));
+    const shortcutField = fieldBlock("Quick Access shortcut");
+    const recorder = el(`<div class="concealed"><input type="text" readonly aria-label="Quick Access shortcut" /><button type="button" class="iconbtn">Record</button><button type="button" class="iconbtn">Turn off</button></div>`);
+    const [shortcutShown] = recorder.querySelectorAll("input");
+    const [recordBtn, offBtn] = recorder.querySelectorAll("button");
+    let shortcut = dp.shortcut;
+    const pretty = acc => !acc ? "Off" : mac ? acc.replace(/CommandOrControl|CmdOrCtrl|Command|Cmd/g, "⌘").replace(/Shift/g, "⇧").replace(/Alt|Option/g, "⌥").replace(/Control|Ctrl/g, "⌃").replace(/\+/g, "") : acc.replace(/CommandOrControl|CmdOrCtrl/g, "Ctrl");
+    const showShortcut = () => {
+        shortcutShown.value = pretty(shortcut);
+    };
+    showShortcut();
+    const shortcutNote = el(`<p class="note"></p>`);
+    shortcutNote.textContent = dp.shortcutError || "Opens Quick Access from any app: search, then press Return to copy.";
+    if (dp.shortcutError) shortcutNote.classList.add("err");
+    const KEY_NAMES = {
+        Space: "Space",
+        ArrowUp: "Up",
+        ArrowDown: "Down",
+        ArrowLeft: "Left",
+        ArrowRight: "Right",
+        Enter: "Return",
+        Tab: "Tab",
+        Backspace: "Backspace",
+        Delete: "Delete",
+        Home: "Home",
+        End: "End",
+        PageUp: "PageUp",
+        PageDown: "PageDown"
+    };
+    const record = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === "Escape") return stopRecording();
+        if ([ "Shift", "Control", "Alt", "Meta" ].includes(e.key)) return;
+        const key = KEY_NAMES[e.code] || (/^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : /^Digit\d$/.test(e.code) ? e.code.slice(5) : /^F\d{1,2}$/.test(e.code) ? e.code : null);
+        if (!key) return;
+        const mods = [ e.metaKey && (mac ? "CommandOrControl" : "Super"), e.ctrlKey && (mac ? "Control" : "CommandOrControl"), e.altKey && "Alt", e.shiftKey && "Shift" ].filter(Boolean);
+        if (!mods.length && !/^F\d/.test(key)) {
+            shortcutNote.textContent = "Include at least one modifier key, like ⌘ or Ctrl.";
+            return;
+        }
+        shortcut = [ ...mods, key ].join("+");
+        stopRecording();
+    };
+    const stopRecording = () => {
+        window.removeEventListener("keydown", record, true);
+        recordBtn.textContent = "Record";
+        showShortcut();
+    };
+    recordBtn.onclick = () => {
+        recordBtn.textContent = "Press keys…";
+        shortcutShown.value = "";
+        window.addEventListener("keydown", record, true);
+    };
+    offBtn.onclick = () => {
+        shortcut = "";
+        stopRecording();
+    };
+    shortcutField.appendChild(recorder);
+    scroll.appendChild(shortcutField);
+    scroll.appendChild(shortcutNote);
+    const atLogin = desktopBox(mac ? "Open at login, locked in the menu bar" : "Open at login, locked in the tray", dp.launchAtLogin, !dp.loginItemSupported);
+    const notifyApprovals = desktopBox("Notify me when an agent's key is waiting for approval", dp.notifyApprovals);
+    const notifyExpiry = desktopBox("Notify me about keys that expire within 7 days", dp.notifyExpiry);
+    scroll.appendChild(el(`<p class="note">Notifications never include key names, because they can appear on the lock screen.</p>`));
+    scroll = panel(page, "SSH agent", {
+        tag: dp.sshSocket ? "on" : "off"
+    });
+    const sshAgent = desktopBox("Serve SSH keys to ssh and Git", dp.sshAgent);
+    scroll.appendChild(el(`<p class="note">Off by default. While VaultOS is unlocked, ssh and Git can use the Ed25519 keys of SSH key items (Generate an SSH key in an item, or paste one without a passphrase). Each program asks for ${TOUCH_ID.available ? "Touch ID" : "your confirmation"} before its first signature, then for 10 minutes or until VaultOS locks. Keys never leave the vault; list them with <span class="mono">vaultos ssh keys</span>.</p>`));
+    if (dp.sshError) scroll.appendChild(el(`<div class="err"></div>`)).textContent = dp.sshError;
+    const sshSetup = el(`<pre class="val" style="white-space:pre-wrap"></pre>`);
+    sshSetup.textContent = `# ~/.ssh/config
+Host *
+  IdentityAgent "${dp.sshSocketPath || "(the data folder's ssh-agent.sock)"}"
+
+# Signing Git commits with a key from vaultos ssh keys
+git config --global gpg.format ssh
+git config --global gpg.ssh.program "${dp.sshSigner}"
+git config --global user.signingkey "key::ssh-ed25519 AAAA…"
+git config --global commit.gpgsign true`;
+    scroll.appendChild(sshSetup);
+    await browsersPanel(page);
+    if (revision !== renderVersion) return;
     scroll = panel(page, "Sync");
     const autoLabel = el(`<label class="toggle"><input type="checkbox" class="switch" />Sync automatically while unlocked</label>`);
     const auto = autoLabel.querySelector("input");
@@ -923,27 +1504,37 @@ async function renderSettings() {
     if (showTouchId) scroll = panel(page, "Touch ID", {
         tag: TOUCH_ID.available ? "available" : "not available now"
     });
-    const touchBox = (text, checked, needsRemember) => {
+    const touchBox = (text, checked) => {
         const label = el(`<label class="toggle"><input type="checkbox" class="switch" /><span></span></label>`);
         label.querySelector("span").textContent = text;
         const box = label.querySelector("input");
         box.checked = checked;
-        box.disabled = !checked && (!TOUCH_ID.available || needsRemember && !s.rememberPassword);
+        box.disabled = !checked && !TOUCH_ID.available;
         if (showTouchId) scroll.appendChild(label);
         return box;
     };
     if (showTouchId) {
-        scroll.appendChild(el(`<p class="note">Off by default. Needs background access above, because Touch ID unlock uses the password the Keychain remembers.</p>`));
+        scroll.appendChild(el(`<p class="note">Off by default. Touch ID unlock keeps its own copy of the master password, sealed by a key in this Mac's Secure Enclave that only your fingerprint can use; it does not need background access. It starts after the next time you enter the password, and asks for the password again if fingerprints change.</p>`));
     }
-    const touchUnlock = touchBox("Unlock this window with Touch ID", t.unlock === true, true);
-    const touchAuto = touchBox("Ask for Touch ID when the window opens", t.autoPrompt === true, true);
-    const touchHuman = touchBox("Confirm reveal, copy, export, approvals, agent and security changes with Touch ID", t.humanActions === true, true);
+    const touchUnlock = touchBox("Unlock this window with Touch ID", t.unlock === true);
+    const touchAuto = touchBox("Ask for Touch ID when the window opens", t.autoPrompt === true);
+    const touchHuman = touchBox("Confirm reveal, copy, export, approvals, agent and security changes with Touch ID", t.humanActions === true);
     if (showTouchId) scroll.appendChild(el(`<p class="note">After Lock, the master password is required once. Confirmations cover the next 30 seconds; when Touch ID cannot be shown or is cancelled, the master password is asked instead. Touch ID guards this window only: anything running as your account can still use agent tokens and an unlocked API.</p>`));
     scroll = page;
     const err = el(`<div class="err"></div>`);
     const save = el(`<button class="btn primary">Save settings</button>`);
     save.onclick = async () => {
         try {
+            const saved = await window.vault.setDesktopPrefs({
+                menuBar: menuBar.checked,
+                shortcut: shortcut,
+                launchAtLogin: atLogin.checked,
+                notifyApprovals: notifyApprovals.checked,
+                notifyExpiry: notifyExpiry.checked,
+                sshAgent: sshAgent.checked
+            });
+            shortcutNote.textContent = saved.shortcutError || "Opens Quick Access from any app: search, then press Return to copy.";
+            shortcutNote.classList.toggle("err", !!saved.shortcutError);
             await human("setSettings", {
                 ...input.value ? {
                     exportPassword: input.value
@@ -967,6 +1558,7 @@ async function renderSettings() {
             return;
         }
         err.textContent = "";
+        announce("Settings saved");
         save.textContent = "Saved ✓";
         save.classList.add("copied");
         setTimeout(() => {
@@ -990,7 +1582,7 @@ async function renderSettings() {
     const pwNew = el(`<input type="password" placeholder="New password" />`);
     const pwNew2 = el(`<input type="password" placeholder="Confirm new password" />`);
     const pwErr = el(`<div class="err"></div>`);
-    const pwOut = el(`<div class="val" style="display:none"></div>`);
+    const pwOut = el(`<div class="val" role="status" style="display:none"></div>`);
     const pwBtn = el(`<button class="btn ghost">Change master password</button>`);
     pwBtn.onclick = async () => {
         pwErr.textContent = "";
@@ -1021,10 +1613,72 @@ async function renderSettings() {
         }
         pwBtn.textContent = "Change master password";
     };
-    for (const n of [ pwOld, pwNew, pwNew2 ]) scroll.appendChild(n);
+    for (const [ n, text ] of [ [ pwOld, "Current password" ], [ pwNew, "New password" ], [ pwNew2, "Confirm new password" ] ]) scroll.appendChild(labeled(text, n));
     scroll.appendChild(pwErr);
     scroll.appendChild(pwBtn);
     scroll.appendChild(pwOut);
+    scroll = panel(page, "Secret Key");
+    const sk = await window.vault.secretKeyState();
+    if (revision !== renderVersion) return;
+    scroll.appendChild(el(`<p class="note">${sk.secretKey ? `This vault needs the master password and Secret Key ${esc(sk.id)} to open on a new device. This device keeps the key in its ${isMacPlatform() ? "Keychain" : "keyring"}. The Emergency Kit is a PDF with the key to print or store offline.` : "A Secret Key is a second, random key that the vault also needs on a new device, so the master password alone cannot open a copy of the vault file. You save its Emergency Kit first, and this device keeps the key."}</p>`));
+    const skPw = el(`<input type="password" placeholder="Master password" autocomplete="current-password" />`);
+    const skErr = el(`<div class="err" role="alert"></div>`);
+    const skOut = el(`<div class="note" role="status"></div>`);
+    scroll.appendChild(labeled("Master password", skPw));
+    scroll.appendChild(skErr);
+    const skRow = el(`<div class="navrow"></div>`);
+    const skAction = (label, channel, done, cls = "ghost") => {
+        const b = el(`<button class="btn ${cls}"></button>`);
+        b.textContent = label;
+        b.onclick = async () => {
+            skErr.textContent = skOut.textContent = "";
+            if (!skPw.value) {
+                skErr.textContent = "Enter the master password.";
+                skPw.focus();
+                return;
+            }
+            b.disabled = true;
+            try {
+                const r = await window.vault[channel](skPw.value);
+                if (revision !== renderVersion) return;
+                if (r && r.canceled) return;
+                skPw.value = "";
+                const note = done + (r && r.keychain === false ? ` This device could not update its ${isMacPlatform() ? "Keychain" : "keyring"}, so it will ask for the key at the next unlock.` : "");
+                if (channel === "saveEmergencyKit") {
+                    skOut.textContent = note;
+                    announce(note);
+                } else {
+                    announce(note);
+                    render();
+                }
+            } catch (e) {
+                skErr.textContent = cleanError(e);
+            } finally {
+                b.disabled = false;
+            }
+        };
+        skRow.appendChild(b);
+        return b;
+    };
+    if (sk.secretKey) {
+        skAction("Save Emergency Kit", "saveEmergencyKit", "Emergency Kit saved.");
+        skAction("Replace Secret Key", "setSecretKey", "The vault now uses a new Secret Key. Its Emergency Kit is saved; the earlier kit no longer opens the vault.");
+        const remove = skAction("Remove Secret Key", "removeSecretKey", "The vault no longer uses a Secret Key.", "danger");
+        const run = remove.onclick;
+        remove.onclick = () => {
+            if (remove.dataset.armed) return run();
+            remove.dataset.armed = "1";
+            remove.textContent = "Click again to remove";
+            setTimeout(() => {
+                delete remove.dataset.armed;
+                remove.textContent = "Remove Secret Key";
+            }, 4000);
+        };
+    } else {
+        skAction("Add a Secret Key", "setSecretKey", "The vault now uses a Secret Key. Keep the Emergency Kit you saved somewhere safe.", "primary");
+    }
+    scroll.appendChild(skRow);
+    scroll.appendChild(skOut);
     scroll = panel(page, "Agents, sync and history");
     const nav = el(`<div class="navrow"></div>`);
     const agentsBtn = el(`<button class="btn ghost">Agents</button>`);
@@ -1069,16 +1723,34 @@ async function renderAgents() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label">Agents</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">Agents</h1></div>`));
     scroll.appendChild(el(`<div class="note" style="margin:0 2px 14px">Any AI tool can be enrolled: Claude Code, Codex, Cursor, a script. Each gets its own token and its own scopes. Approve specific projects and folders. Agents can add keys only with the add scope; editing your keys also requires delegation and its matching scope.</div>`));
     const list = await window.vault.agents();
     if (revision !== renderVersion) return;
     const allScopes = await window.vault.allScopes();
     if (revision !== renderVersion) return;
+    const grants = await window.vault.accessGrants();
+    if (revision !== renderVersion) return;
     for (const a of list) {
-        const card = el(`<div class="secret card">\n      <div class="head"><span class="key">${esc(a.name)}</span><span class="pname">${a.revoked ? "revoked" : "active"}</span></div>\n      <div class="badges">${a.scopes.map(x => `<span class="badge ${x === "reveal" ? "exp-amber" : "perm"}">${esc(x)}</span>`).join("")}${a.allProjects ? `<span class="badge allaccess">all projects</span>` : ""}${a.anyRoot ? `<span class="badge allaccess">any folder</span>` : ""}</div>\n      <div class="note"><span class="mono">${esc(a.ref)}</span> · enrolled ${esc((a.enrolledAt || "").slice(0, 10))}${a.lastSeenAt ? ` · last seen ${esc(a.lastSeenAt.slice(0, 16).replace("T", " "))}` : " · never used"}</div>\n      <div class="val" data-tok style="display:none"></div>\n      <div class="actions"></div></div>`);
+        const card = el(`<div class="secret card">\n      <div class="head"><span class="key">${esc(a.name)}</span><span class="pname">${a.revoked ? "revoked" : "active"}</span></div>\n      <div class="badges">${a.scopes.map(x => `<span class="badge ${x === "reveal" ? "exp-amber" : "perm"}">${esc(x)}</span>`).join("")}${a.allProjects ? `<span class="badge allaccess">all projects</span>` : ""}${a.anyRoot ? `<span class="badge allaccess">any folder</span>` : ""}</div>\n      ${(a.runCommands || []).length ? `<div class="note">Runs with secrets: ${a.runCommands.map(c => `<span class="mono">${esc(c)}</span>`).join(", ")}</div>` : ""}<div class="note"><span class="mono">${esc(a.ref)}</span> · enrolled ${esc((a.enrolledAt || "").slice(0, 10))}${a.lastSeenAt ? ` · last seen ${esc(a.lastSeenAt.slice(0, 16).replace("T", " "))}` : " · never used"}</div>\n      <div class="val" data-tok style="display:none"></div>\n      <div class="actions"></div></div>`);
         const actions = card.querySelector(".actions");
         const tok = card.querySelector("[data-tok]");
+        // Temporary access the human confirmed when the agent asked: in memory only.
+        const mine = grants.filter(g => g.agentId === a.id);
+        if (mine.length) {
+            const temp = el(`<div class="note"></div>`);
+            temp.textContent = "Temporary access: " + mine.map(g => `${g.scopes.join(", ")} on ${g.project} until ${new Date(g.expiresAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit"
+            })}`).join("; ");
+            const end = el(`<button class="iconbtn">End temporary access</button>`);
+            end.onclick = async () => {
+                await window.vault.endAccess(a.id);
+                render();
+            };
+            card.insertBefore(temp, actions);
+            actions.appendChild(end);
+        }
         const revealScope = el(`<button class="iconbtn">${a.scopes.includes("reveal") ? "Revoke reveal" : "Grant reveal"}</button>`);
         revealScope.onclick = async () => {
             const next = a.scopes.includes("reveal") ? a.scopes.filter(x => x !== "reveal") : [ ...a.scopes, "reveal" ];
@@ -1123,7 +1795,22 @@ async function renderAgents() {
             };
             if (revision !== renderVersion) return;
         };
-        [ accessBtn, revealScope, reissue, revoke ].forEach(b => actions.appendChild(b));
+        const runBtn = el('<button class="iconbtn" title="Commands it may run with a project\'s values (run scope)">Commands…</button>');
+        runBtn.onclick = () => {
+            runBtn.disabled = true;
+            const box = fieldBlock("Commands it may run with a project's values, one per line: a program and optionally its first arguments");
+            const list = el(`<textarea rows="4" class="mono" placeholder="npm test&#10;cargo test"></textarea>`);
+            list.value = (a.runCommands || []).join("\n");
+            box.appendChild(list);
+            const saveRun = el('<button class="btn ghost sm">Save commands</button>');
+            card.appendChild(box);
+            card.appendChild(saveRun);
+            saveRun.onclick = async () => {
+                await human("setAgentRunCommands", a.id, list.value.split("\n").map(c => c.trim()).filter(Boolean));
+                render();
+            };
+        };
+        [ accessBtn, runBtn, revealScope, reissue, revoke ].forEach(b => actions.appendChild(b));
         scroll.appendChild(card);
     }
     if (!list.length) scroll.appendChild(el(`<div class="empty"><div class="big">No agents</div><p>Nothing can write to this vault yet.</p></div>`));
@@ -1132,18 +1819,19 @@ async function renderAgents() {
     const nameIn = el(`<input type="text" placeholder="claude-code, codex, cursor…" />`);
     field.appendChild(nameIn);
     enrol.appendChild(field);
-    const scopeWrap = el(`<div class="badges" style="margin:0 2px 12px"></div>`);
+    const scopeWrap = el(`<div class="badges" role="group" aria-label="Scopes" style="margin:0 2px 12px"></div>`);
     const chosen = new Set([ "read", "inject" ]);
     for (const sc of allScopes) {
-        const b = el(`<button type="button" class="badge ${chosen.has(sc) ? "perm" : ""}">${esc(sc)}</button>`);
+        const b = el(`<button type="button" class="badge scope">${esc(sc)}</button>`);
+        b.setAttribute("aria-pressed", String(chosen.has(sc)));
         b.onclick = () => {
             chosen.has(sc) ? chosen.delete(sc) : chosen.add(sc);
-            b.className = `badge ${chosen.has(sc) ? "perm" : ""}`;
+            b.setAttribute("aria-pressed", String(chosen.has(sc)));
         };
         scopeWrap.appendChild(b);
     }
     enrol.appendChild(scopeWrap);
-    enrol.appendChild(el(`<div class="note" style="margin:-4px 2px 12px">reveal is off by default. An agent without it can still write a working .env with inject, it just never sees a value.</div>`));
+    enrol.appendChild(el(`<div class="note" style="margin:-4px 2px 12px">reveal is off by default. An agent without it can still write a working .env with inject, or start a command you allow with run, without seeing a value.</div>`));
     const access = await accessPicker(enrol);
     if (revision !== renderVersion) return;
     const out = el(`<div class="val" style="display:none"></div>`);
@@ -1185,7 +1873,7 @@ async function renderDelegate() {
         }
     }));
     const scroll = el(`<div class="scroll"></div>`);
-    scroll.appendChild(el(`<div class="section"><span class="label">${esc(secret)}</span></div>`));
+    scroll.appendChild(el(`<div class="section"><h1 class="label">${esc(secret)}</h1></div>`));
     scroll.appendChild(el(`<div class="note" style="margin:0 2px 14px">Delegating lets an agent rotate or update this key. It stays yours and stays here; you can take it back at any time.</div>`));
     const all = await window.vault.secrets(project);
     if (revision !== renderVersion) return;
@@ -1292,15 +1980,17 @@ async function renderSync() {
             }
         }
     }));
-    const scroll = el('<div class="scroll"><h2>Encrypted sync</h2><p class="note">Optional. Uses your dedicated Git repository and age. Follow docs/SYNC.md to configure transport and verify each peer identity through a trusted channel.</p></div>');
+    const scroll = el('<div class="scroll"><h1 class="pageh">Encrypted sync</h1><p class="note">Optional. Uses your dedicated Git repository and age. Follow docs/SYNC.md to configure transport and verify each peer identity through a trusted channel.</p></div>');
     $app.appendChild(scroll);
     const output = el('<pre class="val" style="white-space:pre-wrap"></pre>');
     const run = async fn => {
         try {
             const result = await fn();
             if (revision === renderVersion) output.textContent = JSON.stringify(result, null, 2);
+            announce("Done; the result is below.");
         } catch (e) {
             if (revision === renderVersion) output.textContent = e.message;
+            announce(e.message);
         }
     };
     const label = el('<input placeholder="Machine label (public in sync repository)" />');
@@ -1328,10 +2018,10 @@ async function renderSync() {
     const machineRow = el('<div class="btnrow"></div>');
     machineRow.appendChild(init);
     machineRow.appendChild(identity);
-    thisMachine.appendChild(label);
+    thisMachine.appendChild(labeled("Machine label", label));
     thisMachine.appendChild(machineRow);
     const peers = group("Peers");
-    for (const n of [ peer, trust ]) peers.appendChild(n);
+    for (const n of [ labeled("Peer identity", peer), trust ]) peers.appendChild(n);
     const records = group("Move records");
     const moveRow = el('<div class="btnrow halves"></div>');
     moveRow.appendChild(push);
@@ -1360,7 +2050,7 @@ async function renderHistory() {
     if (!entries.length) scroll.appendChild(el(`<div class="empty"><div class="big">No changes yet</div><p>Edits to projects and keys will show up here.</p></div>`));
     for (const entry of entries) {
         const row = el(`<div class="secret card"><div class="key">${esc(entry.action)} ${esc(entry.key || "")}</div><p class="note">${esc(entry.ts)} · ${esc(agentLabel(entry.actor))}</p></div>`);
-        if (!entry.reverted && [ "create_secret", "update_secret", "delete_secret", "create_project", "delete_project" ].includes(entry.action)) {
+        if (!entry.reverted && [ "create_secret", "update_secret", "delete_secret", "update_meta", "trash_secret", "restore_secret", "create_project", "delete_project" ].includes(entry.action)) {
             const undo = el('<button class="btn ghost sm">Undo</button>');
             undo.onclick = async () => {
                 await window.vault.revert(entry.id);
@@ -1448,11 +2138,29 @@ window.addEventListener("focus", async () => {
 });
 
 window.vault.onLocked(() => {
+    for (const modal of document.querySelectorAll(".modal")) {
+        const cancel = modal.querySelector(".btn.ghost");
+        if (cancel) cancel.click(); else modal.remove();
+    }
     AGENTS = [];
     view = {
         name: "unlock"
     };
     render();
+});
+
+window.vault.onUnlocked(() => {
+    if (view.name === "unlock") afterUnlockRoute();
+});
+
+window.vault.onCommand(() => runCommand());
+
+document.addEventListener("keydown", e => {
+    const mod = document.documentElement.dataset.platform === "mac" ? e.metaKey : e.ctrlKey;
+    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k" && isUnlockedView()) {
+        e.preventDefault();
+        openSearch();
+    }
 });
 
 window.addEventListener("unhandledrejection", event => {
@@ -1479,6 +2187,18 @@ const within = (node, sel) => [ ...node.matches(sel) ? [ node ] : [], ...node.qu
 
 new MutationObserver(mutations => {
     const added = mutations.flatMap(m => [ ...m.addedNodes ]).filter(n => n.nodeType === 1);
+    for (const e of added.flatMap(n => within(n, ".err:not([role])"))) e.setAttribute("role", "alert");
+    const heading = added.flatMap(n => within(n, "h1"))[0];
+    if (heading) {
+        document.title = `${heading.textContent.trim()} — VaultOS`;
+        if (focusHeading) {
+            focusHeading = false;
+            heading.tabIndex = -1;
+            if (!$app.contains(document.activeElement) || document.activeElement === $app) heading.focus({
+                preventScroll: true
+            });
+        }
+    }
     for (const input of added.flatMap(n => within(n, "input:not([aria-label]),textarea:not([aria-label]),select:not([aria-label])"))) if (!input.closest("label")) input.setAttribute("aria-label", input.closest(".field")?.querySelector(".label")?.textContent || input.placeholder || input.type);
     for (const row of added.flatMap(n => within(n, ".row:not([tabindex]),.pcard:not([tabindex]),.crumb:not([tabindex])"))) {
         row.tabIndex = 0;

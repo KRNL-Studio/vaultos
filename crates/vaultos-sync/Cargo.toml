@@ -1,0 +1,23 @@
+[package]
+name = "vaultos-sync"
+description = "VaultOS end-to-end encrypted sync over Git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+age = { version = "0.11", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+time = "0.3"
+vaultos-core = { path = "../vaultos-core" }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"

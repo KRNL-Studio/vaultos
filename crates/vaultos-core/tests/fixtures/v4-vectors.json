@@ -1,0 +1,27 @@
+{
+  "inputs": {
+    "password": "synthetic vector password",
+    "salt": "000102030405060708090a0b0c0d0e0f",
+    "kdf": {
+      "alg": "argon2id",
+      "m": 19456,
+      "t": 2,
+      "p": 1
+    },
+    "vaultId": "00112233445566778899aabbccddeeff",
+    "secretKey": "101112131415161718191a1b1c1d1e1f",
+    "vaultKey": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "fileBytes": "{\"v\":4}",
+    "boxNonce": "404142434445464748494a4b4c4d4e4f5051525354555657",
+    "boxPlaintext": "{\"name\":\"synthetic vault\"}"
+  },
+  "argon2id": "1e643c788618537c4791805899163a30adf2e7d9a9cba7648a827dcb1a6d55cb",
+  "accountUnlockKey": "44e06c2106281210c524de8e79221bc4c68304787414b6144752e0d2a98eca1f",
+  "accountUnlockKeyWithSecretKey": "ad6a72c3e6bc391001db03ef9a1a3c3d098ba0b6e33d270de3292e2d46c6394c",
+  "fileMacKey": "3da6dcb9a2c440f3951af34e079885f73dc3d63ed02a4e6822840d1318aa07b1",
+  "fileMac": "e6010302d4fb25053c0195679a420e0324d166891de23e36e125bd2793d7941c",
+  "boxAad": "7661756c746f732f76342f6d657461003030313132323333343435353636373738383939616162626363646465656666",
+  "boxCiphertext": "410303c84b03dfe5550d9656900b87519036e795b7626e3716fc192f15a8d2b21ee3ae92ed5bd6a60429",
+  "secretKeyDisplay": "VK1-0G2491-650N2R-BHG68T-3CE1T7-GZ17C8",
+  "secretKeyId": "472b562c"
+}

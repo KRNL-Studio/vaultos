@@ -9,3 +9,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  # The Rust workspace (the fuzz targets build against its lockfile). Updates arrive as
+  # reviewed PRs; cargo-deny in CI still checks advisories, licences and sources.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      rust-minor:
+        update-types: [minor, patch]

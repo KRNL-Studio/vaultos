@@ -1,0 +1,19 @@
+[package]
+name = "vaultos-client"
+description = "VaultOS daemon client: session discovery, agent tokens and requests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+vaultos-core = { path = "../vaultos-core" }
+libc = "0.2"
+percent-encoding = "2"
+serde_json = { version = "1", features = ["preserve_order"] }
+zeroize = "1"

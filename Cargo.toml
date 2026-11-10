@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["crates/vaultos-core", "crates/vaultos-daemon", "crates/vaultos-client", "crates/vaultos-mcp", "crates/vaultos-cli", "crates/vaultos-sync", "crates/vaultos-desktop"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.3.0-preview.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rohit3a/vaultos"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+print_stdout = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+# Smaller programs (the app bundle's budget is 24 MiB; Intel builds run about 2 MiB larger); the
+# crates that unlock, seal and sign keep full optimisation below.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+
+[profile.release.package]
+argon2 = { opt-level = 3 }
+blake2 = { opt-level = 3 }
+chacha20 = { opt-level = 3 }
+chacha20poly1305 = { opt-level = 3 }
+poly1305 = { opt-level = 3 }
+aes = { opt-level = 3 }
+aes-gcm = { opt-level = 3 }
+ghash = { opt-level = 3 }
+polyval = { opt-level = 3 }
+sha2 = { opt-level = 3 }
+curve25519-dalek = { opt-level = 3 }
+ed25519-dalek = { opt-level = 3 }
+scrypt = { opt-level = 3 }
+salsa20 = { opt-level = 3 }
+
+# Argon2 and the AEADs are far too slow unoptimised for tests that unlock a vault.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3

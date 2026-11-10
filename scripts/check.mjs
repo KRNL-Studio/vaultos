@@ -4,7 +4,9 @@ import path from "node:path";
 
 import { execFileSync } from "node:child_process";
 
-const excluded = new Set([ ".git", "node_modules", "dist", "out", "native" ]);
+import { version } from "./rust-dist.mjs";
+
+const excluded = new Set([ ".git", "node_modules", "dist", "out", "target" ]);
 
 function walk(dir) {
     return readdirSync(dir, {
@@ -24,4 +26,14 @@ const p = JSON.parse(readFileSync("package.json")), lock = JSON.parse(readFileSy
 
 if (p.version !== lock.packages[""].version) throw new Error("Lockfile version differs");
 
-console.log("Source syntax, dependency version and distribution notices checked.");
+if (p.version !== version()) throw new Error(`package.json is ${p.version}; the Cargo workspace is ${version()}`);
+
+const tauri = JSON.parse(readFileSync("crates/vaultos-desktop/tauri.conf.json"));
+
+if (tauri.version !== version()) throw new Error(`tauri.conf.json is ${tauri.version}; the Cargo workspace is ${version()}`);
+
+const extension = JSON.parse(readFileSync("extension/manifest.json"));
+
+if (extension.version_name !== version() || extension.version !== version().replace(/-.*$/, "")) throw new Error(`extension/manifest.json is ${extension.version_name}; the Cargo workspace is ${version()}`);
+
+console.log("Script syntax, versions and distribution notices checked.");

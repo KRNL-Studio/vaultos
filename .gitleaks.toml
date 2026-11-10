@@ -1,0 +1,16 @@
+# gitleaks's default rules, with two exceptions: the browser extension's manifest carries the
+# public half of the key that fixes the extension's ID, which is public by design, and the
+# format's known-answer vectors are keys derived from synthetic inputs, which the vectors test
+# recomputes, so any other value there fails CI.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "The extension's public key in extension/manifest.json"
+condition = "AND"
+paths = ['''^extension/manifest\.json$''']
+regexes = ['''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA''']
+
+[[allowlists]]
+description = "Format v4 known-answer vectors, derived from synthetic inputs"
+paths = ['''^crates/vaultos-core/tests/fixtures/v4-vectors\.json$''']

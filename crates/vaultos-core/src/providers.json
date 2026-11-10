@@ -1,0 +1,138 @@
+[
+ {
+  "id": "vercel",
+  "keys": [
+   "VERCEL_TOKEN",
+   "VERCEL_ORG_ID",
+   "VERCEL_PROJECT_ID"
+  ]
+ },
+ {
+  "id": "supabase",
+  "keys": [
+   "NEXT_PUBLIC_SUPABASE_URL",
+   "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+   "SUPABASE_SERVICE_ROLE_KEY",
+   "SUPABASE_JWT_SECRET",
+   "SUPABASE_DB_PASSWORD",
+   "SUPABASE_ACCESS_TOKEN"
+  ]
+ },
+ {
+  "id": "anthropic",
+  "keys": [
+   "ANTHROPIC_API_KEY"
+  ]
+ },
+ {
+  "id": "gemini",
+  "keys": [
+   "GEMINI_API_KEY",
+   "GOOGLE_GENERATIVE_AI_API_KEY"
+  ]
+ },
+ {
+  "id": "openai",
+  "keys": [
+   "OPENAI_API_KEY",
+   "OPENAI_ORG_ID"
+  ]
+ },
+ {
+  "id": "razorpay",
+  "keys": [
+   "RAZORPAY_KEY_ID",
+   "RAZORPAY_KEY_SECRET",
+   "RAZORPAY_WEBHOOK_SECRET"
+  ]
+ },
+ {
+  "id": "stripe",
+  "keys": [
+   "STRIPE_SECRET_KEY",
+   "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY",
+   "STRIPE_WEBHOOK_SECRET"
+  ]
+ },
+ {
+  "id": "sanity",
+  "keys": [
+   "NEXT_PUBLIC_SANITY_PROJECT_ID",
+   "NEXT_PUBLIC_SANITY_DATASET",
+   "SANITY_API_READ_TOKEN",
+   "SANITY_API_WRITE_TOKEN"
+  ]
+ },
+ {
+  "id": "cloudinary",
+  "keys": [
+   "CLOUDINARY_CLOUD_NAME",
+   "CLOUDINARY_API_KEY",
+   "CLOUDINARY_API_SECRET",
+   "CLOUDINARY_URL"
+  ]
+ },
+ {
+  "id": "clerk",
+  "keys": [
+   "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
+   "CLERK_SECRET_KEY"
+  ]
+ },
+ {
+  "id": "resend",
+  "keys": [
+   "RESEND_API_KEY"
+  ]
+ },
+ {
+  "id": "github",
+  "keys": [
+   "GITHUB_TOKEN",
+   "GITHUB_CLIENT_ID",
+   "GITHUB_CLIENT_SECRET"
+  ]
+ },
+ {
+  "id": "cloudflare",
+  "keys": [
+   "CLOUDFLARE_API_TOKEN",
+   "CLOUDFLARE_ACCOUNT_ID",
+   "CLOUDFLARE_ZONE_ID"
+  ]
+ },
+ {
+  "id": "upstash",
+  "keys": [
+   "UPSTASH_REDIS_REST_URL",
+   "UPSTASH_REDIS_REST_TOKEN"
+  ]
+ },
+ {
+  "id": "mongodb",
+  "keys": [
+   "MONGODB_URI"
+  ]
+ },
+ {
+  "id": "twilio",
+  "keys": [
+   "TWILIO_ACCOUNT_SID",
+   "TWILIO_AUTH_TOKEN"
+  ]
+ },
+ {
+  "id": "openrouter",
+  "keys": [
+   "OPENROUTER_API_KEY"
+  ]
+ },
+ {
+  "id": "password",
+  "keys": []
+ },
+ {
+  "id": "custom",
+  "keys": []
+ }
+]

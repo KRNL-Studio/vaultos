@@ -1,0 +1,58 @@
+[package]
+name = "vaultos-desktop"
+description = "VaultOS desktop app: a Tauri v2 shell over the Rust core, the menu bar item and Quick Access"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "vaultos-desktop"
+path = "src/main.rs"
+
+[features]
+# Debug-only hooks for scripts/test-desktop-ui.mjs. Release builds refuse it.
+ui-test = []
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+vaultos-core = { path = "../vaultos-core" }
+vaultos-client = { path = "../vaultos-client" }
+vaultos-daemon = { path = "../vaultos-daemon" }
+vaultos-sync = { path = "../vaultos-sync" }
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tauri = { version = "2.11", features = ["custom-protocol", "tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2.3"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "signal"] }
+zeroize = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+objc2-local-authentication = "0.3"
+security-framework = "3"
+security-framework-sys = "2"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+arboard = "3"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

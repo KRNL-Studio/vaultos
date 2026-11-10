@@ -1,0 +1,88 @@
+# Fuzz targets for the parsers that read untrusted bytes, and for masking. Run them all with
+# `sh scripts/fuzz.sh [SECONDS]`, which names the toolchain and cargo-fuzz version, or one:
+#   cargo +nightly-2026-11-01 fuzz run -O mask_stream
+[package]
+name = "vaultos-core-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+vaultos-core = { path = "../crates/vaultos-core" }
+
+# Its own workspace, so the main one never builds libFuzzer.
+[workspace]
+
+[[bin]]
+name = "vault_file"
+path = "fuzz_targets/vault_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secret_key"
+path = "fuzz_targets/secret_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "v3_envelope"
+path = "fuzz_targets/v3_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mask_stream"
+path = "fuzz_targets/mask_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "env_file"
+path = "fuzz_targets/env_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "references"
+path = "fuzz_targets/references.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otp_uri"
+path = "fuzz_targets/otp_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "site_url"
+path = "fuzz_targets/site_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_agent"
+path = "fuzz_targets/ssh_agent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_file"
+path = "fuzz_targets/import_file.rs"
+test = false
+doc = false
+bench = false

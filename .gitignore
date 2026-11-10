@@ -21,3 +21,7 @@ playwright-report/
 .installed-at
 coverage/
 work/
+/target/
+
+# Tauri regenerates these on every build.
+crates/vaultos-desktop/gen/
