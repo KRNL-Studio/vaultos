@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0-preview.4 (2026-11-11)
 
 - `VAULTOS_AGENT=auto` matches the folders in a calling program's path as well as its file name, so a client installed under a version number (`~/.claude/remote/ccd-cli/2.1.3`) is still found as `claude`.
 

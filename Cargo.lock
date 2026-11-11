@@ -5818,7 +5818,7 @@ dependencies = [
 
 [[package]]
 name = "vaultos-cli"
-version = "0.3.0-preview.3"
+version = "0.3.0-preview.4"
 dependencies = [
  "clap",
  "rpassword",
@@ -5835,7 +5835,7 @@ dependencies = [
 
 [[package]]
 name = "vaultos-client"
-version = "0.3.0-preview.3"
+version = "0.3.0-preview.4"
 dependencies = [
  "libc",
  "percent-encoding",
@@ -5847,7 +5847,7 @@ dependencies = [
 
 [[package]]
 name = "vaultos-core"
-version = "0.3.0-preview.3"
+version = "0.3.0-preview.4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -5879,7 +5879,7 @@ dependencies = [
 
 [[package]]
 name = "vaultos-daemon"
-version = "0.3.0-preview.3"
+version = "0.3.0-preview.4"
 dependencies = [
  "bytes",
  "clap",
@@ -5901,7 +5901,7 @@ dependencies = [
 
 [[package]]
 name = "vaultos-desktop"
-version = "0.3.0-preview.3"
+version = "0.3.0-preview.4"
 dependencies = [
  "aes",
  "arboard",
@@ -5935,7 +5935,7 @@ dependencies = [
 
 [[package]]
 name = "vaultos-mcp"
-version = "0.3.0-preview.3"
+version = "0.3.0-preview.4"
 dependencies = [
  "rmcp",
  "serde_json",
@@ -5949,7 +5949,7 @@ dependencies = [
 
 [[package]]
 name = "vaultos-sync"
-version = "0.3.0-preview.3"
+version = "0.3.0-preview.4"
 dependencies = [
  "age",
  "serde",
