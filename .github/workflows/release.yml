@@ -49,6 +49,7 @@ jobs:
             dist/*.sha256
             dist/*.cdx.json
           if-no-files-found: error
+          retention-days: 7
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -81,6 +82,7 @@ jobs:
             dist/*.sha256
             dist/*.cdx.json
           if-no-files-found: error
+          retention-days: 7
   publish:
     needs: [build, linux]
     runs-on: ubuntu-latest
