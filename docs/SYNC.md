@@ -27,6 +27,26 @@ Manifests sign ciphertext digests, not plaintext. Unlike the retired format 1, t
 
 The local index (`sync-index.json` in the data directory) remembers what was last synced, each peer's latest counter and the recipient list. Its record hashes are keyed with a key derived from this device's signing key, and the whole file carries an HMAC under another, so it reveals nothing to someone who copies it, and a modified index stops sync with `Invalid sync index; restore a trusted backup`. `vaultos backup` copies it with the vault and audit log. A device restored without it still continues its push counter from its manifest in the repository, but forgets which manifests it had seen, so it cannot tell a complete older copy of the repository from the current one.
 
+### Set up from the repository address
+
+The short way, in the app (**Settings → Sync**) or with the CLI. Create an empty private repository, then on each device:
+
+```sh
+vaultos --stop-backend sync setup git@example.com:you/vaultos-sync.git 'Device A'
+```
+
+The first device starts the repository and pushes. Every later device clones it and lists the devices already there:
+
+```sh
+vaultos sync pending                  # each waiting device, with its code
+vaultos sync approve DEVICE_ID 'A1B2 C3D4 E5F6 0718'
+vaultos sync push
+```
+
+A device's code is the first 64 bits of its fingerprint. Each device shows its own (`vaultos sync identity`, or **This device** in the app). Approve a device only when the code listed for it is the code that device shows for itself; the repository cannot vouch for it. Both sides approve each other: the new device approves the existing ones and pushes, then an existing device runs `sync pending`, approves the new one and pushes, which encrypts every record for it. Then pull on the new device. In the app the same steps are **Set up sync**, **Codes match, add it** and **Sync now**.
+
+The address must not contain a password or token. The sections below do the same by hand.
+
 ### First device
 
 Create a dedicated empty checkout with `git init -b main /absolute/new/sync-repository`, set a repository-local Git author you want recorded, and add the private remote with `git remote add origin <your-private-remote>`. Do not use a URL with an embedded access token.

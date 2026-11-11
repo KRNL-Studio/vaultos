@@ -143,6 +143,28 @@ fn is_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// The short code people compare between two devices: the first 64 bits of a device's
+/// fingerprint, in four groups.
+pub fn code(fingerprint: &str) -> String {
+    let head: String = fingerprint.chars().take(16).collect();
+    head.to_ascii_uppercase()
+        .as_bytes()
+        .chunks(4)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What a device's fingerprint is taken over: its id, label and two public keys.
+fn identity_entry(identity: &Value) -> Value {
+    json!({
+        "id": str_of(identity, "id"),
+        "label": str_of(identity, "label"),
+        "signingPublicKey": str_of(identity, "signingPublicKey"),
+        "agePublicKey": str_of(identity, "agePublicKey"),
+    })
+}
+
 fn named(file: &str, len: usize, ext: &str) -> bool {
     file.strip_suffix(ext).is_some_and(|stem| is_hex(stem, len))
 }
@@ -857,12 +879,76 @@ impl Sync {
         };
         let mut out = peer.clone();
         if let Value::Object(m) = &mut out {
-            m.insert(
-                "fingerprint".into(),
-                json!(sha256_hex(canonical_json(peer).as_bytes())),
-            );
+            let fingerprint = sha256_hex(canonical_json(peer).as_bytes());
+            m.insert("code".into(), json!(code(&fingerprint)));
+            m.insert("fingerprint".into(), json!(fingerprint));
         }
         Ok(out)
+    }
+
+    /// Sets this device up from a repository address alone: makes the checkout (a clone when
+    /// other devices already use the repository) and enrols. `joined` says whether other
+    /// devices were found; they are in [`Sync::pending`] until approved here.
+    pub fn setup(&self, store: &mut Store, url: &str, label: &str) -> Result<Value> {
+        validate::text(label, "machine label", 100, false)?;
+        let joined = git::prepare(&self.repo, url).map_err(SyncError::plain)?;
+        self.init(store, label)?;
+        Ok(json!({ "joined": joined, "identity": self.identity(store)? }))
+    }
+
+    /// The devices enrolled in the repository that this vault does not trust yet, each with
+    /// the code to compare against the one that device shows for itself.
+    pub fn pending(&self, store: &Store) -> Result<Value> {
+        let trusted = store.sync_trust()?;
+        let mut out = Vec::new();
+        for file in list_dir(&self.dir("machines")) {
+            if !named(&file, 16, ".json") {
+                continue;
+            }
+            let Ok(machine) = read_json(&self.dir("machines").join(&file), MAX_SMALL) else {
+                continue;
+            };
+            let entry = identity_entry(&machine);
+            let id = str_of(&entry, "id");
+            if file != format!("{id}.json") || trusted.contains_key(id) {
+                continue;
+            }
+            let label: String = str_of(&entry, "label")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(100)
+                .collect();
+            out.push(json!({
+                "id": id,
+                "label": label,
+                "code": code(&sha256_hex(canonical_json(&entry).as_bytes())),
+            }));
+        }
+        Ok(json!({ "pending": out }))
+    }
+
+    /// Trusts a pending device once a human has compared its code. The code is checked again
+    /// here, against the identity being trusted, so a file swapped in between is refused.
+    pub fn approve(&self, store: &mut Store, id: &str, confirmed: &str) -> Result<Value> {
+        if !is_hex(id, 16) {
+            return Err(SyncError::plain("Invalid device id"));
+        }
+        let machine = read_json(&self.dir("machines").join(format!("{id}.json")), MAX_SMALL)
+            .map_err(|_| SyncError::plain("That device is not waiting for approval"))?;
+        let entry = identity_entry(&machine);
+        let plain = |s: &str| {
+            s.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_ascii_uppercase()
+        };
+        let shown = code(&sha256_hex(canonical_json(&entry).as_bytes()));
+        if str_of(&entry, "id") != id || plain(&shown) != plain(confirmed) {
+            return Err(SyncError::plain(
+                "That code is not this device's. Compare it again with the one the other device shows",
+            ));
+        }
+        self.trust(store, &entry)
     }
 
     /// Trusts a device's identity (from its `machines/` file or `vaultos sync identity`),
@@ -982,6 +1068,7 @@ impl Sync {
                     "id": id,
                     "label": str_of(peer, "label"),
                     "fingerprint": sha256_hex(canonical_json(peer).as_bytes()),
+                    "code": code(&sha256_hex(canonical_json(peer).as_bytes())),
                     "thisDevice": *id == keys.machine_id,
                 })
             })

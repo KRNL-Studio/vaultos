@@ -30,6 +30,13 @@ VaultOS 0.3 stores vaults in format v4. It opens a vault from 0.2 or an earlier 
 
 Projects, agents and their grants, approvals, settings and history carry over; agent tokens keep working. Sync does not: 0.3 uses sync format 2, so set up a new, empty sync repository afterwards ([sync guide](SYNC.md)). A password 0.2 remembered in the Keychain was stored by a different program, so macOS may ask once before 0.3 reads it. An always-on service installed for 0.2 runs the old Node backend: uninstall it and install the 0.3 one ([agent setup](AGENTS.md#background-access)).
 
+After upgrading:
+
+- Point each MCP client at the bridge inside the app and restart agent sessions that were already running. A session started before the upgrade keeps the 0.2 bridge, which can only report that VaultOS is not running.
+- If 0.2 ran as a service, finish with `scripts/install-service-macos.sh` or `scripts/install-linux.sh --enable-service`; a `vaultosd` started by hand does not come back after a restart.
+- Anything that read `session.json` and a localhost port must change: 0.3 writes `daemon.json` and listens on a Unix socket that accepts only the vault's user. A helper that runs as another account, root included, is refused.
+- `/status` reports both `locked` and `unlocked`.
+
 The one-time import from the earlier `vault-os` fork (`import-legacy`) is not part of 0.3. To import such a vault, use the 0.2 release's `cli.cjs import-legacy` into a new data directory, then upgrade that vault with 0.3.
 
 ## Password rotation

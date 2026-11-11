@@ -136,6 +136,7 @@ fn changes(channel: &str) -> bool {
             | "syncStatus"
             | "syncIdentity"
             | "syncDevices"
+            | "syncPending"
             | "confirmHuman"
             | "trash"
             | "generate"
@@ -724,6 +725,42 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
             sync_call(app, move |sync, s| sync.init(s, &label)).await
         }
         "syncIdentity" => sync_call(app, |sync, s| sync.identity(s)).await,
+        "syncSetup" => {
+            let url = a.str(0, "repository address")?;
+            let label = a.str(1, "device name")?;
+            sync_call(app, move |sync, s| {
+                let made = sync.setup(s, &url, &label)?;
+                let _ = s.audit("sync_init", &label, HUMAN);
+                Ok(made)
+            })
+            .await
+        }
+        "syncPending" => {
+            sync_call(app, |sync, s| {
+                // Offline, the devices already in the checkout are still listed.
+                let _ = sync.fetch();
+                sync.pending(s)
+            })
+            .await
+        }
+        "syncApprove" => {
+            app.gate("add a device to sync").await?;
+            let id = a.str(0, "device id")?;
+            let code = a.str(1, "device code")?;
+            sync_call(app, move |sync, s| {
+                let pending = sync.pending(s)?;
+                let label = pending["pending"]
+                    .as_array()
+                    .and_then(|l| l.iter().find(|d| d["id"] == json!(id)))
+                    .and_then(|d| d["label"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let trusted = sync.approve(s, &id, &code)?;
+                let _ = s.audit("sync_trust", &format!("{label} ({id})"), HUMAN);
+                Ok(trusted)
+            })
+            .await
+        }
         "syncTrust" => {
             app.gate("trust a sync peer").await?;
             let identity = a.get(0).clone();

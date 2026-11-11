@@ -186,6 +186,13 @@ input.chk:disabled { opacity: 0.5; cursor: default; }
 .btn.copied, .iconbtn.copied { color: var(--good-text) !important; }
 .copied { color: var(--good-text) !important; }
 .btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
+.device { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r); }
+.device.attn { border-color: var(--amber-line); background: var(--amber-tint); }
+.device .grow { flex: 1 1 200px; min-width: 0; }
+.device .name { font-weight: 600; }
+.devcode { font: 600 13px var(--font-mono); letter-spacing: 0.04em; white-space: nowrap; user-select: all; }
+.manual { margin: 8px 0; }
+.pageh + .note { margin-bottom: 12px; }
 .btnrow.halves > .btn { flex: 1 1 0; }
 .err { color: var(--warn-text); font-size: 12px; min-height: 16px; padding: 2px 0; }
 .err:empty { min-height: 4px; }

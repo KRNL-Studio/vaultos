@@ -17,7 +17,7 @@ use vaultos_core::SecretString;
 use zeroize::Zeroizing;
 
 pub mod messages {
-    pub const NO_TOKEN: &str = "No agent token is configured. Ask the human to enroll this agent in VaultOS and set VAULTOS_AGENT_TOKEN_FILE (or VAULTOS_AGENT with a per-agent token file).";
+    pub const NO_TOKEN: &str = "No agent token is configured. Ask the human to enroll this agent in VaultOS and set VAULTOS_AGENT=NAME (or VAULTOS_AGENT_TOKEN_FILE).";
     pub const LOCKED: &str = "VaultOS is running but locked. Ask the human to unlock it (`vaultos unlock`); do not retry in a loop.";
     pub const NOT_RUNNING: &str = "VaultOS is not running. Ask the human to start it (`vaultosd`, or the login service) and unlock it (`vaultos unlock`); do not retry in a loop.";
     pub const NO_VAULT: &str = "No VaultOS vault exists in this data directory. Check VAULTOS_DATA_DIR or ask the human to create the vault (`vaultos init`).";
@@ -188,13 +188,92 @@ pub fn discover_token(
             "VAULTOS_AGENT_TOKEN_FILE",
         )));
     }
-    if let Some(name) = env("VAULTOS_AGENT").filter(|n| !n.is_empty()) {
+    let named = env("VAULTOS_AGENT").filter(|n| !n.is_empty());
+    // `auto` asks for the agent named after the calling program, unless an agent has that name.
+    let auto = named.as_deref() == Some("auto")
+        && !agent_token_path(data_dir, "auto").is_ok_and(|p| p.exists());
+    if let Some(name) = named.filter(|_| !auto) {
         return Ok(Some((
             read_token_file(&agent_token_path(data_dir, &name)?)?,
             "VAULTOS_AGENT",
         )));
     }
+    let programs = if auto { calling_programs() } else { Vec::new() };
+    if let Some(name) = infer_agent(data_dir, &programs) {
+        return Ok(Some((
+            read_token_file(&agent_token_path(data_dir, &name)?)?,
+            "the agents folder",
+        )));
+    }
+    if auto {
+        return Err(ClientError::new(
+            Code::Token,
+            "VAULTOS_AGENT=auto found no single agent named after the calling program; set VAULTOS_AGENT to the agent's name",
+        ));
+    }
     Ok(None)
+}
+
+/// The agent to use when none is named: the only token in `<data dir>/agents`, or, for
+/// `VAULTOS_AGENT=auto`, the one named after the nearest of `programs` (`claude` for
+/// `claude-code-laptop`). This only chooses among token files this user can already read.
+fn infer_agent(data_dir: &Path, programs: &[String]) -> Option<String> {
+    let names: Vec<String> = std::fs::read_dir(data_dir.join("agents"))
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter_map(|f| f.strip_suffix(".token").map(str::to_owned))
+        .filter(|n| agent_name_ok(n))
+        .collect();
+    if names.len() == 1 {
+        return names.into_iter().next();
+    }
+    for program in programs {
+        let mut named = names.iter().filter(|n| {
+            n.to_ascii_lowercase()
+                .strip_prefix(program.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.', '_']))
+        });
+        match (named.next(), named.next()) {
+            (Some(n), None) => return Some(n.clone()),
+            (Some(_), Some(_)) => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The programs that started this one, nearest first, each as the leading letters of its
+/// file name in lower case (`claude`, `codex`).
+fn calling_programs() -> Vec<String> {
+    let mut out = Vec::new();
+    // SAFETY: getppid has no preconditions and cannot fail.
+    let mut pid = unsafe { libc::getppid() };
+    for _ in 0..16 {
+        if pid <= 1 {
+            break;
+        }
+        let Ok(ps) = std::process::Command::new("/bin/ps")
+            .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+            .output()
+        else {
+            break;
+        };
+        let line = String::from_utf8_lossy(&ps.stdout);
+        let Some((parent, command)) = line.trim().split_once(char::is_whitespace) else {
+            break;
+        };
+        let file = command.trim().rsplit('/').next().unwrap_or_default();
+        let letters: String = file
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if letters.len() >= 3 {
+            out.push(letters);
+        }
+        pid = parent.parse().unwrap_or(0);
+    }
+    out
 }
 
 #[derive(Debug)]
@@ -474,5 +553,28 @@ mod tests {
         assert!(discover_token(env(&[("VAULTOS_AGENT", "../x")]), d).is_err());
         assert!(discover_token(env(&[("VAULTOS_AGENT_TOKEN_FILE", "relative")]), d).is_err());
         assert!(matches!(discover_token(env(&[]), d), Ok(None)));
+    }
+
+    #[test]
+    fn infers_the_agent_from_the_agents_folder_and_the_calling_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir(&agents).unwrap();
+        let programs = |list: &[&str]| list.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        assert_eq!(infer_agent(dir.path(), &programs(&["claude"])), None);
+        std::fs::write(agents.join("claude-code-laptop.token"), "x").unwrap();
+        assert_eq!(
+            infer_agent(dir.path(), &[]).as_deref(),
+            Some("claude-code-laptop")
+        );
+        std::fs::write(agents.join("codex-laptop.token"), "x").unwrap();
+        assert_eq!(infer_agent(dir.path(), &[]), None);
+        assert_eq!(
+            infer_agent(dir.path(), &programs(&["zsh", "codex", "claude"])).as_deref(),
+            Some("codex-laptop")
+        );
+        std::fs::write(agents.join("claude.token"), "x").unwrap();
+        assert_eq!(infer_agent(dir.path(), &programs(&["claude"])), None);
+        assert_eq!(infer_agent(dir.path(), &programs(&["claudex"])), None);
     }
 }

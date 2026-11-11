@@ -630,6 +630,77 @@ fn configure(repo: &Path) {
 }
 
 #[test]
+fn pairs_two_devices_from_a_repository_address_and_a_compared_code() {
+    let root = tempfile::tempdir().unwrap();
+    let remote = root.path().join("remote.git");
+    let url = remote.to_str().unwrap();
+    git(&["init", "--quiet", "--bare", "--initial-branch=main", url]);
+
+    // The first device finds an empty repository and starts it.
+    let mut a = Dev::new(root.path(), "a", &root.path().join("checkout-a"));
+    assert!(a
+        .sync
+        .setup(
+            &mut a.store,
+            "https://user:token@example.invalid/x.git",
+            "A"
+        )
+        .is_err());
+    let made = a.sync.setup(&mut a.store, url, "Machine A").unwrap();
+    assert_eq!(made["joined"], false);
+    let code_a = made["identity"]["code"].as_str().unwrap().to_owned();
+    assert_eq!(code_a.len(), 19, "{code_a}");
+    assert!(a.sync.setup(&mut a.store, url, "Machine A").is_err());
+    a.set("Example", "K", "pairing-synthetic");
+    assert_eq!(
+        a.sync.push_remote(&a.store, None).unwrap()["delivered"],
+        true
+    );
+    assert_eq!(
+        a.sync.pending(&a.store).unwrap()["pending"],
+        serde_json::json!([])
+    );
+
+    // The second device clones it, and sees the first waiting with the code A shows.
+    let mut b = Dev::new(root.path(), "b", &root.path().join("checkout-b"));
+    let joined = b.sync.setup(&mut b.store, url, "Machine B").unwrap();
+    assert_eq!(joined["joined"], true);
+    let code_b = joined["identity"]["code"].as_str().unwrap().to_owned();
+    let waiting = b.sync.pending(&b.store).unwrap();
+    assert_eq!(waiting["pending"][0]["label"], "Machine A");
+    assert_eq!(waiting["pending"][0]["code"], code_a.as_str());
+    let id_a = waiting["pending"][0]["id"].as_str().unwrap().to_owned();
+    assert!(b.sync.approve(&mut b.store, &id_a, &code_b).is_err());
+    b.sync
+        .approve(&mut b.store, &id_a, &code_a.to_lowercase().replace(' ', ""))
+        .unwrap();
+    assert_eq!(
+        b.sync.push_remote(&b.store, None).unwrap()["delivered"],
+        true
+    );
+    // Nothing is readable here until the first device adds this one; that must not break it.
+    let _ = b.sync.pull_remote(&mut b.store, false);
+
+    // The first device fetches, approves the second by its code, and encrypts for it.
+    a.sync.fetch().unwrap();
+    let waiting = a.sync.pending(&a.store).unwrap();
+    assert_eq!(waiting["pending"][0]["code"], code_b.as_str());
+    let id_b = waiting["pending"][0]["id"].as_str().unwrap().to_owned();
+    a.sync.approve(&mut a.store, &id_b, &code_b).unwrap();
+    let pushed = a.sync.push_remote(&a.store, None).unwrap();
+    assert_eq!(pushed["reencryptedForNewRecipients"], true, "{pushed}");
+    a.sync.pull_remote(&mut a.store, false).unwrap();
+    b.sync.pull_remote(&mut b.store, false).unwrap();
+    assert_eq!(b.value("Example", "K"), "pairing-synthetic");
+    for d in [&a, &b] {
+        assert_eq!(
+            d.sync.pending(&d.store).unwrap()["pending"],
+            serde_json::json!([])
+        );
+    }
+}
+
+#[test]
 fn syncs_two_devices_over_a_git_remote_and_refuses_what_it_did_not_write() {
     let root = tempfile::tempdir().unwrap();
     let remote = root.path().join("remote.git");

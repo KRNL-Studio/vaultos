@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0-preview.3 (2026-11-11)
+
+- Sync set-up from the repository address alone. **Settings → Sync** asks for the address and a device name, starts the repository or joins it, and lists each device that is waiting with a short code; **Codes match, add it** trusts it once the code is the one that device shows for itself. The CLI has the same steps: `vaultos sync setup URL LABEL`, `sync pending` and `sync approve ID CODE`. The earlier step-by-step tools remain under **Manual tools**.
+- A device's code (the first 64 bits of its fingerprint) is in `sync identity` and `sync devices`.
+- Agents: with exactly one enrolled agent, `vaultos-agent` and the MCP bridge use its token without `VAULTOS_AGENT`. `VAULTOS_AGENT=auto` picks the agent named after the calling program (`claude`, `codex`), so one line in a shell profile replaces a per-machine wrapper. Nothing is guessed unless you set it.
+- `/status` reports `unlocked` as well as `locked`.
+- Docs: what to do after upgrading from 0.2 (restart agent sessions, reinstall the service, the move from `session.json` and a port to `daemon.json` and a socket), and that an approval relay must run as the vault's user.
+
 ## 0.3.0-preview.2 (2026-11-11)
 
 - Sync after upgrading from 0.2: enrolling a device (`vaultos sync init`, or Settings → Sync in the app) now sets aside a sync index left by an earlier version, as `sync-index.before-enrolment.json`. In preview.1 that file stopped the first push with "Invalid sync index". If you already enrolled on preview.1, move `sync-index.json` out of the data directory once.

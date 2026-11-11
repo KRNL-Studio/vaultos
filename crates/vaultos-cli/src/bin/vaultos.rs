@@ -235,6 +235,22 @@ enum SshCommand {
 enum SyncCommand {
     /// Enrol this device: in a new, empty checkout, or in a clone of an existing sync repository
     Init { label: String },
+    /// Set this device up from the repository's Git address alone: starts an empty
+    /// repository, or joins one other devices already use
+    Setup {
+        /// The private repository's Git address (no password or token in it)
+        url: String,
+        label: String,
+    },
+    /// The devices in the repository this vault does not trust yet, each with its code
+    Pending,
+    /// Trust a pending device once its code matches the one that device shows for itself
+    Approve {
+        /// The device's id, from `sync pending`
+        id: String,
+        /// The code that device shows (`sync identity`, or Settings → Sync)
+        code: String,
+    },
     /// This device's public identity and fingerprint, to compare and trust on the others
     Identity,
     /// Trust another device's identity file (its machines/<id>.json, or `sync identity`
@@ -1187,6 +1203,20 @@ fn sync(ctx: &Ctx, cmd: SyncCommand) -> Result<()> {
             emit(&identity)
         }
         SyncCommand::Identity => emit(&engine.identity(store)?),
+        SyncCommand::Setup { url, label } => {
+            let made = engine.setup(store, &url, &label)?;
+            let _ = store.audit("sync_init", &label, HUMAN);
+            emit(&made)
+        }
+        SyncCommand::Pending => {
+            let _ = engine.fetch();
+            emit(&engine.pending(store)?)
+        }
+        SyncCommand::Approve { id, code } => {
+            let trusted = engine.approve(store, &id, &code)?;
+            let _ = store.audit("sync_trust", &id, HUMAN);
+            emit(&trusted)
+        }
         SyncCommand::Trust { file } => {
             let bytes = fs_safe::read_regular(&file, 16 * 1024)?;
             let identity: Value = serde_json::from_slice(&bytes)

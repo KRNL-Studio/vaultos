@@ -17,6 +17,12 @@ This is an **evaluation preview**. The macOS downloads named `notarized` are sig
 - **Background access** is `VaultOS --service`, installed only by `scripts/install-service-macos.sh` or `scripts/install-linux.sh --enable-service`.
 - **Sync format 2**, in the app and the CLI, with keys inside the vault and no `age` binary. A lost or retired device can be removed (`vaultos sync untrust`), and each other device confirms the removal.
 
+## New in preview.3
+
+- **Sync from the repository address.** Settings → Sync sets a device up from the address alone and adds another device after you compare a short code on both. `vaultos sync setup`, `pending` and `approve` do the same from a terminal.
+- **Agent identity.** One enrolled agent needs no `VAULTOS_AGENT`; `VAULTOS_AGENT=auto` picks the agent named after the calling program.
+- `/status` reports `unlocked` as well as `locked`, and the upgrade notes cover services, running agent sessions and helpers that read the old session file.
+
 ## Fixed in preview.2
 
 - Setting up sync after upgrading from 0.2 no longer stops at the first push with "Invalid sync index": enrolling sets the earlier version's index aside.
