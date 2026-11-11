@@ -799,9 +799,19 @@ impl Sync {
             Some(v) => Keys::from_value(&v.open())?,
             None => Keys::generate(label),
         };
-        if store.sync_keys()?.is_none() || keys.label != label {
+        let enrolling = store.sync_keys()?.is_none();
+        if enrolling || keys.label != label {
             keys.label = label.to_owned();
             store.set_sync_keys(keys.to_value())?;
+        }
+        // An index already here was not written with these keys: VaultOS 0.2 leaves its own
+        // behind, and it would stop every push as invalid. It is kept under another name.
+        if enrolling && self.index_path().exists() {
+            std::fs::rename(
+                self.index_path(),
+                self.data_dir.join("sync-index.before-enrolment.json"),
+            )
+            .map_err(|e| SyncError::plain(format!("cannot set aside the old sync index: {e}")))?;
         }
         let public = keys.age_public();
         let recipients_path = self.dir("recipients.txt");

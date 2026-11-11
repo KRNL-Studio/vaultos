@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0-preview.2 (2026-11-11)
+
+- Sync after upgrading from 0.2: enrolling a device (`vaultos sync init`, or Settings → Sync in the app) now sets aside a sync index left by an earlier version, as `sync-index.before-enrolment.json`. In preview.1 that file stopped the first push with "Invalid sync index". If you already enrolled on preview.1, move `sync-index.json` out of the data directory once.
+- Home screen: no empty gap under the search field, and no focus ring around a screen's heading when it opens.
+
 ## 0.3.0-preview.1 (2026-11-10)
 
 VaultOS is now Rust throughout. Electron, Chromium, Node.js and every npm runtime dependency are gone; Node.js is needed only to run the build and test scripts.

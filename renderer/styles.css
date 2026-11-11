@@ -91,6 +91,8 @@ body {
 
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A heading takes focus only when a screen opens, for screen readers: no ring. */
+h1:focus { outline: none; }
 
 ::-webkit-scrollbar { width: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; border: 3px solid transparent; background-clip: content-box; }
@@ -287,6 +289,8 @@ button.badge { cursor: pointer; font-family: inherit; }
 
 /* ── empty states ── */
 .empty { color: var(--soft); text-align: center; padding: 32px 16px; font-size: 12px; line-height: 1.5; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+/* The search status line is always present for screen readers; it takes no room while empty. */
+.empty:empty { padding: 0; }
 .empty .big { font-size: 13px; color: var(--ink); font-weight: 600; }
 .empty p { max-width: 320px; }
 

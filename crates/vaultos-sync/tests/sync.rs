@@ -429,6 +429,25 @@ fn the_push_counter_continues_after_the_index_is_lost() {
 }
 
 #[test]
+fn enrolling_sets_aside_an_index_left_by_an_earlier_version() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("repo");
+    let mut a = Dev::new(root.path(), "a", &repo);
+    let old = root.path().join("a/sync-index.json");
+    std::fs::write(&old, r#"{"version":1,"records":{}}"#).unwrap();
+    a.sync.init(&mut a.store, "Machine A").unwrap();
+    assert!(root
+        .path()
+        .join("a/sync-index.before-enrolment.json")
+        .exists());
+    a.set("Example", "KEY", "synthetic");
+    assert_eq!(a.push().counter, 1);
+    // Enrolling again keeps the index this device wrote.
+    a.sync.init(&mut a.store, "Machine A").unwrap();
+    assert_eq!(a.push().counter, 2);
+}
+
+#[test]
 fn refuses_concurrent_edits_until_accepted_and_keeps_a_backup() {
     let (root, _repo, mut a, mut b) = pair();
     a.set("Example", "KEY", "base");
