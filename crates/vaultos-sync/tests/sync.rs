@@ -640,7 +640,11 @@ fn pairs_two_devices_from_a_repository_address_and_a_compared_code() {
     let mut a = Dev::new(root.path(), "a", &root.path().join("checkout-a"));
     assert!(a
         .sync
-        .setup(&mut a.store, "https://user:token@example.invalid/x.git", "A")
+        .setup(
+            &mut a.store,
+            "https://user:token@example.invalid/x.git",
+            "A"
+        )
         .is_err());
     let made = a.sync.setup(&mut a.store, url, "Machine A").unwrap();
     assert_eq!(made["joined"], false);
@@ -648,8 +652,14 @@ fn pairs_two_devices_from_a_repository_address_and_a_compared_code() {
     assert_eq!(code_a.len(), 19, "{code_a}");
     assert!(a.sync.setup(&mut a.store, url, "Machine A").is_err());
     a.set("Example", "K", "pairing-synthetic");
-    assert_eq!(a.sync.push_remote(&a.store, None).unwrap()["delivered"], true);
-    assert_eq!(a.sync.pending(&a.store).unwrap()["pending"], serde_json::json!([]));
+    assert_eq!(
+        a.sync.push_remote(&a.store, None).unwrap()["delivered"],
+        true
+    );
+    assert_eq!(
+        a.sync.pending(&a.store).unwrap()["pending"],
+        serde_json::json!([])
+    );
 
     // The second device clones it, and sees the first waiting with the code A shows.
     let mut b = Dev::new(root.path(), "b", &root.path().join("checkout-b"));
@@ -664,7 +674,10 @@ fn pairs_two_devices_from_a_repository_address_and_a_compared_code() {
     b.sync
         .approve(&mut b.store, &id_a, &code_a.to_lowercase().replace(' ', ""))
         .unwrap();
-    assert_eq!(b.sync.push_remote(&b.store, None).unwrap()["delivered"], true);
+    assert_eq!(
+        b.sync.push_remote(&b.store, None).unwrap()["delivered"],
+        true
+    );
     // Nothing is readable here until the first device adds this one; that must not break it.
     let _ = b.sync.pull_remote(&mut b.store, false);
 
@@ -680,7 +693,10 @@ fn pairs_two_devices_from_a_repository_address_and_a_compared_code() {
     b.sync.pull_remote(&mut b.store, false).unwrap();
     assert_eq!(b.value("Example", "K"), "pairing-synthetic");
     for d in [&a, &b] {
-        assert_eq!(d.sync.pending(&d.store).unwrap()["pending"], serde_json::json!([]));
+        assert_eq!(
+            d.sync.pending(&d.store).unwrap()["pending"],
+            serde_json::json!([])
+        );
     }
 }
 

@@ -280,9 +280,19 @@ pub fn prepare(dir: &Path, url: &str) -> Result<bool, String> {
     }
     let cloned = !heads.out.is_empty();
     let made = if cloned {
-        run(parent, &["clone", "--quiet", "--", url, target], NETWORK, &[])
+        run(
+            parent,
+            &["clone", "--quiet", "--", url, target],
+            NETWORK,
+            &[],
+        )
     } else {
-        run(parent, &["init", "--quiet", "-b", "main", target], LOCAL, &[])
+        run(
+            parent,
+            &["init", "--quiet", "-b", "main", target],
+            LOCAL,
+            &[],
+        )
     };
     if !made.ok {
         return Err(format!("Cannot create the sync checkout: {}", made.error));

@@ -933,11 +933,8 @@ impl Sync {
         if !is_hex(id, 16) {
             return Err(SyncError::plain("Invalid device id"));
         }
-        let machine = read_json(
-            &self.dir("machines").join(format!("{id}.json")),
-            MAX_SMALL,
-        )
-        .map_err(|_| SyncError::plain("That device is not waiting for approval"))?;
+        let machine = read_json(&self.dir("machines").join(format!("{id}.json")), MAX_SMALL)
+            .map_err(|_| SyncError::plain("That device is not waiting for approval"))?;
         let entry = identity_entry(&machine);
         let plain = |s: &str| {
             s.chars()
