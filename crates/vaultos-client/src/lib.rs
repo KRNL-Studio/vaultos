@@ -242,9 +242,31 @@ fn infer_agent(data_dir: &Path, programs: &[String]) -> Option<String> {
     None
 }
 
-/// The programs that started this one, nearest first, each as the leading letters of its
-/// file name in lower case (`claude`, `codex`).
+/// The names a program's path offers for matching an agent, file name first: the leading
+/// letters of each folder and file name below the home folder, in lower case. A program
+/// installed as `~/.claude/remote/ccd-cli/2.1.3` is still `claude`.
+fn program_words(path: &str, home: Option<&str>) -> Vec<String> {
+    let below = home
+        .filter(|h| !h.is_empty())
+        .and_then(|h| path.strip_prefix(h))
+        .unwrap_or(path);
+    below
+        .rsplit('/')
+        .map(|part| {
+            part.trim_start_matches('.')
+                .chars()
+                .take_while(char::is_ascii_alphabetic)
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|w| w.len() >= 3)
+        .collect()
+}
+
+/// The programs that started this one, nearest first, as the words of each one's path
+/// (`claude`, `codex`).
 fn calling_programs() -> Vec<String> {
+    let home = std::env::var("HOME").ok();
     let mut out = Vec::new();
     // SAFETY: getppid has no preconditions and cannot fail.
     let mut pid = unsafe { libc::getppid() };
@@ -262,15 +284,12 @@ fn calling_programs() -> Vec<String> {
         let Some((parent, command)) = line.trim().split_once(char::is_whitespace) else {
             break;
         };
-        let file = command.trim().rsplit('/').next().unwrap_or_default();
-        let letters: String = file
-            .chars()
-            .take_while(char::is_ascii_alphabetic)
-            .collect::<String>()
-            .to_ascii_lowercase();
-        if letters.len() >= 3 {
-            out.push(letters);
-        }
+        // Linux reports only a shortened file name there; the link has the whole path.
+        let path = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|p| p.into_os_string().into_string().ok())
+            .unwrap_or_else(|| command.trim().to_owned());
+        out.extend(program_words(&path, home.as_deref()));
         pid = parent.parse().unwrap_or(0);
     }
     out
@@ -576,5 +595,16 @@ mod tests {
         std::fs::write(agents.join("claude.token"), "x").unwrap();
         assert_eq!(infer_agent(dir.path(), &programs(&["claude"])), None);
         assert_eq!(infer_agent(dir.path(), &programs(&["claudex"])), None);
+
+        let home = Some("/home/claude-fan");
+        assert_eq!(
+            program_words("/home/claude-fan/.claude/remote/ccd-cli/2.1.3-3fb3e6", home),
+            ["ccd", "remote", "claude"]
+        );
+        assert_eq!(
+            program_words("/home/claude-fan/bin/Codex", home),
+            ["codex", "bin"]
+        );
+        assert_eq!(program_words("node", home), ["node"]);
     }
 }

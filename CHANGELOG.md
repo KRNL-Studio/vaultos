@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `VAULTOS_AGENT=auto` matches the folders in a calling program's path as well as its file name, so a client installed under a version number (`~/.claude/remote/ccd-cli/2.1.3`) is still found as `claude`.
+
 ## 0.3.0-preview.3 (2026-11-11)
 
 - Sync set-up from the repository address alone. **Settings → Sync** asks for the address and a device name, starts the repository or joins it, and lists each device that is waiting with a short code; **Codes match, add it** trusts it once the code is the one that device shows for itself. The CLI has the same steps: `vaultos sync setup URL LABEL`, `sync pending` and `sync approve ID CODE`. The earlier step-by-step tools remain under **Manual tools**.
