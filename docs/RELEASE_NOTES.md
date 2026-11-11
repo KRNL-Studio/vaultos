@@ -17,6 +17,11 @@ This is an **evaluation preview**. The macOS downloads named `notarized` are sig
 - **Background access** is `VaultOS --service`, installed only by `scripts/install-service-macos.sh` or `scripts/install-linux.sh --enable-service`.
 - **Sync format 2**, in the app and the CLI, with keys inside the vault and no `age` binary. A lost or retired device can be removed (`vaultos sync untrust`), and each other device confirms the removal.
 
+## Fixed in preview.2
+
+- Setting up sync after upgrading from 0.2 no longer stops at the first push with "Invalid sync index": enrolling sets the earlier version's index aside.
+- Two display faults on the home screen: an empty gap under the search field and a focus ring around the heading.
+
 ## Upgrading from 0.2
 
 A 0.2 vault opens only to be upgraded, when you choose **Upgrade this vault**. The upgrade is one-way and keeps the old file in `backups/`. Sync from 0.2 (format 1) does not carry over: start a new, empty sync repository. Reinstall an always-on service, and update MCP entries that ran `node .../mcp/server.mjs`. `import-legacy` is not in 0.3. Read docs/RECOVERY.md first.
