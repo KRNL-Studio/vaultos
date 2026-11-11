@@ -253,6 +253,54 @@ fn ssh_reuse_env(repo: &Path, remote: &str) -> Vec<(String, String)> {
     )]
 }
 
+/// Makes `dir` a checkout of the sync repository at `url`: a clone when the remote already
+/// has a branch, otherwise a new repository on `main` with `origin` set. Says whether it
+/// cloned. Commits need an author, so one is set for this checkout when Git has none.
+pub fn prepare(dir: &Path, url: &str) -> Result<bool, String> {
+    let url = url.trim();
+    if url.is_empty() || url.len() > 2000 || url.starts_with('-') || url.contains(char::is_control)
+    {
+        return Err("Enter the Git address of your private sync repository".into());
+    }
+    if scrub_urls(url) != url {
+        return Err("Leave passwords and tokens out of the address; Git's credential helper or an SSH key signs in".into());
+    }
+    if dir.join(".git").exists() {
+        return Err("This device already has a sync checkout".into());
+    }
+    if std::fs::read_dir(dir).is_ok_and(|mut d| d.next().is_some()) {
+        return Err(format!("{} is not empty", dir.display()));
+    }
+    let (Some(parent), Some(target)) = (dir.parent(), dir.to_str()) else {
+        return Err("Invalid sync checkout path".into());
+    };
+    let heads = run(parent, &["ls-remote", "--heads", "--", url], NETWORK, &[]);
+    if !heads.ok {
+        return Err(format!("Cannot reach the sync repository: {}", heads.error));
+    }
+    let cloned = !heads.out.is_empty();
+    let made = if cloned {
+        run(parent, &["clone", "--quiet", "--", url, target], NETWORK, &[])
+    } else {
+        run(parent, &["init", "--quiet", "-b", "main", target], LOCAL, &[])
+    };
+    if !made.ok {
+        return Err(format!("Cannot create the sync checkout: {}", made.error));
+    }
+    let git = |args: &[&str]| run(dir, args, LOCAL, &[]);
+    if !cloned {
+        let added = git(&["remote", "add", "origin", url]);
+        if !added.ok {
+            return Err(added.error);
+        }
+    }
+    if git(&["config", "user.email"]).out.is_empty() {
+        git(&["config", "user.name", "VaultOS Sync"]);
+        git(&["config", "user.email", "sync@vaultos.local"]);
+    }
+    Ok(cloned)
+}
+
 /// A sync checkout. Its branch, remote and SSH settings are looked up once.
 #[derive(Debug)]
 pub struct GitRepo {

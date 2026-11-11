@@ -4,7 +4,7 @@ members = ["crates/vaultos-core", "crates/vaultos-daemon", "crates/vaultos-clien
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.3.0-preview.2"
+version = "0.3.0-preview.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/KRNL-Studio/vaultos"

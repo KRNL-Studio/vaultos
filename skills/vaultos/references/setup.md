@@ -22,7 +22,7 @@ vault or search its credential files. Defaults for this project:
 | Linux desktop entry | `org.vaultos.preview.desktop` |
 | Optional data override | `VAULTOS_DATA_DIR`, an absolute directory |
 | MCP entry point | `vaultos-mcp` from the app, with no arguments |
-| Agent credential | `VAULTOS_AGENT_TOKEN_FILE`, an absolute private (0600) file path, or `VAULTOS_AGENT=NAME` for `<data dir>/agents/NAME.token` |
+| Agent credential | `VAULTOS_AGENT_TOKEN_FILE`, an absolute private (0600) file path, or `VAULTOS_AGENT=NAME` for `<data dir>/agents/NAME.token`. With one enrolled agent neither is needed; `VAULTOS_AGENT=auto` picks the agent named after the calling program |
 
 Use a new absolute data directory for testing. Setting the bridge's data override
 does not change the app's directory: both processes need the same setting.

@@ -32,7 +32,7 @@ Use the path where you actually put the app. Neither program needs Node.js, keep
 }
 ```
 
-The bridge and `vaultos-agent` find their token in this order: `VAULTOS_AGENT_TOKEN`; `VAULTOS_AGENT_TOKEN_FILE` (absolute, a regular file owned by you with mode 0600); then, when `VAULTOS_AGENT=NAME` is set, `<data directory>/agents/NAME.token` with the same checks. A token file that exists but is unsafe is an error, not a silent fallback. They never guess an identity from the process tree.
+The bridge and `vaultos-agent` find their token in this order: `VAULTOS_AGENT_TOKEN`; `VAULTOS_AGENT_TOKEN_FILE` (absolute, a regular file owned by you with mode 0600); then, when `VAULTOS_AGENT=NAME` is set, `<data directory>/agents/NAME.token` with the same checks. A token file that exists but is unsafe is an error, not a silent fallback. With none of the three set, they use the token in `agents/` when it holds exactly one. They guess an identity from the process tree only when you ask: `VAULTOS_AGENT=auto` picks the one agent whose name begins with the nearest calling program's name (`claude` for `claude-code-laptop`, `codex` for `codex-laptop`) and is an error when that is none or several. Set it once in your shell profile to give every agent's shell its own identity without a wrapper. It only chooses among token files your account can already read.
 
 Client configuration locations vary. Use your client's documented MCP settings. If you selected a custom `VAULTOS_DATA_DIR`, set the same absolute path in the bridge environment. Never point the preview at an existing production vault directory. Tokens are credentials: the environment token override is supported for controlled automation, but a private token file avoids embedding one in client settings.
 
@@ -145,7 +145,7 @@ vaultos unlock
 
 ## Approval relay
 
-An external approver (for example a phone-notification daemon you run) can relay your approve/deny decisions with `POST /pending/decide` and body `{"project","key","approve":true|false}`. It needs the session token from `daemon.json` and an `X-Vault-Approver` secret whose SHA-256 is stored in the vault by `vaultos approver set --token-file PATH`; agent tokens are not accepted. The relay is off until configured, decides only keys that are awaiting approval, and denial removes the agent-created record. `approver clear` turns it off. The desktop's pending banner also has **Approve all**.
+An external approver (for example a phone-notification daemon you run) can relay your approve/deny decisions with `POST /pending/decide` and body `{"project","key","approve":true|false}`. It needs the session token from `daemon.json` and an `X-Vault-Approver` secret whose SHA-256 is stored in the vault by `vaultos approver set --token-file PATH`; agent tokens are not accepted. The relay is off until configured, decides only keys that are awaiting approval, and denial removes the agent-created record. `approver clear` turns it off. The desktop's pending banner also has **Approve all**. The relay must connect as the vault's user: the socket refuses every other account, root included, so a relay that runs as root has to drop to that user for each request.
 
 ## Background access
 

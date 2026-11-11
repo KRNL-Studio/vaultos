@@ -797,6 +797,7 @@ pub fn status(unlocked: bool, sync: Value) -> Value {
         "ok": true,
         "server": "vaultosd",
         "locked": !unlocked,
+        "unlocked": unlocked,
         "formatVersion": vaultos_core::format::VERSION,
         "deployment": deployment(),
         "sync": sync,

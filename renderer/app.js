@@ -1980,8 +1980,105 @@ async function renderSync() {
             }
         }
     }));
-    const scroll = el('<div class="scroll"><h1 class="pageh">Encrypted sync</h1><p class="note">Optional. Uses your dedicated Git repository and age. Follow docs/SYNC.md to configure transport and verify each peer identity through a trusted channel.</p></div>');
+    const scroll = el('<div class="scroll"><h1 class="pageh">Encrypted sync</h1><p class="note">Optional. Keeps this vault the same on your own devices through a private Git repository you own. Everything in it is encrypted to your devices and signed by them.</p></div>');
     $app.appendChild(scroll);
+    const devices_ = panel(scroll, "Devices");
+    devices_.classList.add("stack");
+    const guide = async () => {
+        let me = null;
+        try {
+            me = await window.vault.syncIdentity();
+        } catch {}
+        if (revision !== renderVersion) return;
+        devices_.replaceChildren();
+        const err = el('<div class="err" role="alert"></div>');
+        const busy = async (button, working, fn) => {
+            const text = button.textContent;
+            button.disabled = true;
+            button.textContent = working;
+            err.textContent = "";
+            try {
+                await fn();
+            } catch (e) {
+                err.textContent = cleanError(e);
+                announce(err.textContent);
+                button.disabled = false;
+                button.textContent = text;
+                return;
+            }
+            if (revision === renderVersion) await guide();
+        };
+        if (!me) {
+            const url = el('<input placeholder="git@github.com:you/vaultos-sync.git" autocomplete="off" spellcheck="false" />');
+            const name = el('<input placeholder="MacBook" maxlength="100" />');
+            const go = el('<button class="btn primary">Set up sync</button>');
+            go.onclick = () => busy(go, "Setting up…", async () => {
+                const made = await window.vault.syncSetup(url.value, name.value);
+                if (!made.joined) await window.vault.syncPush();
+                announce(made.joined ? "This device joined the repository. Add the devices listed." : "Sync is set up on this device.");
+            });
+            for (const n of [ el('<p class="note">Create an empty private Git repository that holds nothing else, then enter its address here and on each of your other devices. Git signs in the way it already does on this computer; leave passwords and tokens out of the address.</p>'), labeled("Repository address", url), labeled("Name for this device (others can see it)", name), go, err ]) devices_.appendChild(n);
+            return;
+        }
+        const mine = el('<div class="device"><div class="grow"><div class="name"></div><div class="note">This device. The others show this code when they ask to add it.</div></div><code class="devcode"></code></div>');
+        mine.querySelector(".name").textContent = me.label;
+        mine.querySelector(".devcode").textContent = me.code;
+        devices_.appendChild(mine);
+        let waiting = [], known = [];
+        try {
+            waiting = (await window.vault.syncPending()).pending;
+            known = (await window.vault.syncDevices()).devices.filter(d => !d.thisDevice);
+        } catch (e) {
+            err.textContent = cleanError(e);
+        }
+        if (revision !== renderVersion) return;
+        for (const d of waiting) {
+            const row = el('<div class="device attn"><div class="grow"><div class="name"></div><div class="note"></div></div><code class="devcode"></code><button class="btn primary sm">Codes match, add it</button></div>');
+            row.querySelector(".name").textContent = `${d.label} is waiting to be added`;
+            row.querySelector(".note").textContent = `Open Settings → Sync on ${d.label} and check that it shows this code for itself. Add it only if they are the same.`;
+            row.querySelector(".devcode").textContent = d.code;
+            const add = row.querySelector("button");
+            add.onclick = () => busy(add, "Adding…", async () => {
+                await human("syncApprove", d.id, d.code);
+                await window.vault.syncPush();
+                // Until the other device has added this one, there may be nothing here to read yet.
+                await window.vault.syncPull(false).catch(() => {});
+                announce(`${d.label} was added. Add this device there too, then choose Sync now on both.`);
+            });
+            devices_.appendChild(row);
+        }
+        for (const d of known) {
+            const row = el('<div class="device"><div class="grow"><div class="name"></div><div class="note">Added to sync</div></div><code class="devcode"></code></div>');
+            row.querySelector(".name").textContent = d.label;
+            row.querySelector(".devcode").textContent = d.code;
+            devices_.appendChild(row);
+        }
+        if (!waiting.length && !known.length) devices_.appendChild(el('<p class="note">No other device yet. On the next one, open Settings → Sync and enter the same repository address. It will appear here to be added.</p>'));
+        const state = el('<span class="note" role="status"></span>');
+        const now = el('<button class="btn">Sync now</button>');
+        now.onclick = () => busy(now, "Syncing…", async () => {
+            await window.vault.syncPull(false);
+            await window.vault.syncPush();
+            announce("Synced.");
+        });
+        const check = el('<button class="btn ghost">Look for new devices</button>');
+        check.onclick = () => busy(check, "Looking…", async () => {});
+        const row = el('<div class="btnrow"></div>');
+        row.appendChild(now);
+        row.appendChild(check);
+        for (const n of [ row, state, err ]) devices_.appendChild(n);
+        window.vault.syncStatus().then(st => {
+            const words = {
+                IN_SYNC: "Every device has the same records.",
+                CONFLICTS_PENDING: "Two devices changed the same record. Review it under Manual tools."
+            };
+            state.textContent = words[st.state] || `State: ${String(st.state || "unknown").toLowerCase().replaceAll("_", " ")}`;
+        }).catch(e => {
+            state.textContent = cleanError(e);
+        });
+    };
+    await guide();
+    if (revision !== renderVersion) return;
     const output = el('<pre class="val" style="white-space:pre-wrap"></pre>');
     const run = async fn => {
         try {
@@ -2019,6 +2116,8 @@ async function renderSync() {
         body.classList.add("stack");
         return body;
     };
+    scroll.appendChild(el('<h2 class="label manual">Manual tools</h2>'));
+    scroll.appendChild(el('<p class="note manual">The same steps one at a time, for setups made by hand. See docs/SYNC.md.</p>'));
     const thisMachine = group("This machine");
     const machineRow = el('<div class="btnrow"></div>');
     machineRow.appendChild(init);
