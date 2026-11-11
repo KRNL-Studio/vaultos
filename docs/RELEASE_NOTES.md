@@ -17,6 +17,10 @@ This is an **evaluation preview**. The macOS downloads named `notarized` are sig
 - **Background access** is `VaultOS --service`, installed only by `scripts/install-service-macos.sh` or `scripts/install-linux.sh --enable-service`.
 - **Sync format 2**, in the app and the CLI, with keys inside the vault and no `age` binary. A lost or retired device can be removed (`vaultos sync untrust`), and each other device confirms the removal.
 
+## Fixed in preview.4
+
+- `VAULTOS_AGENT=auto` finds the agent when the calling program is installed under a version number, as Claude's desktop sessions are on Linux: it matches the folders in the program's path as well as its file name.
+
 ## New in preview.3
 
 - **Sync from the repository address.** Settings → Sync sets a device up from the address alone and adds another device after you compare a short code on both. `vaultos sync setup`, `pending` and `approve` do the same from a terminal.

@@ -1,6 +1,6 @@
 {
   "name": "vaultos",
-  "version": "0.3.0-preview.3",
+  "version": "0.3.0-preview.4",
   "private": true,
   "description": "A local-first vault for project secrets with an MCP bridge for coding agents. The app is Rust; these scripts build, test and package it.",
   "license": "MIT",
