@@ -113,6 +113,10 @@ with read and inject access to my project.” The skill provides instructions; t
 human still unlocks the vault and grants access in the desktop. It contains no
 credentials and does not automatically change client configuration.
 
+## Engineering specs
+
+- [New-device sync correctness and migration recovery](docs/specs/MIGRATION-RELIABILITY-2026-11-12.md)
+
 ## Project status
 
 This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, notarized builds from CI, broader macOS/Intel runtime coverage, accessibility review, and usability improvements to conflict resolution. No automatic updater is enabled; install future releases explicitly after backing up.
