@@ -17,6 +17,12 @@ This is an **evaluation preview**. The macOS downloads named `notarized` are sig
 - **Background access** is `VaultOS --service`, installed only by `scripts/install-service-macos.sh` or `scripts/install-linux.sh --enable-service`.
 - **Sync format 2**, in the app and the CLI, with keys inside the vault and no `age` binary. A lost or retired device can be removed (`vaultos sync untrust`), and each other device confirms the removal.
 
+## New in preview.5
+
+- **In-app updates on macOS.** Settings → Updates checks this repository's releases once a day (you can turn this off) and notifies you when a new version is out. **Install and restart** installs it only when it carries the VaultOS update signature for that version, then restarts VaultOS locked. This is the first release that can update itself; earlier versions update by hand once.
+- **Touch ID after automatic locks.** Screen lock, sleep and idle no longer turn Touch ID unlock off. Only **Lock** asks for the typed password next time.
+- **Access requests for new projects.** An agent asking for access to a project that does not exist yet now gets your confirmation dialog, which says the project will be created, instead of a silent refusal. Agents refused for a missing scope are told how to ask.
+
 ## Fixed in preview.4
 
 - `VAULTOS_AGENT=auto` finds the agent when the calling program is installed under a version number, as Claude's desktop sessions are on Linux: it matches the folders in the program's path as well as its file name.
