@@ -40,12 +40,16 @@ jobs:
       - run: npm run dist:mac
         env:
           VAULTOS_ARCH: ${{ matrix.arch }}
+          # Signs the in-app update archive; without the secret none is built.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       - run: node scripts/test-packaged.mjs
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-${{ matrix.arch }}
           path: |
             dist/*.zip
+            dist/*.app.tar.gz
+            dist/*.app.tar.gz.sig
             dist/*.sha256
             dist/*.cdx.json
           if-no-files-found: error

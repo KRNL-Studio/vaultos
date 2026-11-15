@@ -115,6 +115,6 @@ credentials and does not automatically change client configuration.
 
 ## Project status
 
-This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, notarized builds from CI, broader macOS/Intel runtime coverage, accessibility review, and usability improvements to conflict resolution. No automatic updater is enabled; install future releases explicitly after backing up.
+This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, notarized builds from CI, broader macOS/Intel runtime coverage, accessibility review, and usability improvements to conflict resolution. On macOS, **Settings → Updates** checks this repository's releases once a day and installs a signed update only when you choose **Install and restart**; on Linux, install new releases by hand. Back up before updating.
 
 Built and maintained by [@rohit3a](https://github.com/rohit3a). Contributions, reproducible bug reports using synthetic data, and security review are welcome. Licensed under [MIT](LICENSE); dependencies retain their own licenses.

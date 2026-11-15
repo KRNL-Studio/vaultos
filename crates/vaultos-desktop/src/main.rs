@@ -17,6 +17,7 @@ mod settings;
 mod ui;
 #[cfg(feature = "ui-test")]
 mod uitest;
+mod update;
 
 use app::App;
 use std::sync::Arc;
@@ -71,6 +72,10 @@ fn main() {
         .plugin(shortcut)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(update::plugin());
+    }
     // One app per vault folder. A custom VAULTOS_DATA_DIR (tests, a second vault) runs apart.
     if std::env::var_os("VAULTOS_DATA_DIR").is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -88,6 +93,7 @@ fn main() {
     ]);
     let result = builder
         .manage(state.clone())
+        .manage(update::Updates::default())
         .on_menu_event(|app, event| ui::menu_event(app, event.id().as_ref()))
         .setup(move |app| {
             let _ = state.tauri.set(app.handle().clone());
@@ -104,6 +110,7 @@ fn main() {
             let s = state.clone();
             platform::on_sleep(move || s.auto_lock());
             ui::watch(app.handle().clone());
+            update::watch(app.handle().clone());
             signals(app.handle().clone());
             Ok(())
         })

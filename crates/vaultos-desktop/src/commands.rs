@@ -3,7 +3,7 @@
 //! agents or sync. Every non-public call needs the human's unlock and resets the idle timer.
 
 use crate::app::{blocking, lock, App};
-use crate::{export, items, keyring, login, platform, prefs, search, settings, ui};
+use crate::{export, items, keyring, login, platform, prefs, search, settings, ui, update};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -128,6 +128,8 @@ fn changes(channel: &str) -> bool {
             | "search"
             | "getSettings"
             | "getDesktopPrefs"
+            | "checkUpdate"
+            | "installUpdate"
             | "agents"
             | "allScopes"
             | "pending"
@@ -309,6 +311,10 @@ pub fn prefs_state(app: &App) -> Value {
     v["sshSocketPath"] = json!(vaultos_core::session::ssh_socket_path(&app.data_dir).ok());
     v["sshSigner"] = json!(ui::helper("vaultos-ssh-sign"));
     v["sshError"] = json!(lock(&app.ssh_error).clone());
+    v["updatesSupported"] = json!(update::SUPPORTED);
+    if let Some(t) = app.tauri.get() {
+        v["version"] = json!(update::current_version(t));
+    }
     v
 }
 
@@ -575,6 +581,12 @@ async fn main_call(app: &Arc<App>, handle: &AppHandle, channel: &str, a: &Args) 
         "saveLeakIndex" => items::save_leak_index(app).await,
         "importFile" => items::import_file(app, handle, a.str(0, "project")?).await,
         "getDesktopPrefs" => Ok(prefs_state(app)),
+        "checkUpdate" => update::check(handle).await,
+        "installUpdate" => {
+            // Replacing the app is as weighty as weakening a setting.
+            app.gate("install an update").await?;
+            update::install(handle, app).await
+        }
         "setDesktopPrefs" => {
             let patch = a.get(0).clone();
             let before = lock(&app.prefs).clone();
