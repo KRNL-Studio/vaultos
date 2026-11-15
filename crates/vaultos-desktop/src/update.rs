@@ -4,7 +4,7 @@
 //! replaces this VaultOS.app and restarts it locked. Elsewhere it reports that updates are not
 //! offered, and the Linux tarball is still updated by hand.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use tauri::AppHandle;
 
 /// Waits this long after launch before the first automatic check, then checks once a day.
@@ -24,6 +24,7 @@ mod imp {
     use super::*;
     use crate::app::{lock, App};
     use crate::ui;
+    use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tauri::Manager;
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -160,7 +161,9 @@ mod imp {
     use std::sync::Arc;
 
     #[derive(Debug, Default)]
-    pub struct Updates;
+    pub struct Updates {
+        _none: (),
+    }
 
     const UNSUPPORTED: &str = "In-app updates are available on macOS. Download new versions from the GitHub releases page.";
 
