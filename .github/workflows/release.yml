@@ -16,8 +16,6 @@ jobs:
         include:
           - arch: arm64
             os: macos-15
-          - arch: x64
-            os: macos-15-intel
     steps:
       # Provenance names the commit the workflow runs from, so that has to be the tag's.
       - name: Run from the tag

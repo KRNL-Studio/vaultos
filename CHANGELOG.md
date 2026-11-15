@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3.0-preview.5 (2026-11-15)
 
+- macOS builds are Apple Silicon (`arm64`) only. Intel Macs are no longer built, tested or offered updates; they stay on 0.3.0-preview.4.
 - In-app updates on macOS: **Settings → Updates** checks this repository's releases once a day (turn it off there) and shows a notification when a new version is out; **Install and restart** downloads it, installs it only if it carries the VaultOS update signature for that version, and restarts VaultOS locked. Release builds attach a signed `.app.tar.gz` for the updater, and `npm run update-feed` publishes the feed the app reads.
+- Screen lock, sleep and idle no longer turn off Touch ID unlock under the default hard lock policy. They still close the vault and remove the password remembered for background access; only **Lock** asks for the typed password next time.
+- An agent's `request_access` for a project that does not exist yet now asks the human (saying the project will be created) instead of being refused without a dialog, and scope and project refusals tell agents how to ask.
 
 ## 0.3.0-preview.4 (2026-11-11)
 

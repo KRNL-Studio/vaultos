@@ -26,7 +26,7 @@ Injection reduces accidental disclosure in tool transcripts. **It does not stop 
 
 ## Install on macOS
 
-1. Download the ZIP and matching `.sha256` from the [preview release](https://github.com/KRNL-Studio/vaultos/releases). Choose `arm64` for Apple Silicon or `x64` for Intel, and the `notarized` ZIP when the release has one: it is signed with a Developer ID and notarized by Apple. The `unsigned` ZIP is the release workflow's own build. The deployment target is macOS 13 or later; see release notes for versions actually tested.
+1. Download the ZIP and matching `.sha256` from the [preview release](https://github.com/KRNL-Studio/vaultos/releases). It runs on Apple Silicon Macs (`arm64`); Intel Macs are not supported from 0.3.0-preview.5. Choose the `notarized` ZIP when the release has one: it is signed with a Developer ID and notarized by Apple. The `unsigned` ZIP is the release workflow's own build. The deployment target is macOS 13 or later; see release notes for versions actually tested.
 2. In the download folder, run `shasum -a 256 -c <download-name>.zip.sha256` and confirm `OK`. This checks file integrity; it does not authenticate a publisher independently of GitHub. The `unsigned` ZIPs from the release workflow also carry signed build provenance: `gh attestation verify <download-name>.zip --repo KRNL-Studio/vaultos` checks that this repository's workflow built the file from the tagged source.
 3. Extract **VaultOS.app** and put it in a folder of your choice. It can coexist with other vault applications.
 4. Open it. A `notarized` build opens normally. If macOS blocks an `unsigned` build as from an unidentified developer, follow Apple's [per-app Open Anyway instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security**, only after you have verified and decided to trust the download. Managed Macs may disallow this. Do not disable Gatekeeper globally.
@@ -91,8 +91,7 @@ Tests use temporary synthetic vaults.
 cargo test --workspace
 npm run check
 npm run test:desktop     # macOS with an interactive desktop
-npm run dist:mac         # unsigned app for this Mac's architecture
-VAULTOS_ARCH=x64 npm run dist:mac
+npm run dist:mac         # unsigned app for Apple Silicon
 npm run dist:linux       # unsigned Linux tar.gz, on Linux for its own architecture
 ```
 
@@ -115,6 +114,6 @@ credentials and does not automatically change client configuration.
 
 ## Project status
 
-This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, notarized builds from CI, broader macOS/Intel runtime coverage, accessibility review, and usability improvements to conflict resolution. On macOS, **Settings → Updates** checks this repository's releases once a day and installs a signed update only when you choose **Install and restart**; on Linux, install new releases by hand. Back up before updating.
+This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, notarized builds from CI, broader macOS version coverage, accessibility review, and usability improvements to conflict resolution. On macOS, **Settings → Updates** checks this repository's releases once a day and installs a signed update only when you choose **Install and restart**; on Linux, install new releases by hand. Back up before updating.
 
 Built and maintained by [@rohit3a](https://github.com/rohit3a). Contributions, reproducible bug reports using synthetic data, and security review are welcome. Licensed under [MIT](LICENSE); dependencies retain their own licenses.

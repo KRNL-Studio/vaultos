@@ -30,7 +30,7 @@ does not change the app's directory: both processes need the same setting.
 ## Install on macOS
 
 The easiest path is the [preview release](https://github.com/KRNL-Studio/vaultos/releases).
-Choose `arm64` for Apple Silicon or `x64` for Intel. The deployment target is
+VaultOS runs on Apple Silicon Macs (`arm64`) only. The deployment target is
 macOS 13+; check the release notes for versions actually tested. Download the ZIP
 and matching checksum, and run this in the download directory, substituting the
 actual filename:
