@@ -260,12 +260,12 @@ fn the_bridge_speaks_for_the_enrolled_agent() {
         (
             "list_secrets",
             json!({ "project": "Hidden Project" }),
-            "Error: Project is not approved for this agent",
+            "Error: Project is not approved for this agent. Ask the human for it with request_access (vaultos-agent request-access), or in VaultOS → Agents",
         ),
         (
             "reveal_secret",
             json!({ "project": "Example App", "key": "HUMAN_KEY" }),
-            "Error: This agent does not have the reveal scope",
+            "Error: This agent does not have the reveal scope. Ask the human for it with request_access (vaultos-agent request-access), or in VaultOS → Agents",
         ),
         ("list_secrets", json!({}), "Error: project is required"),
         (
