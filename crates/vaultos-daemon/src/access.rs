@@ -2,6 +2,7 @@
 //! (`POST /access/request`), and the human confirms it in the app (Touch ID, or the app's
 //! dialog). A grant applies only to that project, lives only in the owner's memory and ends
 //! when it expires, when the vault locks, when the human ends it, or when the owner stops.
+//! A request may name a project that does not exist yet; confirming it creates the project.
 //! The vault records the grant in the audit log and nothing else.
 
 use crate::api::Reply;
@@ -164,8 +165,11 @@ pub(crate) async fn request(
         Err(r) => return r,
     };
     let not_granted = || Reply::error(403, "The human did not grant this access");
-    let Some((project_id, project)) = found else {
-        return not_granted();
+    // A project that does not exist yet is asked about like any other, so the reply cannot tell
+    // an agent which names exist; confirming creates it.
+    let (project_id, project) = match found {
+        Some((id, name)) => (Some(id), name),
+        None => (None, ask.project.clone()),
     };
     if let Some(at) = lock(&shared.access.declined).get(&agent.id) {
         if at.elapsed() < DECLINED_PAUSE {
@@ -186,7 +190,12 @@ pub(crate) async fn request(
     }
     let _one = Confirming(&shared.confirming);
     let reason = format!(
-        "give agent “{}” {} access to {} for {} minutes, for “{}” ({})",
+        "{}give agent “{}” {} access to {} for {} minutes, for “{}” ({})",
+        if project_id.is_none() {
+            "create a new project and "
+        } else {
+            ""
+        },
         clean(&agent.name),
         ask.scopes.join(", "),
         clean(&project),
@@ -203,40 +212,49 @@ pub(crate) async fn request(
         return not_granted();
     }
     let ttl = Duration::from_secs(ask.minutes * 60);
-    let grant = Grant {
-        agent_id: agent.id.clone(),
-        agent: agent.name.clone(),
-        project_id,
-        project,
-        scopes: ask.scopes,
-        expires_at: vaultos_core::model::iso_after(ttl),
-        until: Instant::now() + ttl,
-        locks,
-    };
     let s = shared.clone();
-    let g = grant.clone();
+    let (agent_id, agent_name, scopes) = (agent.id.clone(), agent.name.clone(), ask.scopes);
     let recorded = tokio::task::spawn_blocking(move || {
-        s.with_store(|store| {
-            if store.lock_count() != g.locks || !store.is_unlocked() {
-                return false;
+        s.with_store(|store| -> Option<Grant> {
+            if store.lock_count() != locks || !store.is_unlocked() {
+                return None;
             }
+            // Created by the human's confirmation, unless someone made it meanwhile.
+            let (project_id, project) = match project_id {
+                Some(id) => (id, project),
+                None => match store.find_project(&project).ok().flatten() {
+                    Some(found) => found,
+                    None => store.create_project(&project, HUMAN).ok()?,
+                },
+            };
             let detail = format!(
                 "{} ({}): {} on {} for {} min: {}",
-                g.agent,
-                agent_ref(&g.agent_id),
-                g.scopes.join(", "),
-                g.project,
+                agent_name,
+                agent_ref(&agent_id),
+                scopes.join(", "),
+                project,
                 ask.minutes,
                 ask.reason
             );
-            store.audit("access-grant", &detail, HUMAN).is_ok()
+            store.audit("access-grant", &detail, HUMAN).ok()?;
+            Some(Grant {
+                agent_id,
+                agent: agent_name,
+                project_id,
+                project,
+                scopes,
+                expires_at: vaultos_core::model::iso_after(ttl),
+                until: Instant::now() + ttl,
+                locks,
+            })
         })
     })
     .await
-    .unwrap_or(false);
-    if !recorded {
+    .ok()
+    .flatten();
+    let Some(grant) = recorded else {
         return not_granted();
-    }
+    };
     lock(&shared.access.declined).remove(&agent.id);
     lock(&shared.access.grants).push(grant.clone());
     Reply::ok(json!({

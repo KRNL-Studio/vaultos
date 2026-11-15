@@ -219,7 +219,10 @@ fn agents_see_only_what_they_are_granted() {
         .collect();
     assert_eq!(names, ["Example App"]);
     let hidden = a.request("GET", "/projects/Hidden%20Project/secrets", None);
-    assert_eq!(refused(hidden).2, "Project is not approved for this agent");
+    assert_eq!(
+        refused(hidden).2,
+        "Project is not approved for this agent. Ask the human for it with request_access (vaultos-agent request-access), or in VaultOS → Agents"
+    );
     let search = a.request("GET", "/search?q=project", None).unwrap();
     assert_eq!(search, json!([]), "search filters unapproved projects");
     let reveal = a.request(
@@ -229,7 +232,7 @@ fn agents_see_only_what_they_are_granted() {
     );
     assert_eq!(
         refused(reveal).2,
-        "This agent does not have the reveal scope"
+        "This agent does not have the reveal scope. Ask the human for it with request_access (vaultos-agent request-access), or in VaultOS → Agents"
     );
 
     // A key an agent adds waits for the human before it is injected.

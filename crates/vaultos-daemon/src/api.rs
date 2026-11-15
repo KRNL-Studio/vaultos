@@ -99,6 +99,13 @@ fn deny(msg: impl Into<String>) -> Error {
     Error::Forbidden(msg.into())
 }
 
+/// How an agent can get what it lacks, appended to every scope and project refusal.
+const ASK: &str = "Ask the human for it with request_access (vaultos-agent request-access), or in VaultOS → Agents";
+
+fn missing_scope(name: &str) -> Error {
+    deny(format!("This agent does not have the {name} scope. {ASK}"))
+}
+
 /// `validation.js` `object`, applied to a request body.
 fn parse_body(req: &Request) -> std::result::Result<Map<String, Value>, Reply> {
     if req.body.is_empty() {
@@ -325,7 +332,7 @@ impl Ctx<'_> {
         {
             Ok(())
         } else {
-            Err(deny(format!("This agent does not have the {name} scope")))
+            Err(missing_scope(name))
         }
     }
 
@@ -341,7 +348,7 @@ impl Ctx<'_> {
         if self.can(id, name) {
             Ok(())
         } else {
-            Err(deny(format!("This agent does not have the {name} scope")))
+            Err(missing_scope(name))
         }
     }
 
@@ -363,7 +370,9 @@ impl Ctx<'_> {
             {
                 Ok((id, name))
             }
-            _ => Err(deny("Project is not approved for this agent")),
+            _ => Err(deny(format!(
+                "Project is not approved for this agent. {ASK}"
+            ))),
         }
     }
 
@@ -391,7 +400,7 @@ impl Ctx<'_> {
     /// the add scope may: a just-in-time grant covers its own project, never new ones.
     fn create_project(&self, store: &mut Store, name: Option<&Value>) -> Result<(String, String)> {
         if !self.agent.has_scope("add") {
-            return Err(deny("This agent does not have the add scope"));
+            return Err(missing_scope("add"));
         }
         let name = name
             .and_then(Value::as_str)

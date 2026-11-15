@@ -112,7 +112,6 @@ fn grants_temporary_access_to_one_project_after_the_human_confirms() {
         Some(&json!({ "project": "Hidden Project", "scopes": ["read"] })),
     );
     assert_eq!(status(no_reason), Some(400));
-    assert_eq!(status(ask("No Such Project", &["read"])), Some(403));
     assert!(reasons.lock().unwrap().is_empty(), "nothing to confirm yet");
 
     let granted = ask("Hidden Project", &["reveal", "read"]).unwrap();
@@ -159,11 +158,31 @@ fn grants_temporary_access_to_one_project_after_the_human_confirms() {
     assert_eq!(handle.end_access(&issued.id, None), 1);
     assert_eq!(status(agent.request("GET", hidden, None)), Some(403));
 
-    // Declined: refused, and the agent cannot ask again at once.
+    // A project that does not exist yet is asked about too; confirming creates it, for the
+    // grant only.
+    let new = ask("New Project", &["add"]).unwrap();
+    assert_eq!(new["granted"], true);
+    assert_eq!(new["project"], "New Project");
+    assert!(reasons.lock().unwrap()[2]
+        .starts_with("create a new project and give agent “Test Agent” add access to New Project"));
+    let added = agent.request(
+        "POST",
+        "/projects/New%20Project/secrets",
+        Some(&json!({ "key": "NEW_KEY", "value": "synthetic-new-value" })),
+    );
+    assert!(added.is_ok(), "{added:?}");
+    let created = handle.with_store(|s| s.find_project("New Project").unwrap().is_some());
+    assert!(created);
+    assert_eq!(handle.end_access(&issued.id, None), 1);
+
+    // Declined: refused, and the agent cannot ask again at once. A name that does not exist is
+    // refused the same way, after the same question, and is not created.
     allow.store(false, Ordering::SeqCst);
-    assert_eq!(status(ask("Hidden Project", &["read"])), Some(403));
+    assert_eq!(status(ask("No Such Project", &["read"])), Some(403));
     assert_eq!(status(ask("Hidden Project", &["read"])), Some(429));
-    assert_eq!(reasons.lock().unwrap().len(), 3);
+    assert_eq!(reasons.lock().unwrap().len(), 4);
+    let missing = handle.with_store(|s| s.find_project("No Such Project").unwrap().is_none());
+    assert!(missing);
 
     // Only agents ask.
     let owner_client = Client::with_token(data.clone(), None);
