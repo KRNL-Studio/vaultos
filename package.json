@@ -21,6 +21,10 @@
     "test:desktop": "node scripts/test-desktop-ui.mjs && node scripts/test-desktop-service.mjs",
     "check": "node scripts/check.mjs && npm test",
     "dist:mac": "node scripts/package-mac.mjs",
-    "dist:linux": "node scripts/package-linux.mjs"
+    "dist:linux": "node scripts/package-linux.mjs",
+    "update-feed": "node scripts/update-feed.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
   }
 }

@@ -1466,6 +1466,48 @@ async function renderSettings() {
     const notifyApprovals = desktopBox("Notify me when an agent's key is waiting for approval", dp.notifyApprovals);
     const notifyExpiry = desktopBox("Notify me about keys that expire within 7 days", dp.notifyExpiry);
     scroll.appendChild(el(`<p class="note">Notifications never include key names, because they can appear on the lock screen.</p>`));
+    scroll = panel(page, "Updates", {
+        tag: dp.version ? `version ${dp.version}` : ""
+    });
+    const checkUpdates = desktopBox("Check for updates once a day", dp.checkUpdates, !dp.updatesSupported);
+    const updateNote = el(`<p class="note" role="status"></p>`);
+    updateNote.textContent = dp.updatesSupported ? "Updates come from VaultOS's GitHub releases and install only when signed by the VaultOS update key. Installing restarts VaultOS, locked." : "In-app updates are available on macOS. Download new versions from the GitHub releases page.";
+    const updateRow = el(`<div class="saverow"><button type="button" class="btn ghost">Check now</button><button type="button" class="btn primary" style="display:none">Install and restart</button></div>`);
+    const [checkBtn, installBtn] = updateRow.querySelectorAll("button");
+    checkBtn.disabled = !dp.updatesSupported;
+    checkBtn.onclick = async () => {
+        checkBtn.disabled = true;
+        checkBtn.textContent = "Checking…";
+        updateNote.classList.remove("err");
+        try {
+            const r = await window.vault.checkUpdate();
+            installBtn.style.display = r.available ? "" : "none";
+            updateNote.textContent = r.available ? `Version ${r.version} is available (you have ${r.current}).${r.notes ? " " + r.notes : ""}` : `VaultOS ${r.current} is up to date.`;
+        } catch (e) {
+            installBtn.style.display = "none";
+            updateNote.textContent = cleanError(e);
+            updateNote.classList.add("err");
+        }
+        checkBtn.disabled = false;
+        checkBtn.textContent = "Check now";
+    };
+    installBtn.onclick = async () => {
+        installBtn.disabled = checkBtn.disabled = true;
+        installBtn.textContent = "Downloading…";
+        updateNote.classList.remove("err");
+        try {
+            const r = await human("installUpdate");
+            updateNote.textContent = `Installed ${r.version}. Restarting…`;
+            installBtn.textContent = "Restarting…";
+        } catch (e) {
+            updateNote.textContent = cleanError(e);
+            updateNote.classList.add("err");
+            installBtn.disabled = checkBtn.disabled = false;
+            installBtn.textContent = "Install and restart";
+        }
+    };
+    scroll.appendChild(updateNote);
+    scroll.appendChild(updateRow);
     scroll = panel(page, "SSH agent", {
         tag: dp.sshSocket ? "on" : "off"
     });
@@ -1531,7 +1573,8 @@ git config --global commit.gpgsign true`;
                 launchAtLogin: atLogin.checked,
                 notifyApprovals: notifyApprovals.checked,
                 notifyExpiry: notifyExpiry.checked,
-                sshAgent: sshAgent.checked
+                sshAgent: sshAgent.checked,
+                checkUpdates: checkUpdates.checked
             });
             shortcutNote.textContent = saved.shortcutError || "Opens Quick Access from any app: search, then press Return to copy.";
             shortcutNote.classList.toggle("err", !!saved.shortcutError);

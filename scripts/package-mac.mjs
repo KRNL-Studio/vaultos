@@ -8,7 +8,8 @@
 // Application identity and notarization credentials are set, and signing and notarization
 // pass. Notarization takes a notarytool Keychain profile (VAULTOS_NOTARY_PROFILE) or an App
 // Store Connect API key: VAULTOS_NOTARY_KEY (absolute path of the .p8 file),
-// VAULTOS_NOTARY_KEY_ID and VAULTOS_NOTARY_ISSUER.
+// VAULTOS_NOTARY_KEY_ID and VAULTOS_NOTARY_ISSUER. With the update key (see below) it also
+// writes the signed archive the in-app updater installs.
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -188,8 +189,37 @@ if (identity) try {
     });
     throw e;
 }
+// The in-app updater's archive: the finished (stapled, when notarized) VaultOS.app as a gzipped
+// tar, signed with the update key for this version. Needs TAURI_SIGNING_PRIVATE_KEY (the key
+// itself) or TAURI_SIGNING_PRIVATE_KEY_PATH; without either no update archive is written.
+const updateKey = env.TAURI_SIGNING_PRIVATE_KEY || env.TAURI_SIGNING_PRIVATE_KEY_PATH;
+const tarball = zip.replace(/\.zip$/, ".app.tar.gz");
+for (const f of [ tarball, tarball + ".sig", tarball + ".sha256" ]) rmSync(f, {
+    force: true
+});
+if (updateKey) {
+    execFileSync("/usr/bin/tar", [ "-czf", tarball, "-C", folder, "VaultOS.app" ], {
+        env: {
+            ...env,
+            COPYFILE_DISABLE: "1"
+        }
+    });
+    execFileSync(path.resolve("node_modules", ".bin", "tauri"), [ "signer", "sign", "--app-version", v, tarball ], {
+        env: {
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "",
+            ...env
+        },
+        stdio: [ "ignore", "ignore", "inherit" ]
+    });
+    const signed = Buffer.from(readFileSync(tarball + ".sig", "utf8"), "base64").toString("utf8");
+    if (!signed.includes(`\tversion:${v}`)) throw new Error("The update signature does not name version " + v);
+}
 budget("VaultOS.app", app, 24);
 budget(path.basename(zip), zip, 9);
 checksum(zip);
+if (updateKey) {
+    budget(path.basename(tarball), tarball, 9);
+    checksum(tarball);
+}
 sbom(triple, zip.replace(/\.zip$/, ".cdx.json"));
-console.log("Built " + zip);
+console.log("Built " + zip + (updateKey ? " and " + path.basename(tarball) : ""));
