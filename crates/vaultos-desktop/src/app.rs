@@ -305,9 +305,16 @@ impl App {
     }
 
     /// A full Lock: the window, Quick Access, the copied value, the proof, the server. With
-    /// `forget` (Lock, screen lock, sleep, idle) the remembered password is removed too and the
-    /// next unlock must be typed.
+    /// `forget` (the human's Lock) the remembered password is removed too and the next unlock
+    /// must be typed: Touch ID unlock waits for the password as well.
     pub fn lock(&self, forget: bool) {
+        self.lock_with(forget, forget);
+    }
+
+    /// `forget` removes the remembered password, so background access cannot unlock again.
+    /// `block` also records the Lock on disk, which background access and Touch ID unlock both
+    /// honour until the next typed unlock.
+    fn lock_with(&self, forget: bool, block: bool) {
         let _gate = lock(&self.finishing);
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.human.store(false, Ordering::SeqCst);
@@ -318,8 +325,11 @@ impl App {
         self.forget_proof();
         if forget {
             // Either one keeps background access from unlocking again.
-            let blocked = atomic_write(&self.data_dir.join(LOCKED_FILE), b"").is_ok();
             let forgotten = self.keyring.clear(keyring::PASSWORD).is_ok();
+            // An automatic lock records itself only when the keychain kept the password: Touch
+            // ID unlock then needs the password once, but background access stays shut.
+            let blocked = (block || !forgotten)
+                && atomic_write(&self.data_dir.join(LOCKED_FILE), b"").is_ok();
             if !blocked && !forgotten {
                 if let Some(app) = self.tauri.get() {
                     ui::notify(
@@ -357,7 +367,8 @@ impl App {
     }
 
     /// Screen lock, sleep and idle follow the vault's lock policy: hard unless the human
-    /// chose soft.
+    /// chose soft. A hard automatic lock closes the vault and forgets the remembered password
+    /// like Lock, but leaves Touch ID unlock working: its sealed copy needs the fingerprint.
     pub fn auto_lock(&self) {
         if !self.human.load(Ordering::SeqCst) && !self.store_unlocked() {
             // An unlock may still be waiting for its turn, Touch ID or the key derivation.
@@ -370,7 +381,7 @@ impl App {
         if soft {
             self.lock_window();
         } else {
-            self.lock(true);
+            self.lock_with(true, false);
         }
     }
 
