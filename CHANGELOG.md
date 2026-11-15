@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- In-app updates on macOS: **Settings → Updates** checks this repository's releases once a day (turn it off there) and shows a notification when a new version is out; **Install and restart** downloads it, installs it only if it carries the VaultOS update signature for that version, and restarts VaultOS locked. Release builds attach a signed `.app.tar.gz` for the updater, and `npm run update-feed` publishes the feed the app reads.
+
 ## 0.3.0-preview.4 (2026-11-11)
 
 - `VAULTOS_AGENT=auto` matches the folders in a calling program's path as well as its file name, so a client installed under a version number (`~/.claude/remote/ccd-cli/2.1.3`) is still found as `claude`.

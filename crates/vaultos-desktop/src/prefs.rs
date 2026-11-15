@@ -9,12 +9,13 @@ use vaultos_core::fs_safe::{atomic_write, read_regular};
 
 const FILE: &str = "desktop-prefs.json";
 pub const DEFAULT_SHORTCUT: &str = "Shift+CommandOrControl+Space";
-const BOOLEANS: [&str; 5] = [
+const BOOLEANS: [&str; 6] = [
     "menuBar",
     "launchAtLogin",
     "notifyApprovals",
     "notifyExpiry",
     "sshAgent",
+    "checkUpdates",
 ];
 const MODIFIERS: [&str; 12] = [
     "Command",
@@ -60,6 +61,8 @@ pub struct Prefs {
     pub notify_expiry: bool,
     /// Serve the vault's SSH keys to ssh and Git; off until the human turns it on.
     pub ssh_agent: bool,
+    /// Look for a new version once a day (macOS); installing always waits for the human.
+    pub check_updates: bool,
 }
 
 impl Default for Prefs {
@@ -73,6 +76,7 @@ impl Default for Prefs {
             notify_approvals: false,
             notify_expiry: false,
             ssh_agent: false,
+            check_updates: true,
         }
     }
 }
@@ -86,6 +90,7 @@ impl Prefs {
             "notifyApprovals": self.notify_approvals,
             "notifyExpiry": self.notify_expiry,
             "sshAgent": self.ssh_agent,
+            "checkUpdates": self.check_updates,
         });
         v.as_object().cloned().unwrap_or_default()
     }
@@ -96,6 +101,7 @@ impl Prefs {
             "launchAtLogin" => self.launch_at_login = v,
             "notifyApprovals" => self.notify_approvals = v,
             "sshAgent" => self.ssh_agent = v,
+            "checkUpdates" => self.check_updates = v,
             _ => self.notify_expiry = v,
         }
     }

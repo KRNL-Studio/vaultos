@@ -49,6 +49,8 @@ objc2-foundation = "0.3"
 objc2-local-authentication = "0.3"
 security-framework = "3"
 security-framework-sys = "2"
+# macOS TLS (Security.framework), not rustls with a bundled root store.
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["native-tls", "system-proxy", "zip"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 arboard = "3"
