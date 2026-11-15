@@ -39,6 +39,12 @@ jobs:
       - name: Install the desktop app's Linux libraries (WebKitGTK, tray, shortcut)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      # Restores compiled dependencies; only main saves, so pull requests cannot seed the cache.
+      # The release workflow does not use it and builds from scratch.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p vaultos-desktop --features ui-test --all-targets --locked -- -D warnings
@@ -102,6 +108,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Restores compiled dependencies; only main saves, so pull requests cannot seed the cache.
+      # The release workflow does not use it and builds from scratch.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: macos-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm run test:desktop
