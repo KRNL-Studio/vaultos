@@ -17,11 +17,11 @@ import { budget, build, checksum, sbom, TOOLS, version } from "./rust-dist.mjs";
 
 if (process.platform !== "darwin") throw new Error("Build macOS artifacts on macOS; use npm run dist:linux on Linux");
 const arch = process.env.VAULTOS_ARCH || process.arch;
+// Apple Silicon only: Intel Macs are not supported from 0.3.0-preview.5.
 const triple = {
-    arm64: "aarch64-apple-darwin",
-    x64: "x86_64-apple-darwin"
+    arm64: "aarch64-apple-darwin"
 }[arch];
-if (!triple) throw new Error("Supported architectures: arm64, x64");
+if (!triple) throw new Error("VaultOS for macOS is built for Apple Silicon (arm64) only");
 const identity = process.env.VAULTOS_SIGN_IDENTITY;
 const env = process.env;
 const notary = env.VAULTOS_NOTARY_PROFILE ? [ "--keychain-profile", env.VAULTOS_NOTARY_PROFILE ] : env.VAULTOS_NOTARY_KEY && env.VAULTOS_NOTARY_KEY_ID && env.VAULTOS_NOTARY_ISSUER ? [ "--key", env.VAULTOS_NOTARY_KEY, "--key-id", env.VAULTOS_NOTARY_KEY_ID, "--issuer", env.VAULTOS_NOTARY_ISSUER ] : null;
@@ -61,7 +61,7 @@ const appexResources = path.join(appex, "Contents", "Resources");
 for (const dir of [ appexMacos, appexResources ]) mkdirSync(dir, {
     recursive: true
 });
-execFileSync("/usr/bin/xcrun", [ "swiftc", "-O", "-target", `${arch === "arm64" ? "arm64" : "x86_64"}-apple-macos13.0`, "-module-name", "VaultOSSafari", "-parse-as-library", "-application-extension", "-framework", "SafariServices", "-Xlinker", "-e", "-Xlinker", "_NSExtensionMain", "-o", path.join(appexMacos, "VaultOSSafari"), "safari/SafariWebExtensionHandler.swift" ], {
+execFileSync("/usr/bin/xcrun", [ "swiftc", "-O", "-target", "arm64-apple-macos13.0", "-module-name", "VaultOSSafari", "-parse-as-library", "-application-extension", "-framework", "SafariServices", "-Xlinker", "-e", "-Xlinker", "_NSExtensionMain", "-o", path.join(appexMacos, "VaultOSSafari"), "safari/SafariWebExtensionHandler.swift" ], {
     stdio: "inherit"
 });
 copyFileSync(path.join(release, "vaultos-browser"), path.join(appexMacos, "vaultos-browser"));

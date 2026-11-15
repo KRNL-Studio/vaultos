@@ -6,17 +6,16 @@
 //   node scripts/update-feed.mjs v0.3.0-preview.5 [--publish] [--allow-unsigned]
 //
 // Only notarized archives are offered unless --allow-unsigned is given, so an update never
-// replaces a notarized app with an ad hoc signed one by default. A Mac whose architecture has no
-// archive in the release is simply not offered the update.
+// replaces a notarized app with an ad hoc signed one by default.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const REPO = "KRNL-Studio/vaultos";
 const FEED = "updates";
+// Apple Silicon only; Intel Macs are not supported.
 const PLATFORMS = {
-    arm64: "darwin-aarch64",
-    x64: "darwin-x86_64"
+    arm64: "darwin-aarch64"
 };
 
 const args = process.argv.slice(2);

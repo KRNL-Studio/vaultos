@@ -4,7 +4,7 @@ This is an **evaluation preview**. The macOS downloads named `notarized` are sig
 
 ## Downloads
 
-- macOS `arm64` (Apple Silicon) and `x64` (Intel) ZIPs with **VaultOS.app**. Deployment target: macOS 13+. The MCP bridge and CLIs are inside it, in `VaultOS.app/Contents/Helpers`.
+- macOS `arm64` (Apple Silicon) ZIPs with **VaultOS.app**. Intel Macs are not supported from preview.5. Deployment target: macOS 13+. The MCP bridge and CLIs are inside it, in `VaultOS.app/Contents/Helpers`.
 - Linux `x64` tarball. Install it per user with `scripts/install-linux.sh --from <tarball>` from a source checkout; it needs the system's WebKitGTK 4.1. See the README.
 - Verify the matching `.sha256` before opening. A CycloneDX JSON inventory of the Rust crates is attached for each build. Each archive and inventory also has signed GitHub build provenance: `gh attestation verify <download> --repo KRNL-Studio/vaultos` checks that the release workflow of this repository built it from the tagged source. That provenance covers the `unsigned` ZIPs, the tarball and the inventories. The `notarized` ZIPs are built and signed on the maintainer's Mac from the same tag, because the signing identity is not in CI: they carry a checksum and Apple's notarization ticket, not GitHub provenance.
 - Builds use a separate preview data, Keychain and Secret Service namespace. Nothing installs a login service or imports another vault on its own.
@@ -21,6 +21,7 @@ This is an **evaluation preview**. The macOS downloads named `notarized` are sig
 
 - **In-app updates on macOS.** Settings → Updates checks this repository's releases once a day (you can turn this off) and notifies you when a new version is out. **Install and restart** installs it only when it carries the VaultOS update signature for that version, then restarts VaultOS locked. This is the first release that can update itself; earlier versions update by hand once.
 - **Touch ID after automatic locks.** Screen lock, sleep and idle no longer turn Touch ID unlock off. Only **Lock** asks for the typed password next time.
+- **Apple Silicon only.** macOS builds are now `arm64` only; Intel Macs stay on preview.4.
 - **Access requests for new projects.** An agent asking for access to a project that does not exist yet now gets your confirmation dialog, which says the project will be created, instead of a silent refusal. Agents refused for a missing scope are told how to ask.
 
 ## Fixed in preview.4
@@ -48,4 +49,4 @@ Read SECURITY.md, docs/AGENTS.md, docs/SYNC.md and docs/RECOVERY.md. Agents with
 
 ## Testing
 
-Release automation runs the Rust tests, the desktop flow and service-mode tests, and the packaged app smoke test on **macOS 15 Apple Silicon** and **macOS 15 Intel**, and the Rust tests plus Linux packaging on **Ubuntu**. macOS 13 is the deployment target and has not been separately exercised.
+Release automation runs the Rust tests, the desktop flow and service-mode tests, and the packaged app smoke test on **macOS 15 Apple Silicon**, and the Rust tests plus Linux packaging on **Ubuntu**. macOS 13 is the deployment target and has not been separately exercised.

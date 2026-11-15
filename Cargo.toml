@@ -21,7 +21,7 @@ print_stdout = "deny"
 unwrap_used = "deny"
 
 [profile.release]
-# Smaller programs (the app bundle's budget is 24 MiB; Intel builds run about 2 MiB larger); the
+# Smaller programs (the app bundle's budget is 24 MiB); the
 # crates that unlock, seal and sign keep full optimisation below.
 opt-level = "s"
 lto = true
