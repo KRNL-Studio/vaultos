@@ -112,6 +112,10 @@ with read and inject access to my project.” The skill provides instructions; t
 human still unlocks the vault and grants access in the desktop. It contains no
 credentials and does not automatically change client configuration.
 
+## Engineering specs
+
+- [New-device sync correctness and migration recovery](docs/specs/MIGRATION-RELIABILITY-2026-11-12.md)
+
 ## Project status
 
 This first public preview prioritizes a small, inspectable local workflow. Remaining release milestones include independent security review, notarized builds from CI, broader macOS version coverage, accessibility review, and usability improvements to conflict resolution. On macOS, **Settings → Updates** checks this repository's releases once a day and installs a signed update only when you choose **Install and restart**; on Linux, install new releases by hand. Back up before updating.
