@@ -25,6 +25,6 @@
     "update-feed": "node scripts/update-feed.mjs"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.12.4"
+    "@tauri-apps/cli": "2.12.6"
   }
 }
