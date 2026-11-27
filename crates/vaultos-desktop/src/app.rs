@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter};
 use vaultos_core::fs_safe::{atomic_write, claim};
 use vaultos_core::store::VAULT_FILE;
 use vaultos_core::{Error, KdfParams, SecretKey, SecretString, Store};
+use vaultos_daemon::enrollment::{Review, REVIEW_TIMEOUT};
 use vaultos_daemon::server::{run_embedded, Config, Confirm, Handle};
 
 /// Proof of presence (Touch ID, a typed password or an unlock) lasts this long.
@@ -188,6 +189,41 @@ impl App {
             tauri
                 .as_ref()
                 .map(|t| crate::ui::ask_allow(t, title, reason))
+        }))
+    }
+
+    /// Review every grant in the app before asking for a fresh Touch ID confirmation.
+    fn enrollment_review(self: &Arc<Self>) -> Review {
+        let app = Arc::downgrade(self);
+        Review(Arc::new(move |details, deadline| {
+            let app = app.upgrade()?;
+            let handle = app.tauri.get()?;
+            let generation = app.generation();
+            if !app.human_unlocked() {
+                return None;
+            }
+            let live = || {
+                Instant::now() < deadline && !app.locked_since(generation) && app.human_unlocked()
+            };
+            if !live() || !ui::ask_allow(handle, "Approve agent enrollment?", details) || !live() {
+                return Some(false);
+            }
+            let confirmed = if platform::touch_id_available() {
+                platform::touch_id_prompt("approve the agent enrollment you just reviewed")
+            } else {
+                // A dialog alone cannot replace stronger confirmation configured in Settings.
+                // The human can still enroll there using the master password.
+                let required = app
+                    .with_store(|s| {
+                        Ok(settings::touch_id(s.settings()?)["humanActions"] == json!(true))
+                    })
+                    .ok()?;
+                if required {
+                    return None;
+                }
+                true
+            };
+            Some(confirmed && live())
         }))
     }
 
@@ -472,6 +508,7 @@ impl App {
         match ready_rx.await {
             Ok(h) => {
                 *lock(&self.server) = Some((id, h.clone()));
+                h.set_enrollment_review(self.enrollment_review(), REVIEW_TIMEOUT);
                 h.set_access_confirm(Some(self.ask_human("Allow this agent's access?")));
                 h.set_browser_confirm(Some(self.ask_human("Pair this browser?")));
                 self.apply_ssh_agent();

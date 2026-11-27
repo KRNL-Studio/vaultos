@@ -119,6 +119,43 @@ pub struct Wildcards {
     pub any_root: bool,
 }
 
+/// A requested enrollment. On reissue an omitted field preserves the existing grant.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Enrollment {
+    pub name: String,
+    pub scopes: Option<Vec<String>>,
+    pub projects: Option<Selection>,
+    pub roots: Option<Selection>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Selection {
+    All,
+    Only(Vec<String>),
+}
+
+/// Effective grants, with names resolved to project IDs and folders to canonical paths.
+#[derive(Debug, PartialEq)]
+pub struct EnrollmentPlan {
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub projects: Vec<String>,
+    pub roots: Vec<String>,
+    pub wildcards: Wildcards,
+    pub run_commands: Vec<String>,
+    // Compare credentials and grants as well as the displayed fields on reissue.
+    existing: Option<Agent>,
+    change_access: bool,
+}
+
+impl EnrollmentPlan {
+    pub fn reissued(&self) -> bool {
+        self.existing.is_some()
+    }
+}
+
 pub fn new_token() -> SecretString {
     SecretString::new(hex(&random_array::<32>()))
 }
@@ -266,6 +303,124 @@ impl Store {
             }
         }
         Ok((ids, folders))
+    }
+
+    pub fn prepare_enrollment(&self, request: &Enrollment) -> Result<EnrollmentPlan> {
+        let name = request.name.trim();
+        validate::text(&request.name, "agent name", 100, false)?;
+        let mut existing = self
+            .agent_records()?
+            .into_iter()
+            .find(|a| a.name.to_lowercase() == name.to_lowercase());
+        if let Some(agent) = &mut existing {
+            // Activity during review does not change what the human is authorizing.
+            agent.last_seen_at = None;
+        }
+        let selection =
+            |requested: &Option<Selection>, inherited: Vec<String>, all: bool| match requested {
+                Some(Selection::All) => (Vec::new(), true),
+                Some(Selection::Only(list)) => (list.clone(), false),
+                None => (inherited, all),
+            };
+        let (projects, all_projects) = selection(
+            &request.projects,
+            existing
+                .as_ref()
+                .map(|a| a.projects.clone())
+                .unwrap_or_default(),
+            existing.as_ref().is_some_and(|a| a.all_projects),
+        );
+        let (roots, any_root) = selection(
+            &request.roots,
+            existing
+                .as_ref()
+                .map(|a| a.roots.clone())
+                .unwrap_or_default(),
+            existing.as_ref().is_some_and(|a| a.any_root),
+        );
+        let change_access =
+            existing.is_none() || request.projects.is_some() || request.roots.is_some();
+        let (projects, roots) = if change_access {
+            self.validate_access(&projects, &roots)?
+        } else {
+            (projects, roots)
+        };
+        let scopes = match &request.scopes {
+            Some(scopes) => check_scopes(scopes)?,
+            None => existing.as_ref().map_or_else(
+                || DEFAULT_SCOPES.iter().map(|s| (*s).to_owned()).collect(),
+                |a| a.scopes.clone(),
+            ),
+        };
+        Ok(EnrollmentPlan {
+            name: existing
+                .as_ref()
+                .map_or_else(|| name.to_owned(), |a| a.name.clone()),
+            scopes,
+            projects,
+            roots,
+            wildcards: Wildcards {
+                all_projects,
+                any_root,
+            },
+            run_commands: existing
+                .as_ref()
+                .map(|a| a.run_commands.clone())
+                .unwrap_or_default(),
+            existing,
+            change_access,
+        })
+    }
+
+    /// Call with a current, human-authorized plan under the owner lock. Audit and save
+    /// before returning the new credential.
+    pub fn issue_enrollment(
+        &mut self,
+        plan: &EnrollmentPlan,
+        via: &str,
+    ) -> Result<(Issued, Summary)> {
+        self.batch(|s| {
+            let issue = match &plan.existing {
+                Some(agent) => {
+                    if plan.change_access {
+                        s.set_agent_access(&agent.id, &plan.projects, &plan.roots, plan.wildcards)?;
+                    }
+                    if plan.scopes != agent.scopes {
+                        s.set_agent_scopes(&agent.id, &plan.scopes)?;
+                    }
+                    s.reissue_agent(&agent.id)?
+                }
+                None => s.enrol_agent(
+                    &plan.name,
+                    Some(&plan.scopes),
+                    &plan.projects,
+                    &plan.roots,
+                    plan.wildcards,
+                )?,
+            };
+            let summary = s
+                .list_agents()?
+                .into_iter()
+                .find(|agent| agent.id == issue.id)
+                .ok_or_else(not_found)?;
+            // A folder could have been redirected since the grants were reviewed.
+            if summary.projects != plan.projects || summary.roots != plan.roots {
+                return Err(Error::Conflict(
+                    "Enrollment grants changed; request enrollment again".into(),
+                ));
+            }
+            let action = if plan.reissued() {
+                "reissue_agent"
+            } else {
+                "enrol_agent"
+            };
+            s.audit(
+                action,
+                &format!("{} via {via}", issue.name),
+                crate::model::HUMAN,
+            )?;
+            Ok((issue, summary))
+        })
     }
 
     pub fn enrol_agent(

@@ -1005,3 +1005,203 @@ fn scans_folders_staged_changes_and_history_for_values() {
         "{history}"
     );
 }
+
+#[test]
+fn live_enrollment_requires_review_and_saves_private_tokens() {
+    use std::sync::{mpsc, Arc};
+    use vaultos_daemon::enrollment::Review;
+    use vaultos_daemon::server::run_embedded;
+
+    let env = Env::with_vault();
+    let cfg = Config {
+        data_dir: env.data.clone(),
+        idle_lock: None,
+        wait_for_owner: false,
+        sync_repo: None,
+        confirm: None,
+    };
+    let (ready, handle) = mpsc::channel();
+    let daemon = std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_embedded(cfg, |handle| ready.send(handle).unwrap()))
+    });
+    let handle = handle.recv_timeout(Duration::from_secs(5)).unwrap();
+    let human = Client::with_token(env.data.clone(), None);
+    human
+        .owner("POST", "/unlock", Some(&json!({"password": PW})))
+        .unwrap();
+
+    let ask = |args: &[&str]| {
+        env.run(
+            env!("CARGO_BIN_EXE_vaultos-agent"),
+            args,
+            "",
+            &[("VAULTOS_AGENT_TOKEN_FILE", "ignored-for-enrollment")],
+        )
+    };
+    let no_desktop = ask(&["request-enroll", "codex"]);
+    assert_eq!(no_desktop.code, 1);
+    assert!(no_desktop.stderr.contains("Open and unlock VaultOS.app"));
+    let default_file = env.data.join("agents/codex.token");
+    assert!(!default_file.exists());
+
+    let (reviewed, reviews) = mpsc::channel();
+    handle.set_enrollment_review(
+        Review(Arc::new(move |text, _| {
+            reviewed.send(text.to_owned()).unwrap();
+            Some(true)
+        })),
+        Duration::from_secs(5),
+    );
+    let work = env.path("work");
+    let enrolled = ask(&[
+        "request-enroll",
+        "codex",
+        "--scopes",
+        "read",
+        "--projects",
+        "Example App",
+        "--roots",
+        &work,
+    ]);
+    assert_eq!(enrolled.json()["name"], "codex");
+    assert_eq!(enrolled.json()["reissued"], false);
+    assert!(enrolled.json().get("token").is_none());
+    assert_eq!(mode(&default_file), 0o600);
+    assert_eq!(mode(default_file.parent().unwrap()), 0o700);
+    let first = vaultos_client::read_token_file(&default_file).unwrap();
+    assert!(!enrolled.stdout.contains(first.expose()));
+    assert!(!enrolled.stderr.contains(first.expose()));
+    let review = reviews.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(review.contains("Agent: \"codex\""));
+    assert!(review.contains("Projects: \"Example App\""));
+    assert!(review.contains("Scopes: \"read\""));
+    assert!(review.contains(&work));
+    assert!(review.contains("Process ID: ") && !review.contains("Process ID: unavailable"));
+    #[cfg(target_os = "macos")]
+    assert!(review.contains("vaultos-agent"), "{review}");
+    assert_eq!(
+        env.agent(&["whoami"], "", first.expose()).json()["name"],
+        "codex"
+    );
+
+    // The human CLI asks the same owner instead of prompting for the master password.
+    let custom_file = env.path("tokens/cli.token");
+    let reissue = env.human(
+        &["agents", "enroll", "codex", "--token-file", &custom_file],
+        "",
+    );
+    assert_eq!(reissue.json()["reissued"], true);
+    assert_eq!(reissue.json()["scopes"], json!(["read"]));
+    assert_eq!(mode(Path::new(&custom_file)), 0o600);
+    let second = vaultos_client::read_token_file(Path::new(&custom_file)).unwrap();
+    assert!(!reissue.stdout.contains(second.expose()));
+    assert!(!reissue.stderr.contains(second.expose()));
+    let review = reviews.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(review.contains("old token stops working"));
+    assert!(review.contains("Projects: \"Example App\""));
+    assert!(review.contains(&work));
+    assert_ne!(env.agent(&["whoami"], "", first.expose()).code, 0);
+    assert_eq!(
+        env.agent(&["whoami"], "", second.expose()).json()["name"],
+        "codex"
+    );
+
+    handle.set_enrollment_review(Review(Arc::new(|_, _| Some(false))), Duration::from_secs(5));
+    let denied = env.human(
+        &[
+            "agents",
+            "enroll",
+            "codex",
+            "--token-file",
+            &custom_file,
+            "--any-root",
+        ],
+        "",
+    );
+    assert_eq!(denied.code, 1);
+    assert!(denied.stderr.contains("declined enrollment"));
+    assert_eq!(
+        vaultos_client::read_token_file(Path::new(&custom_file))
+            .unwrap()
+            .expose(),
+        second.expose()
+    );
+    assert_eq!(
+        env.agent(&["whoami"], "", second.expose()).json()["name"],
+        "codex"
+    );
+
+    // An agent credential or a caller-supplied approval cannot authorize enrollment.
+    let agent = Client::with_token(env.data.clone(), Some(second.clone()));
+    let error = agent
+        .request("POST", "/agents/enroll", Some(&json!({"name": "codex"})))
+        .unwrap_err();
+    assert_eq!(error.status, Some(403));
+    let error = human
+        .owner(
+            "POST",
+            "/agents/enroll",
+            Some(&json!({
+                "name": "codex", "approved": true,
+            })),
+        )
+        .unwrap_err();
+    assert_eq!(error.status, Some(400));
+
+    let owner = handle.clone();
+    handle.set_enrollment_review(
+        Review(Arc::new(move |_, _| {
+            owner.with_store(|store| {
+                store.lock();
+                store.unlock(&SecretString::new(PW), None).unwrap();
+            });
+            Some(true)
+        })),
+        Duration::from_secs(5),
+    );
+    let relocked = ask(&["request-enroll", "antigravity"]);
+    assert_eq!(relocked.code, 1);
+    assert!(relocked.stderr.contains("locked during review"));
+    assert!(!env.data.join("agents/antigravity.token").exists());
+
+    let (finish, wait) = mpsc::channel::<()>();
+    let wait = std::sync::Mutex::new(wait);
+    handle.set_enrollment_review(
+        Review(Arc::new(move |_, _| {
+            let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            Some(true)
+        })),
+        Duration::from_millis(100),
+    );
+    let timed_out = ask(&["request-enroll", "antigravity"]);
+    assert_eq!(timed_out.code, 1);
+    assert!(timed_out.stderr.contains("timed out"));
+    assert!(!env.data.join("agents/antigravity.token").exists());
+    let pending = ask(&["request-enroll", "antigravity"]);
+    assert_eq!(pending.code, 1);
+    assert!(pending.stderr.contains("Another request is waiting"));
+    finish.send(()).unwrap();
+    let agents = handle.with_store(|s| s.list_agents()).unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].name, "codex");
+
+    handle.shutdown();
+    daemon.join().unwrap().unwrap();
+    let audit = actions(&env.data, PW);
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|action| *action == "enrol_agent")
+            .count(),
+        1
+    );
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|action| *action == "reissue_agent")
+            .count(),
+        1
+    );
+}

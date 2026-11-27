@@ -1,5 +1,5 @@
-//! `vaultos-agent`: VaultOS for enrolled agents. Every command
-//! is one request to `vaultosd` with this agent's token; values are never printed. `run`
+//! `vaultos-agent`: ask for enrollment, then make requests to `vaultosd` with the
+//! agent token. Values are never printed. `run`
 //! gives an allowed command a project's values and masks them in its output.
 
 use clap::error::ErrorKind;
@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use vaultos_cli::{emit, read_stdin, Fail, Result};
+use vaultos_cli::{emit, enroll_live, read_stdin, Enroll, Fail, Result};
 use vaultos_client::{enc, Client};
 
 const TOKEN_HELP: &str = "Token: VAULTOS_AGENT_TOKEN, VAULTOS_AGENT_TOKEN_FILE (mode 0600), or \
@@ -40,6 +40,8 @@ enum Command {
     Status,
     /// This agent's identity and grants
     Whoami,
+    /// Ask the desktop to approve enrollment and save the token to a private file
+    RequestEnroll(Enroll),
     /// Ask the human for temporary scopes on one project; they confirm in the app
     RequestAccess {
         #[arg(long)]
@@ -131,6 +133,10 @@ fn run(command: Command, client: &Client) -> Result<()> {
     match command {
         Command::Status => emit(&client.status()),
         Command::Whoami => emit(&get("/whoami")?),
+        Command::RequestEnroll(enroll) => {
+            let (request, file) = enroll.prepare(client.data_dir())?;
+            enroll_live(client, &request, &file)
+        }
         Command::RequestAccess {
             project,
             scopes,
@@ -332,7 +338,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(cli.command, &Client::from_env(data_dir)) {
+    let client = if matches!(cli.command, Command::RequestEnroll(_)) {
+        Client::with_token(data_dir, None)
+    } else {
+        Client::from_env(data_dir)
+    };
+    match run(cli.command, &client) {
         Ok(()) => ExitCode::SUCCESS,
         Err(f) => {
             if !f.message.is_empty() {

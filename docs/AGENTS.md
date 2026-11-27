@@ -32,7 +32,7 @@ Use the path where you actually put the app. Neither program needs Node.js, keep
 }
 ```
 
-The bridge and `vaultos-agent` find their token in this order: `VAULTOS_AGENT_TOKEN`; `VAULTOS_AGENT_TOKEN_FILE` (absolute, a regular file owned by you with mode 0600); then, when `VAULTOS_AGENT=NAME` is set, `<data directory>/agents/NAME.token` with the same checks. A token file that exists but is unsafe is an error, not a silent fallback. With none of the three set, they use the token in `agents/` when it holds exactly one. They guess an identity from the process tree only when you ask: `VAULTOS_AGENT=auto` picks the one agent whose name begins with the nearest calling program's name (`claude` for `claude-code-laptop`, `codex` for `codex-laptop`; the name is the program's file name or a folder in its path below your home folder, so `~/.claude/remote/ccd-cli/2.1.3` counts as `claude`) and is an error when that is none or several. Set it once in your shell profile to give every agent's shell its own identity without a wrapper. It only chooses among token files your account can already read.
+The bridge and `vaultos-agent` find their token in this order: `VAULTOS_AGENT_TOKEN`; `VAULTOS_AGENT_TOKEN_FILE` (absolute, a regular file owned by you with mode 0600); then, when `VAULTOS_AGENT=NAME` is set, `<data directory>/agents/NAME.token` with the same checks. A token file that exists but is unsafe is an error, not a silent fallback. With none of the three set, they use the token in `agents/` when it holds exactly one. They guess an identity from the process tree only when you ask: `VAULTOS_AGENT=auto` picks the one agent whose name begins with the nearest calling program's name (`claude` for `claude-code-laptop`, `codex` for `codex-laptop`; the name is the program's file name or a folder in its path below your home folder, so `~/.claude/remote/ccd-cli/2.1.3` counts as `claude`) and reports the detected callers when no agent matches or the matching names when several match. A single unrelated token only serves as a default when no selector is set. Set it once in your shell profile to give every agent's shell its own identity without a wrapper. It only chooses among token files your account can already read.
 
 Client configuration locations vary. Use your client's documented MCP settings. If you selected a custom `VAULTOS_DATA_DIR`, set the same absolute path in the bridge environment. Never point the preview at an existing production vault directory. Tokens are credentials: the environment token override is supported for controlled automation, but a private token file avoids embedding one in client settings.
 
@@ -53,7 +53,7 @@ Client configuration locations vary. Use your client's documented MCP settings. 
 | `run` | Start one of the commands the human allowed with an approved project's values in its environment; the agent gets the masked output, not the values |
 | `reveal` | Return raw secret values and content fingerprints |
 
-Agents cannot enroll, widen scopes or folders, approve their own records, adopt human-owned records, change settings, or undo human history via the API or MCP. Revoke a token in the desktop to stop future API calls. Revocation does not erase files or values already disclosed.
+A human must approve enrollment and permanent grant changes. Agent credentials do not authorize either. Agents cannot approve their own records, adopt human-owned records, change settings, or undo human history via the API or MCP. Revoke a token in the desktop to stop future API calls. Revocation does not erase files or values already disclosed.
 
 `import_env` accepts `createProject: true`. It creates the project only when no project with that name exists, requires the same `add` scope as `create_project`, and validates the source path first. An existing project that is not approved for the agent is still refused.
 
@@ -65,13 +65,39 @@ The `run` scope lets an agent use secrets without receiving them. The human gran
 
 The allowed program does see the values, so choose entries that cannot be steered into printing or sending them: `sh -c`, `node -e` or `python` with any arguments are close to granting `reveal`. Masking catches exact values, not encoded or transformed ones.
 
+### Request enrollment in the running desktop
+
+With VaultOS open and unlocked, run either command:
+
+```sh
+vaultos-agent request-enroll antigravity --scopes read,inject --projects "Example App" --roots /absolute/project
+vaultos agents enroll antigravity --scopes read,inject --projects "Example App" --roots /absolute/project
+```
+
+The desktop shows the requesting executable and process ID when available, the proposed
+agent name, effective scopes, projects, folder roots, and any retained run commands.
+Choose **Allow** to approve, then confirm with Touch ID when available. If VaultOS
+requires Touch ID for human actions and it is unavailable, enroll in Settings →
+Agents with the master password. The request expires after two minutes. Dismiss
+an expired dialog before asking again. Denying it, letting it expire, or locking the vault during
+review prevents issuance. The headless service and standalone `vaultosd` cannot
+approve live requests.
+
+Both commands save the token to `<data directory>/agents/NAME.token` with mode
+0600 and never print it. Use a plain agent name for the default path or pass an
+absolute `--token-file PATH`. Set `VAULTOS_AGENT=NAME` for the default path or
+`VAULTOS_AGENT_TOKEN_FILE=PATH` for a custom path. The request itself needs no
+agent token. Approving an existing name reissues the credential and invalidates the
+previous one. Omitted grant flags retain their existing settings on reissue.
+New enrollments default to `read,inject` with no approved projects or folders.
+
 ### Just-in-time access
 
 An agent that needs more than it was enrolled with can ask instead of failing: `request_access` takes `{project, scopes, minutes?, reason}` (minutes 1 to 60, default 15), or `vaultos-agent request-access --project P --scope reveal --minutes 10 --reason "check the staging key"`. The app asks the human with Touch ID or a dialog that shows the agent, scopes, project, minutes and reason. A grant covers that project only, lives in the owner's memory and ends when it expires, when the vault locks, or when the human chooses End temporary access in Settings → Agents; `whoami` lists it under `grants`. A refused request returns 403, and the same agent must wait a minute before asking again (429). The background service and `vaultosd` cannot ask anyone and return 503. The project may be one that does not exist yet: the dialog says it will be created, and confirming creates it for this grant. A grant never lets an agent create other projects, and allowed run commands still come only from enrollment. Scope and project refusals say how to ask.
 
 ### All-access grants
 
-Project and folder grants are deny-by-default: empty lists mean nothing. A human can instead tick **All projects, including future ones** (`allProjects`) or **Any folder** (`anyRoot`) in Settings → Agents, or pass `--all-projects` / `--any-root` to `vaultos agents grant`. Both default off and no API or MCP call can set them. `allProjects` covers every current and future project within the agent's scopes. `anyRoot` allows reading `.env` files from and injecting into any absolute path the account can write, except the vault data directory (checked after resolving symlinks); the final path component must not be a symlink. Prefer explicit grants.
+Project and folder grants are deny-by-default: empty lists mean nothing. A human can instead tick **All projects, including future ones** (`allProjects`) or **Any folder** (`anyRoot`) in Settings → Agents, or use `--all-projects` / `--any-root` on a CLI enrollment or grant that the human authorizes. Both default off and require human approval. `allProjects` covers every current and future project within the agent's scopes. `anyRoot` allows reading `.env` files from and injecting into any absolute path the account can write, except the vault data directory (checked after resolving symlinks); the final path component must not be a symlink. Prefer explicit grants.
 
 `inject_secrets` supports dotenv, JSON, and shell formats. JSON merge preserves unrelated object keys. Dotenv merge preserves unrelated variables but rewrites formatting/comments. Shell output requires `merge:false` and must be sourced deliberately by the target program. An explicitly empty key list exports no keys; omitted keys requests all permitted, approved records.
 
@@ -90,7 +116,7 @@ vaultos-agent run PROJECT [--keys A,B] -- npm test           # run scope; output
 vaultos-agent request-access --project PROJECT --scope read --reason "why"
 ```
 
-Output is JSON and never contains values. `add` reads the value from stdin only and refuses one passed as an argument. `--replace` turns off merging. Sync is an owner action, so agents cannot request a round. Exit codes: 2 usage, 3 not running, 4 locked, 5 token problem.
+Successful enrollment and other metadata commands return JSON without secret values or tokens. `add` reads the value from stdin only and refuses one passed as an argument. `--replace` turns off merging. Sync is an owner action, so agents cannot request a round. Exit codes: 2 usage, 3 not running, 4 locked, 5 token problem.
 
 ## Human CLI: `vaultos`
 
@@ -123,7 +149,7 @@ vaultos ssh keys                                     # public keys the app's SSH
 
 `read`, `render`, `run` and `scan --update-index` or `--names` open the vault themselves when nothing owns it; while the app owns it they ask it, and the app confirms each request with Touch ID (or the CLI asks for the master password). For a pre-commit hook, put `vaultos scan --staged` in `.git/hooks/pre-commit`: it exits 1 when a staged file contains one of the vault's values and needs no password, only the saved index.
 
-`enroll` writes a fresh token to the file (mode 0600, parent created 0700) and never prints it; enrolling an existing name reissues its token and invalidates the old one. `grant` replaces only the dimensions you name. To use the per-agent default, write the token to `<data directory>/agents/NAME.token` and set `VAULTOS_AGENT=NAME`. `rotate-password` uses the same recoverable rotation as the desktop; with `--password-stdin` the second line is the new password. `vaultos backup` copies `vault.enc`, the audit log and the sync index, never tokens or other credentials. `vaultos inject` uses human authority and replaces its target; agents use `vaultos-agent inject`, which merges. Run `vaultos help COMMAND` for each command's options. Sync commands are in [the sync guide](SYNC.md).
+With a running desktop owner, `agents enroll` uses [desktop approval](#request-enrollment-in-the-running-desktop) unless you pass `--stop-backend`. When no owner is running, the human unlocks the vault at the CLI prompt. `agents list` and the human `projects` command still require the owner lock. `grant` replaces only the dimensions you name. `rotate-password` uses the same recoverable rotation as the desktop; with `--password-stdin` the second line is the new password. `vaultos backup` copies `vault.enc`, the audit log and the sync index, never tokens or other credentials. `vaultos inject` uses human authority and replaces its target; agents use `vaultos-agent inject`, which merges. Run `vaultos help COMMAND` for each command's options. Sync commands are in [the sync guide](SYNC.md).
 
 ### Without the desktop
 

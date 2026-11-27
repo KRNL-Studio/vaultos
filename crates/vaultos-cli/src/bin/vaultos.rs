@@ -11,7 +11,10 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitCode, Stdio};
 use std::time::{Duration, Instant};
-use vaultos_cli::{emit, read_stdin, say, Fail, Result};
+use vaultos_cli::{
+    emit, list, prepare_private_file, read_stdin, say, unsaved_token, write_token, Access, Enroll,
+    Fail, Result,
+};
 use vaultos_client::Client;
 use vaultos_core::agents::Wildcards;
 use vaultos_core::fs_safe::{self, LockFile};
@@ -22,7 +25,7 @@ use vaultos_core::{Error, Fields, KdfParams, SecretKey, SecretString, Store};
 use zeroize::Zeroizing;
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -287,37 +290,12 @@ enum SyncCommand {
     },
 }
 
-#[derive(Debug, clap::Args)]
-struct Access {
-    /// Projects to grant (names or ids, comma-separated or repeated)
-    #[arg(long, value_name = "A,B")]
-    projects: Vec<String>,
-    /// Grant every project, including future ones
-    #[arg(long)]
-    all_projects: bool,
-    /// Folders the agent may read and write files in (absolute)
-    #[arg(long, value_name = "DIR,DIR")]
-    roots: Vec<String>,
-    /// Allow files in any folder
-    #[arg(long)]
-    any_root: bool,
-}
-
 #[derive(Debug, Subcommand)]
 enum AgentsCommand {
     List,
-    /// Enroll an agent (or reissue its token) and write the token to a private file
+    /// Enroll an agent or reissue its token. A running desktop asks for approval.
     #[command(alias = "enrol")]
-    Enroll {
-        name: String,
-        #[arg(long, value_name = "PATH", required = true)]
-        token_file: PathBuf,
-        /// Scopes, comma-separated (default read,inject)
-        #[arg(long, value_name = "A,B")]
-        scopes: Option<String>,
-        #[command(flatten)]
-        access: Access,
-    },
+    Enroll(Enroll),
     /// Change an agent's scopes or grants
     Grant {
         name: String,
@@ -416,50 +394,6 @@ fn prompt(label: &str) -> Result<SecretString> {
     rpassword::prompt_password(label)
         .map(SecretString::new)
         .map_err(|_| Fail::new("cannot read the password from the terminal"))
-}
-
-fn list(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .flat_map(|v| v.split(','))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-/// `admin.js` `prepareTokenFile`: an absolute path whose parent is a writable directory
-/// (created 0700 if missing) and which, if it exists, is a regular file.
-fn prepare_private_file(file: &Path, flag: &str) -> Result<()> {
-    if !file.is_absolute() {
-        return Err(Fail::usage(format!("{flag} must be an absolute path")));
-    }
-    let dir = file
-        .parent()
-        .ok_or_else(|| Fail::usage(format!("{flag} must name a file")))?;
-    if !dir.exists() {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        builder.mode(0o700);
-        builder
-            .create(dir)
-            .map_err(|_| Fail::new("cannot create the file's folder"))?;
-    }
-    if !dir.is_dir() {
-        return Err(Fail::new("The file's parent must be a directory"));
-    }
-    if std::fs::symlink_metadata(file).is_ok_and(|m| !m.is_file()) {
-        return Err(Fail::new("The file path must be a regular file"));
-    }
-    Ok(())
-}
-
-fn write_token(file: &Path, token: &SecretString) -> Result<()> {
-    let mut line = zeroize::Zeroizing::new(token.expose().as_bytes().to_vec());
-    line.push(b'\n');
-    fs_safe::atomic_write(file, &line)?;
-    Ok(())
 }
 
 /// Writes a new Secret Key to a file that must not exist yet, so a key belonging to another
@@ -676,8 +610,17 @@ impl Ctx {
 
     /// Opens the vault with `password`, or the one `passwords` reads.
     fn open_with(&self, password: Option<SecretString>) -> Result<Open> {
-        let mut store = self.store()?;
+        let store = self.store()?;
         let owner = self.own()?;
+        self.unlock_owned(store, owner, password)
+    }
+
+    fn unlock_owned(
+        &self,
+        mut store: Store,
+        owner: LockFile,
+        password: Option<SecretString>,
+    ) -> Result<Open> {
         let password = match password {
             Some(p) => p,
             None => self.passwords(1, false)?.remove(0),
@@ -983,60 +926,15 @@ fn agent(store: &Store, name: &str) -> Result<vaultos_core::agents::Agent> {
 }
 
 fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
-    if let AgentsCommand::Enroll { token_file, .. } = &cmd {
-        prepare_private_file(token_file, "--token-file")?;
-    }
+    let cmd = match cmd {
+        AgentsCommand::Enroll(enroll) => return enroll_agent(ctx, enroll),
+        other => other,
+    };
     let mut open = ctx.open()?;
     let store = &mut open.store;
     match cmd {
         AgentsCommand::List => emit(&store.list_agents()?),
-        AgentsCommand::Enroll {
-            name,
-            token_file,
-            scopes,
-            access,
-        } => {
-            let scopes = scopes.map(|s| list(&[s]));
-            let existing = store
-                .agent_records()?
-                .into_iter()
-                .find(|a| a.name.to_lowercase() == name.trim().to_lowercase());
-            let reissued = existing.is_some();
-            let action = if reissued {
-                "reissue_agent"
-            } else {
-                "enrol_agent"
-            };
-            // The audit entry is written before the save, so no change goes unaudited. The token
-            // file only after it: a token the vault never saved would replace a working one.
-            let issued = store.batch(|s| {
-                let issued = match &existing {
-                    None => {
-                        let (_, projects, roots, wildcards) =
-                            access_change(&access, false, false, None).map_err(to_core)?;
-                        s.enrol_agent(&name, scopes.as_deref(), &projects, &roots, wildcards)?
-                    }
-                    Some(current) => {
-                        let (changed, projects, roots, wildcards) =
-                            access_change(&access, false, false, Some(current)).map_err(to_core)?;
-                        if changed {
-                            s.set_agent_access(&current.id, &projects, &roots, wildcards)?;
-                        }
-                        if let Some(scopes) = &scopes {
-                            s.set_agent_scopes(&current.id, scopes)?;
-                        }
-                        s.reissue_agent(&current.id)?
-                    }
-                };
-                s.audit(action, &format!("{} via {VIA}", issued.name), HUMAN)?;
-                Ok(issued)
-            })?;
-            write_token(&token_file, &issued.token).map_err(unsaved_token)?;
-            let mut out = summary(store, &issued.id)?;
-            out["tokenFile"] = json!(token_file);
-            out["reissued"] = json!(reissued);
-            emit(&out)
-        }
+        AgentsCommand::Enroll(_) => unreachable!(),
         AgentsCommand::Grant {
             name,
             scopes,
@@ -1080,17 +978,27 @@ fn agents(ctx: &Ctx, cmd: AgentsCommand) -> Result<()> {
     }
 }
 
-/// Carries a usage problem found inside a batch out through the core's error type.
-fn to_core(f: Fail) -> Error {
-    Error::Invalid(f.message)
-}
-
-/// A token the vault saved but that could not be written: the old one no longer works.
-fn unsaved_token(f: Fail) -> Fail {
-    Fail::new(format!(
-        "The new token is in effect but could not be written ({}); the previous token no longer works. Run the command again to issue another.",
-        f.message
-    ))
+fn enroll_agent(ctx: &Ctx, enroll: Enroll) -> Result<()> {
+    let client = ctx.owner_client();
+    let (request, file) = enroll.prepare(client.data_dir())?;
+    let store = ctx.store()?;
+    let owner = if ctx.stop_backend {
+        ctx.own()?
+    } else {
+        match fs_safe::claim(client.data_dir(), "owner.lock") {
+            Ok(owner) => owner,
+            Err(Error::Busy) => return vaultos_cli::enroll_live(&client, &request, &file),
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let mut open = ctx.unlock_owned(store, owner, None)?;
+    let plan = open.store.prepare_enrollment(&request)?;
+    let (issued, summary) = open.store.issue_enrollment(&plan, VIA)?;
+    write_token(&file, &issued.token).map_err(unsaved_token)?;
+    let mut out = json!(summary);
+    out["tokenFile"] = json!(file);
+    out["reissued"] = json!(plan.reissued());
+    emit(&out)
 }
 
 fn pending(ctx: &Ctx, cmd: PendingCommand) -> Result<()> {

@@ -8,6 +8,7 @@ use crate::access::{self, Access, Grant};
 use crate::api::{self, Reply, Request, MAX_BODY};
 use crate::autosync::AutoSync;
 use crate::browser;
+use crate::enrollment::{self, Review};
 use crate::human;
 use crate::ssh_agent::{self, SshAgent};
 use bytes::Bytes;
@@ -84,6 +85,7 @@ pub(crate) struct Shared {
     pub(crate) confirming: AtomicBool,
     pub(crate) ssh: SshAgent,
     pub(crate) access: Access,
+    pub(crate) enrollment_review: Mutex<Option<(Review, Duration)>>,
     pub(crate) runtime: tokio::runtime::Handle,
     runs: AtomicUsize,
     /// How the app asks the human to pair a browser extension; without one, it cannot.
@@ -217,6 +219,16 @@ impl Handle {
         self.0.access.set_confirm(confirm);
     }
 
+    /// How the embedded desktop reviews enrollment. Headless owners leave this unset.
+    pub fn set_enrollment_review(&self, review: Review, timeout: Duration) {
+        *self
+            .0
+            .enrollment_review
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) =
+            Some((review, timeout.min(enrollment::REVIEW_TIMEOUT)));
+    }
+
     /// How the app asks the human to pair a browser extension (see [`crate::browser`]).
     /// Without one, pairing is refused.
     pub fn set_browser_confirm(&self, confirm: Option<Confirm>) {
@@ -285,6 +297,7 @@ async fn serve(cfg: Config, signals: bool, ready: impl FnOnce(Handle) + Send) ->
         confirming: AtomicBool::new(false),
         ssh: SshAgent::default(),
         access: Access::default(),
+        enrollment_review: Mutex::new(None),
         runtime: tokio::runtime::Handle::current(),
         runs: AtomicUsize::new(0),
         browser_confirm: Mutex::new(None),
@@ -519,6 +532,12 @@ async fn route(shared: Arc<Shared>, req: hyper::Request<Incoming>, pid: Option<i
             pid,
         )
         .await;
+    }
+    if method == "POST" && target == "/agents/enroll" {
+        if agent_token.is_some() {
+            return Reply::error(403, "Enrollment requests do not accept an agent token");
+        }
+        return enrollment::request(shared, body, pid).await;
     }
     if method == "POST" && target == "/access/request" {
         let Some(token) = agent_token else {

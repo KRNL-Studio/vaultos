@@ -121,6 +121,19 @@ is `vaultosd.log` in the data directory.
    key, then use **Settings → Agents** to enroll this client. Start with `read`
    and `inject`, select the intended project, and approve an existing project
    folder. Empty project/folder grants do not mean unrestricted access.
+   With the desktop open and unlocked, either CLI can ask the human to review
+   enrollment instead:
+
+   ```sh
+   vaultos-agent request-enroll NAME --scopes read,inject --projects "Example App" --roots /absolute/project
+   ```
+
+   `vaultos agents enroll NAME` accepts the same flags. Review the caller and
+   grants in VaultOS, choose Allow, and use Touch ID when prompted. A denial
+   or a two-minute timeout leaves the credential unchanged. On approval the
+   CLI saves it directly to `<data dir>/agents/NAME.token` (0600) or an
+   absolute `--token-file PATH`. Configure the client for that file and
+   skip the manual token save in step 2.
 2. The token appears once. Have the human save it with an editor into a private
    file outside source control, with parent mode `0700` and file mode `0600`.
    Never put it in chat, shell command arguments/history, or client inline JSON.

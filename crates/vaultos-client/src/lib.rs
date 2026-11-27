@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use vaultos_core::agents::Enrollment;
 use vaultos_core::session::Session;
 use vaultos_core::SecretString;
 use zeroize::Zeroizing;
@@ -198,48 +199,67 @@ pub fn discover_token(
             "VAULTOS_AGENT",
         )));
     }
-    let programs = if auto { calling_programs() } else { Vec::new() };
-    if let Some(name) = infer_agent(data_dir, &programs) {
-        return Ok(Some((
-            read_token_file(&agent_token_path(data_dir, &name)?)?,
-            "the agents folder",
-        )));
-    }
-    if auto {
-        return Err(ClientError::new(
-            Code::Token,
-            "VAULTOS_AGENT=auto found no single agent named after the calling program; set VAULTOS_AGENT to the agent's name",
-        ));
-    }
-    Ok(None)
+    let names = agent_names(data_dir);
+    let chosen = if auto {
+        Some(auto_agent(&names, &calling_programs())?)
+    } else {
+        match names.as_slice() {
+            [name] => Some(name.as_str()),
+            _ => None,
+        }
+    };
+    chosen
+        .map(|name| {
+            Ok((
+                read_token_file(&agent_token_path(data_dir, name)?)?,
+                "the agents folder",
+            ))
+        })
+        .transpose()
 }
 
-/// The agent to use when none is named: the only token in `<data dir>/agents`, or, for
-/// `VAULTOS_AGENT=auto`, the one named after the nearest of `programs` (`claude` for
-/// `claude-code-laptop`). This only chooses among token files this user can already read.
-fn infer_agent(data_dir: &Path, programs: &[String]) -> Option<String> {
-    let names: Vec<String> = std::fs::read_dir(data_dir.join("agents"))
-        .ok()?
+fn agent_names(data_dir: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(data_dir.join("agents"))
+        .into_iter()
+        .flatten()
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter_map(|f| f.strip_suffix(".token").map(str::to_owned))
         .filter(|n| agent_name_ok(n))
         .collect();
-    if names.len() == 1 {
-        return names.into_iter().next();
-    }
+    names.sort_unstable();
+    names
+}
+
+/// Choose a unique match for the nearest matching caller.
+fn auto_agent<'a>(names: &'a [String], programs: &[String]) -> Result<&'a str> {
     for program in programs {
-        let mut named = names.iter().filter(|n| {
-            n.to_ascii_lowercase()
-                .strip_prefix(program.as_str())
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.', '_']))
-        });
-        match (named.next(), named.next()) {
-            (Some(n), None) => return Some(n.clone()),
-            (Some(_), Some(_)) => return None,
-            _ => {}
+        let matches: Vec<_> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| {
+                n.to_ascii_lowercase()
+                    .strip_prefix(program.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '.', '_']))
+            })
+            .collect();
+        match matches.as_slice() {
+            [] => {}
+            [name] => return Ok(name),
+            _ => return Err(ClientError::new(Code::Token, format!(
+                "VAULTOS_AGENT=auto found multiple enrolled agents for caller {program}: {}. Set VAULTOS_AGENT to the intended agent's name.",
+                matches.join(", "),
+            ))),
         }
     }
-    None
+    let detected = if programs.is_empty() {
+        "no calling program detected".into()
+    } else {
+        format!("detected callers: {}", programs.join(", "))
+    };
+    let suggested = programs.first().map_or("NAME", String::as_str);
+    Err(ClientError::new(Code::Token, format!(
+        "VAULTOS_AGENT=auto found no matching enrolled agent ({detected}). Run `vaultos-agent request-enroll {suggested}` with the required grants and ask the human to approve in VaultOS, or set VAULTOS_AGENT to an enrolled name."
+    )))
 }
 
 /// The names a program's path offers for matching an agent, file name first: the leading
@@ -455,6 +475,38 @@ impl Client {
         send(&session, method, route, body, None, REQUEST_TIMEOUT)
     }
 
+    /// Ask the desktop to review enrollment without sending any agent credential.
+    /// Take the new token out of the JSON before returning the public summary.
+    pub fn request_enrollment(&self, enrollment: &Enrollment) -> Result<(SecretString, Value)> {
+        let body = serde_json::to_value(enrollment).map_err(|_| {
+            ClientError::new(Code::Usage, "The enrollment request could not be encoded")
+        })?;
+        let mut reply = self.owner("POST", "/agents/enroll", Some(&body)).map_err(|mut error| {
+            match (error.status, error.message.as_str()) {
+                (Some(403), "An enrolled, active agent token is required") => {
+                    error.message = "This VaultOS owner does not support live enrollment. Use Settings → Agents or open a newer VaultOS desktop app.".into();
+                }
+                (Some(423), _) => {
+                    error.message = "Unlock VaultOS.app to approve enrollment.".into();
+                }
+                _ => {}
+            }
+            error
+        })?;
+        if let Some(Value::String(token)) =
+            reply.as_object_mut().and_then(|obj| obj.remove("token"))
+        {
+            let token = Zeroizing::new(token);
+            if token_ok(&token) {
+                return Ok((SecretString::new(token.as_str()), reply));
+            }
+        }
+        Err(ClientError::new(
+            Code::Interrupted,
+            "VaultOS did not return a valid enrollment token",
+        ))
+    }
+
     /// A browser extension's request, relayed by the native messaging host: the session
     /// token with the extension's origin and, once paired, its key.
     pub fn browser(
@@ -575,27 +627,37 @@ mod tests {
     }
 
     #[test]
-    fn infers_the_agent_from_the_agents_folder_and_the_calling_program() {
-        let dir = tempfile::tempdir().unwrap();
-        let agents = dir.path().join("agents");
-        std::fs::create_dir(&agents).unwrap();
-        let programs = |list: &[&str]| list.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
-        assert_eq!(infer_agent(dir.path(), &programs(&["claude"])), None);
-        std::fs::write(agents.join("claude-code-laptop.token"), "x").unwrap();
+    fn auto_distinguishes_mismatches_and_ambiguity_and_reports_the_caller() {
+        let strings = |list: &[&str]| list.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        let antigravity = strings(&["antigravity"]);
+        for names in [vec![], strings(&["claude"]), strings(&["codex", "claude"])] {
+            let error = auto_agent(&names, &antigravity).unwrap_err();
+            assert_eq!(error.code, Code::Token);
+            assert!(error.message.contains("no matching enrolled agent"));
+            assert!(error.message.contains("detected callers: antigravity"));
+            assert!(error
+                .message
+                .contains("vaultos-agent request-enroll antigravity"));
+        }
+        let names = strings(&["claude-code-laptop", "claude", "codex-laptop"]);
         assert_eq!(
-            infer_agent(dir.path(), &[]).as_deref(),
-            Some("claude-code-laptop")
+            auto_agent(&names, &strings(&["zsh", "codex", "claude"])).unwrap(),
+            "codex-laptop",
         );
-        std::fs::write(agents.join("codex-laptop.token"), "x").unwrap();
-        assert_eq!(infer_agent(dir.path(), &[]), None);
-        assert_eq!(
-            infer_agent(dir.path(), &programs(&["zsh", "codex", "claude"])).as_deref(),
-            Some("codex-laptop")
-        );
-        std::fs::write(agents.join("claude.token"), "x").unwrap();
-        assert_eq!(infer_agent(dir.path(), &programs(&["claude"])), None);
-        assert_eq!(infer_agent(dir.path(), &programs(&["claudex"])), None);
+        let error = auto_agent(&names, &strings(&["zsh", "claude", "codex"])).unwrap_err();
+        assert!(error
+            .message
+            .contains("multiple enrolled agents for caller claude"));
+        assert!(error.message.contains("claude-code-laptop"));
+        assert!(error.message.contains("Set VAULTOS_AGENT"));
+        assert!(auto_agent(&names, &[])
+            .unwrap_err()
+            .message
+            .contains("no calling program detected"));
+    }
 
+    #[test]
+    fn extracts_program_names_from_executable_paths() {
         let home = Some("/home/claude-fan");
         assert_eq!(
             program_words("/home/claude-fan/.claude/remote/ccd-cli/2.1.3-3fb3e6", home),

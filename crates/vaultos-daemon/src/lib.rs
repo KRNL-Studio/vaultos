@@ -8,6 +8,7 @@ pub mod access;
 pub mod api;
 pub mod autosync;
 pub mod browser;
+pub mod enrollment;
 pub mod human;
 pub mod server;
 pub mod ssh_agent;

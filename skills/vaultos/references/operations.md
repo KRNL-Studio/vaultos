@@ -60,7 +60,10 @@ the app, with the same token configuration: `status`, `whoami`,
 [--create-project]`, `pending`, `run PROJECT [--keys A,B] [--timeout-seconds N] -- COMMAND` (run scope; the owner runs
 it and prints masked output when it ends) and `request-access --project P --scope S --reason R [--minutes N]`. Output never contains values. Never
 pass a value as an argument. Exit code 3 means not running and 4 means locked;
-report either to the human instead of retrying in a loop.
+report either to the human instead of retrying in a loop. Before it has a token,
+the client can use `request-enroll NAME --scopes S --projects P --roots DIR`
+with the desktop open and unlocked. The human reviews and confirms in VaultOS.
+The CLI saves the token to a private file and reports its path.
 
 ## Injection details
 
